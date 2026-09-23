@@ -12,6 +12,15 @@ console toward XDR — pluggable connectors for non-endpoint telemetry (firewall
 cloud), cross-source entity correlation, and cross-source response, with a bounded,
 retention-light central store._
 
+## macOS agent 0.9.35 — 2026-09-23
+
+### Fixed
+
+**The console page was cacheable.** It carries a per-process CSRF token and the whole UI's
+JavaScript, so a cached copy means a stale token after a restart and stale code after an upgrade —
+both of which look like the console being broken rather than being old. It now sends
+`Cache-Control: no-store, must-revalidate`, which the Linux agent has always done.
+
 ## macOS agent 0.9.34 — 2026-09-23
 
 ### Fixed

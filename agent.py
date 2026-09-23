@@ -87,7 +87,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "0.9.34"
+__version__ = "0.9.35"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -14454,6 +14454,10 @@ def make_handler(cache):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
+                # This page carries a per-process CSRF token and the whole console's JavaScript. A
+                # cached copy means a stale token after a restart and stale code after an upgrade,
+                # both of which look like the console being broken rather than being old.
+                self.send_header("Cache-Control", "no-store, must-revalidate")
                 self.end_headers()
                 self.wfile.write(body)
             elif path == "/api/health":

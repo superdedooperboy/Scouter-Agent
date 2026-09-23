@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1280" viewBox="0 0 1280 1280" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#141a26"/><stop offset="1" stop-color="#0b0e14"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1280" height="1280" fill="url(#bg)"/>
+  <rect x="0" y="320" width="1280" height="6" fill="#ff3b3b"/>
+  <g transform="translate(150 510) scale(9)" filter="url(#glow)">
+    <path d="M21 9 H25 Q26.6 9 26.6 11 V15" stroke="#ff3b3b" stroke-width="1.7" stroke-linecap="round"/>
+    <path d="M5 8 L20 6.4 Q22 6.2 22 8.3 V20 Q22 22.2 20 22.4 L6 23 Q4 23.1 4 21 V9.6 Q4 8.2 5 8 Z"
+          fill="#ff3b3b" fill-opacity="0.15" stroke="#ff3b3b" stroke-width="1.7" stroke-linejoin="round"/>
+    <circle cx="8" cy="11" r="1.7" fill="#ff3b3b"/>
+    <rect x="10.9" y="9.1" width="3.2" height="3.2" rx="0.4" fill="#ff3b3b"/>
+    <polygon points="17,9 18.7,12.1 15.3,12.1" fill="#ff3b3b"/>
+    <polygon points="9.7,14.2 10.62,15.68 10.62,17.52 9.7,19 8.78,17.52 8.78,15.68" fill="#ff3b3b"/>
+    <polygon points="15,14 15.45,15.19 16.71,15.24 15.72,16.03 16.06,17.26 15,16.55 13.94,17.26 14.28,16.03 13.29,15.24 14.55,15.19" fill="#ff3b3b"/>
+  </g>
+  <text x="500" y="598" font-family="Helvetica Neue, Arial, sans-serif" font-size="126" font-weight="800" fill="#e6edf3" letter-spacing="2">SCOUTER</text>
+  <text x="506" y="662" font-family="Helvetica Neue, Arial, sans-serif" font-size="33" font-weight="600" fill="#c9d3df">Detect &#183; Hunt &#183; Investigate &#183; Respond</text>
+  <text x="506" y="704" font-family="Helvetica Neue, Arial, sans-serif" font-size="27" fill="#8b98a9">Fully-fledged EDR &amp; XDR Capabilities,</text>
+  <text x="506" y="740" font-family="Helvetica Neue, Arial, sans-serif" font-size="27" fill="#8b98a9">with Autonomous Response — for <tspan fill="#f0883e">macOS</tspan> &amp; <tspan fill="#4d9fff">Linux</tspan></text>
+  <text x="506" y="776" font-family="Helvetica Neue, Arial, sans-serif" font-size="27" fill="#8b98a9">One Host or a Whole Fleet &#183; <tspan fill="#3fb950">Free &amp; Open Source</tspan></text>
+</svg>

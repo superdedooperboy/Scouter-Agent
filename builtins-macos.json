@@ -1,0 +1,2810 @@
+{
+ "platform": "macOS",
+ "count": 110,
+ "rules": [
+  {
+   "id": "b-revshell",
+   "name": "Reverse shell in command line",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1059.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "contains",
+     "value": "/dev/tcp/"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bbash\\s+-i\\b"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bn(c|cat)\\b[^|]*\\s-e\\b"
+    }
+   ],
+   "description": "Matches classic interactive reverse-shell constructs in a command line \u2014 bash's /dev/tcp pseudo-device, `bash -i`, or netcat with `-e`. These hand an attacker an interactive shell back to their host and essentially never occur in legitimate software, so it's high-confidence."
+  },
+  {
+   "id": "b-curlpipe",
+   "name": "Download piped into a shell",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1059.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(curl|wget)\\b[^|]*\\|\\s*(sudo\\s+)?(ba|z)?sh\\b"
+    }
+   ],
+   "description": "Flags `curl`/`wget` whose output is piped straight into a shell (the \u201ccurl | sh\u201d pattern). It executes remote code with nothing written to disk and is the staple of droppers and one-line installers \u2014 treat unexpected hits as remote code execution."
+  },
+  {
+   "id": "b-b64pipe",
+   "name": "Base64-decoded payload piped to a shell",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1140",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "base64\\s+(-{1,2}[dD]|--decode)\\b[^|]*\\|\\s*(ba|z)?sh\\b"
+    }
+   ],
+   "description": "Detects a base64-decoded blob piped into a shell \u2014 a standard way to smuggle and run an obfuscated payload past plain-text inspection (deobfuscation + execution). Legitimate use is rare."
+  },
+  {
+   "id": "b-osa-cred",
+   "name": "AppleScript credential prompt (phishing)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1056.002",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "icontains",
+     "value": "display dialog"
+    },
+    {
+     "field": "cmdline",
+     "op": "icontains",
+     "value": "password"
+    }
+   ],
+   "description": "AppleScript `display dialog` that asks for a \u201cpassword\u201d is the macOS credential-phishing pattern: malware pops a native-looking prompt to harvest the user's password with no privilege needed. Keys on a dialog whose text mentions a password."
+  },
+  {
+   "id": "b-la-apple-masq",
+   "name": "LaunchAgent masquerading as an Apple system component",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "job",
+   "severity": "high",
+   "mitre": "T1036.005",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "regex",
+     "value": "/Library/Launch(Agents|Daemons)/com\\.apple\\.[^/]*\\.plist$"
+    },
+    {
+     "field": "program",
+     "op": "regex",
+     "value": "^(?!/System/|/usr/libexec/|/usr/sbin/|/usr/bin/)"
+    }
+   ],
+   "depth_override": 3,
+   "description": "A LaunchAgent or LaunchDaemon named like an Apple component but pointing at a program outside the system directories. CrashStealer ships com.apple.crashreporter.helper and AmnesiaStealer masquerades as a crash reporter too; Apple's own agents run Apple's own binaries, so the mismatch is the signal."
+  },
+  {
+   "id": "b-la-updater-masq",
+   "name": "LaunchAgent posing as a software updater runs from Application Support",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "job",
+   "severity": "high",
+   "mitre": "T1543.001",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "regex",
+     "value": "(?i)(keystone|googleupdate|\u8f6f\u4ef6\u66f4\u65b0|update(r|check)?)\\b"
+    },
+    {
+     "field": "program",
+     "op": "icontains",
+     "value": "/Library/Application Support/"
+    }
+   ],
+   "depth_override": 3,
+   "description": "Persistence labelled as a software updater (Keystone, GoogleUpdate) whose program lives in Application Support. SHub Reaper installs com.google.keystone.agent.plist running a bash script from Application Support/Google/GoogleUpdate.app \u2014 real Google Keystone does not."
+  },
+  {
+   "id": "b-la-hidden-support",
+   "name": "Persistence running from a hidden Application Support directory",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "job",
+   "severity": "high",
+   "mitre": "T1564.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "program",
+     "op": "regex",
+     "value": "/(Library|Users/[^/]+/Library)/Application Support/\\.[^/]+/"
+    }
+   ],
+   "depth_override": 3,
+   "description": "Persistence running out of a hidden dot-directory under Application Support, as SHub Reaper does with /Library/Application Support/.com.apple.accountsd/. Hiding the payload directory has no legitimate purpose."
+  },
+  {
+   "id": "b-shub-staging",
+   "name": "Staging directory used by the SHub Reaper stealer",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "file",
+   "severity": "critical",
+   "mitre": "T1074.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "regex",
+     "value": "^/tmp/shub_"
+    }
+   ],
+   "depth_override": 3,
+   "description": "The /tmp/shub_ staging prefix named in SentinelOne's SHub Reaper analysis \u2014 a direct indicator rather than a heuristic."
+  },
+  {
+   "id": "b-clicklock-backdoor",
+   "name": "iCloudsync backdoor path (ClickLock stealer)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "file",
+   "severity": "critical",
+   "mitre": "T1105",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "regex",
+     "value": "/Library/Application Support/iCloudsync/"
+    }
+   ],
+   "depth_override": 3,
+   "description": "ClickLock stores its backdoor at ~/Library/Application Support/iCloudsync/iCloud. Apple ships no product by that name."
+  },
+  {
+   "id": "b-osa-passloop",
+   "name": "Repeated password prompts driven by AppleScript (ClickLock pattern)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "critical",
+   "mitre": "T1056.002",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "icontains",
+     "value": "osascript"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)display dialog[^\\n]*(password|unlock|keychain)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)(repeat|until|while)\\b"
+    }
+   ],
+   "description": "ClickLock kills applications in a loop and re-prompts until the user types their macOS password. An AppleScript password dialog inside a repeat loop is that pattern, and the payoff is a validated login password that unlocks the Keychain offline."
+  },
+  {
+   "id": "b-chrome-safestorage",
+   "name": "Chrome Safe Storage key read from the Keychain",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "critical",
+   "mitre": "T1555.001",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "icontains",
+     "value": "security"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)(find-generic-password|find-internet-password)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)(chrome|brave|edge|arc|opera) safe storage"
+    }
+   ],
+   "description": "Reading a browser's Safe Storage key from the login Keychain is what turns copied cookie and password databases into plaintext. Every current macOS stealer does it."
+  },
+  {
+   "id": "b-tcc-db-read",
+   "name": "TCC database read by a non-Apple process",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1082",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "com\\.apple\\.TCC/TCC\\.db"
+    }
+   ],
+   "description": "Direct reads of TCC.db enumerate which applications already hold Full Disk Access \u2014 reconnaissance for picking a host process, or a check that a bypass worked."
+  },
+  {
+   "id": "b-apfs-snapshot-mount",
+   "name": "APFS local snapshot mounted (TCC bypass for protected files)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1006",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bmount_apfs\\b[^\\n]*(-s|snapshot)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)com\\.apple\\.TimeMachine[^\\n]*local"
+    }
+   ],
+   "description": "Mounting an APFS local snapshot reaches TCC-protected files by a path the policy does not cover; reported against macOS 26 as a working bypass for Keychain and browser data."
+  },
+  {
+   "id": "b-keychain-copy",
+   "name": "Login keychain file copied or archived",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "critical",
+   "mitre": "T1555.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)(cp|ditto|rsync|zip|tar)\\b[^\\n]*login\\.keychain(-db)?\\b"
+    }
+   ],
+   "description": "Copying login.keychain-db wholesale exfiltrates every stored secret, ready for offline cracking once the user's password is captured."
+  },
+  {
+   "id": "b-browser-profile-sweep",
+   "name": "Browser profile databases collected in bulk",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1539",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)(cp|ditto|rsync|zip|tar)\\b[^\\n]*(Cookies|Login Data|Local Storage|leveldb)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)(Chrome|Brave|Arc|Edge|Firefox|Opera)"
+    }
+   ],
+   "description": "Bulk collection of Cookies, Login Data and Local Storage across browser profiles \u2014 the collection stage of every 2026 macOS stealer, whatever the family."
+  },
+  {
+   "id": "b-keychain-dump",
+   "name": "Keychain dumped via security CLI",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1555.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "contains",
+     "value": "dump-keychain"
+    }
+   ],
+   "description": "`security dump-keychain` exports stored secrets (passwords, keys, certificates) from the keychain \u2014 a direct credential-theft action with essentially no legitimate interactive use."
+  },
+  {
+   "id": "b-keychain-find",
+   "name": "Keychain password queried via security CLI",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1555.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "security\\b[^\\n]*find-(generic|internet)-password"
+    }
+   ],
+   "description": "`security find-generic-password`/`find-internet-password` reads individual secrets out of the keychain. Some legitimate CLIs do this, so it's medium \u2014 confirm the requesting process."
+  },
+  {
+   "id": "b-lazagne",
+   "name": "LaZagne credential-harvesting tool",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1555",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "icontains",
+     "value": "lazagne"
+    },
+    {
+     "field": "cmdline",
+     "op": "icontains",
+     "value": "lazagne"
+    }
+   ],
+   "description": "LaZagne is a well-known open-source credential harvester that scrapes passwords from browsers, the keychain and apps. Its presence on an endpoint is almost always malicious."
+  },
+  {
+   "id": "b-cloud-creds",
+   "name": "Cloud credential file access",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1552.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "contains",
+     "value": ".aws/credentials"
+    },
+    {
+     "field": "cmdline",
+     "op": "contains",
+     "value": ".config/gcloud"
+    },
+    {
+     "field": "cmdline",
+     "op": "contains",
+     "value": ".oci/"
+    },
+    {
+     "field": "cmdline",
+     "op": "contains",
+     "value": ".azure/"
+    }
+   ],
+   "description": "A command line explicitly referencing cloud-credential files (~/.aws/credentials, gcloud, Azure, OCI) indicates someone is reading long-lived cloud keys \u2014 a common pivot into cloud infrastructure. Keys on the credential path appearing in the command (e.g. cat/cp/grep)."
+  },
+  {
+   "id": "b-ssh-keys",
+   "name": "SSH private-key access",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1552.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(cat|cp|scp|rsync|tar|gpg|base64|grep|find|less|more)\\b[^|]*\\bid_(rsa|dsa|ecdsa|ed25519)\\b"
+    }
+   ],
+   "description": "Reading or copying a private SSH key (id_rsa/id_ed25519/\u2026) via cat/cp/scp/tar/etc. is a precursor to lateral movement. Matches a file-handling command that references a private-key filename."
+  },
+  {
+   "id": "b-cookies",
+   "name": "Browser cookie theft",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1539",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "contains",
+     "value": "Cookies.binarycookies"
+    },
+    {
+     "field": "cmdline",
+     "op": "contains",
+     "value": "--remote-debugging-port"
+    }
+   ],
+   "description": "Accessing Safari's Cookies.binarycookies or launching Chrome with `--remote-debugging-port` targets live session cookies \u2014 used for session hijacking and MFA-bypass."
+  },
+  {
+   "id": "b-sip-off",
+   "name": "System Integrity Protection disabled",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1562.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "contains",
+     "value": "csrutil disable"
+    }
+   ],
+   "description": "`csrutil disable` turns off System Integrity Protection, the core macOS kernel/file protection. It's only settable from Recovery and is a hallmark of deep system tampering \u2014 high confidence."
+  },
+  {
+   "id": "b-gatekeeper-off",
+   "name": "Gatekeeper disabled",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1562.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "contains",
+     "value": "--master-disable"
+    }
+   ],
+   "description": "`spctl --master-disable` turns Gatekeeper off so unsigned / unnotarized code runs without prompting \u2014 a deliberate weakening of macOS code-trust controls."
+  },
+  {
+   "id": "b-fw-off",
+   "name": "Application firewall disabled",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1562.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "socketfilterfw\\b[^\\n]*--setglobalstate\\s+off"
+    }
+   ],
+   "description": "Turning the Application Firewall off via socketfilterfw removes inbound connection filtering. Less abnormal than SIP/Gatekeeper (the firewall is off by default on macOS), hence medium."
+  },
+  {
+   "id": "b-edr-tamper",
+   "name": "Security tool tampering (unload / kill EDR)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1562.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(launchctl\\s+(unload|bootout|remove|disable)|kextunload|killall|pkill|kill)\\b[^\\n]*(crowdstrike|falcon|csagent|carbonblack|cbdaemon|little\\s?snitch|littlesnitch|sentinel|wdav|mdatp|defender|umbrella|opendns|sophos|esets|santad?)"
+    }
+   ],
+   "description": "Unloading or killing a known security agent (CrowdStrike/Falcon, LittleSnitch, Defender/MDATP, SentinelOne, Sophos, Santa, OpenDNS\u2026) via launchctl/kextunload/pkill is defense evasion aimed at blinding monitoring \u2014 high confidence."
+  },
+  {
+   "id": "b-rootca",
+   "name": "Root CA certificate installed",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1553.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "security\\b[^\\n]*add-trusted-cert"
+    }
+   ],
+   "description": "`security add-trusted-cert` installs a new trusted root certificate, letting an adversary transparently intercept TLS (adversary-in-the-middle) or trust malicious code. Legitimate installs are rare and normally done by MDM."
+  },
+  {
+   "id": "b-tmutil-off",
+   "name": "Time Machine backups disabled",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1490",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "tmutil\\s+(disable|disablelocal|deletelocalsnapshots)"
+    }
+   ],
+   "description": "Disabling Time Machine or deleting local snapshots removes the user's ability to recover files \u2014 a common precursor to ransomware or destructive attacks (inhibit system recovery)."
+  },
+  {
+   "id": "b-quarantine-strip",
+   "name": "Gatekeeper quarantine attribute removed",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1553.005",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "xattr\\b[^\\n]*com\\.apple\\.quarantine"
+    }
+   ],
+   "description": "Removing the com.apple.quarantine extended attribute clears the mark-of-the-web so a downloaded file executes without a Gatekeeper prompt \u2014 a manual Gatekeeper bypass."
+  },
+  {
+   "id": "b-log-erase",
+   "name": "Unified logs cleared",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1070",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\blog\\s+erase\\b"
+    }
+   ],
+   "description": "`log erase` wipes the macOS unified logs, destroying forensic evidence (anti-forensics / defense evasion)."
+  },
+  {
+   "id": "b-hist-off",
+   "name": "Shell history logging disabled",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1070.003",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "unset\\s+HISTFILE|HISTFILE=/dev/null|HISTSIZE=0|set\\s+\\+o\\s+history|HISTCONTROL=ignore"
+    }
+   ],
+   "description": "Disabling shell-history logging (unset HISTFILE, HISTSIZE=0, set +o history) is an anti-forensics step so the attacker's typed commands aren't recorded."
+  },
+  {
+   "id": "b-screencap",
+   "name": "Silent screen capture",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1113",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "icontains",
+     "value": "screencapture"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\s-x\\b"
+    }
+   ],
+   "description": "`screencapture -x` takes a screenshot silently (no shutter sound or UI). The silent flag is the scripted/surveillance pattern \u2014 interactive user screenshots don't use it."
+  },
+  {
+   "id": "b-openssl-enc",
+   "name": "File encryption via openssl (staging / ransomware)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1486",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "openssl\\s+enc\\b[^\\n]*\\s-e\\b"
+    }
+   ],
+   "description": "`openssl enc -e` encrypts files from the command line \u2014 used to stage/exfiltrate data and, when run broadly across a directory, as poor-man's ransomware. Review what is being encrypted."
+  },
+  {
+   "id": "b-tunnel",
+   "name": "Tunneling / reverse-proxy tool",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1572",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "cloudflared"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "ngrok"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "devtunnel"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "cloudflared\\b[^\\n]*tunnel"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bngrok\\b"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bcode\\b[^\\n]*\\btunnel\\b"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bssh\\b[^\\n]*\\s-R\\s"
+    }
+   ],
+   "description": "cloudflared / ngrok / dev-tunnels and reverse SSH (`ssh -R`) expose the host or proxy C2 traffic out through an allowed service, bypassing inbound firewall rules \u2014 a common tunneling / C2 setup."
+  },
+  {
+   "id": "b-tor",
+   "name": "Tor anonymizing proxy",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1090.003",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "tor"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "--SocksPort\\b"
+    }
+   ],
+   "description": "Running Tor (or a process opening a SocksPort) anonymizes outbound traffic, frequently to hide C2 or exfiltration destinations."
+  },
+  {
+   "id": "b-vpn-provider",
+   "name": "Peer in a consumer privacy-VPN network",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "remote",
+   "severity": "medium",
+   "mitre": "T1090",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "mullvad"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "protonvpn"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "nordvpn"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "tefincom"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "expressvpn"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "private internet access"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "windscribe"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "surfshark"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "cyberghost"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "vyprvpn"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "torguard"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "ipvanish"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "purevpn"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "azirevpn"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "perfect privacy"
+    }
+   ],
+   "description": "A connection whose remote peer (by offline ASN/org enrichment) belongs to a consumer privacy/anonymity VPN provider (Mullvad, Proton, NordVPN, ExpressVPN, \u2026). Attackers use such networks to mask the true source or destination of remote access, C2 and exfiltration; legitimate privacy use also occurs, so triage in context. Keys on the PEER ASN, so it catches the connection in either direction (inbound from, or outbound to, the provider). Requires Geo/ASN enrichment to be enabled."
+  },
+  {
+   "id": "b-vpn-hosting",
+   "name": "Peer in VPN / proxy-exit hosting infrastructure",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "remote",
+   "severity": "low",
+   "mitre": "T1090",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "m247"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "datacamp"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "cdn77"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "clouvider"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "frantech"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "buyvm"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "flokinet"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "packethub"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "tzulo"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "quintex"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "terrahost"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "hostkey"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "choopa"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "the constant company"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "vultr"
+    },
+    {
+     "field": "geo.as_name",
+     "op": "icontains",
+     "value": "1337 services"
+    }
+   ],
+   "description": "A connection whose remote peer belongs to hosting/ASN infrastructure predominantly used to run VPN / proxy exit nodes and anonymization services (M247, DataCamp, Clouvider, Choopa/Vultr, \u2026). Lower severity because these datacenters also host plenty of legitimate services \u2014 surfaced for awareness rather than as a strong signal. Tor exit nodes vary by ASN and are best caught by enabling the Tor exit-list IOC feed (Threat Intel Feeds). Requires Geo/ASN enrichment."
+  },
+  {
+   "id": "b-vpn-inbound",
+   "name": "Inbound connection from anonymization / VPN infrastructure",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "remote",
+   "severity": "high",
+   "mitre": "T1133",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "direction",
+     "op": "eq",
+     "value": "inbound"
+    },
+    {
+     "match": "any",
+     "conditions": [
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "mullvad"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "protonvpn"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "nordvpn"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "tefincom"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "expressvpn"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "private internet access"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "windscribe"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "surfshark"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "cyberghost"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "vyprvpn"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "torguard"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "ipvanish"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "purevpn"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "azirevpn"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "perfect privacy"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "m247"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "datacamp"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "cdn77"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "clouvider"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "frantech"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "buyvm"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "flokinet"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "packethub"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "tzulo"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "quintex"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "terrahost"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "hostkey"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "choopa"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "the constant company"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "vultr"
+      },
+      {
+       "field": "geo.as_name",
+       "op": "icontains",
+       "value": "1337 services"
+      }
+     ]
+    }
+   ],
+   "description": "An INBOUND connection (a remote peer dialed in to a local listening port) whose source belongs to a privacy-VPN or anonymization-hosting network. Something on this Mac is accepting connections FROM anonymized infrastructure \u2014 a strong remote-access / pivot / backdoor signal, since legitimate inbound traffic rarely originates from VPN/hosting exit nodes. Higher severity than the direction-agnostic peer rules because inbound-from-anon is far more likely to be adversarial. Requires Geo/ASN enrichment; only public peers are classified."
+  },
+  {
+   "id": "b-rclone",
+   "name": "rclone (cloud exfiltration tool)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1567.002",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "rclone"
+    }
+   ],
+   "description": "rclone syncs data to dozens of cloud providers and is frequently abused for bulk exfiltration to attacker-controlled storage."
+  },
+  {
+   "id": "b-mitm",
+   "name": "Adversary-in-the-middle proxy (mitmproxy)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1557",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "mitmproxy"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "mitmdump"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "mitmweb"
+    }
+   ],
+   "description": "mitmproxy / mitmdump / mitmweb intercept and modify traffic (adversary-in-the-middle), used to capture credentials and tokens or inject content."
+  },
+  {
+   "id": "b-badport",
+   "name": "Listener on a known-backdoor port",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "listen",
+   "severity": "medium",
+   "mitre": "T1571",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "lport",
+     "op": "in",
+     "value": "4444,5555,6666,1337,31337,12345"
+    }
+   ],
+   "description": "A process listening on a port strongly associated with backdoors / C2 frameworks (4444 = Metasploit default, 1337/31337, 12345, \u2026) suggests an implant awaiting inbound connections."
+  },
+  {
+   "id": "b-nmap",
+   "name": "Network port scanner (nmap)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1046",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "nmap"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bnmap\\b"
+    }
+   ],
+   "description": "nmap performs active network/port scanning \u2014 internal reconnaissance to map reachable services, unusual on an endpoint outside admin or security work."
+  },
+  {
+   "id": "b-sniff",
+   "name": "Network packet sniffing",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1040",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "tcpdump"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "tshark"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "/dev/bpf"
+    }
+   ],
+   "description": "tcpdump / tshark or raw /dev/bpf access captures network traffic, used to harvest credentials or map the network."
+  },
+  {
+   "id": "b-secsw-disco",
+   "name": "Security-software discovery",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1518.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)\\b(ps|pgrep|grep|mdfind|find|ls|cat)\\b[^\\n]*(crowdstrike|falcon|csagent|carbonblack|cbdaemon|little\\s?snitch|littlesnitch|sentinel|sophos|eset|defender|mdatp|wdav|santa|jamf|kolide|nessus|osquery)"
+    }
+   ],
+   "description": "Listing processes filtered for security products (CrowdStrike, Defender, LittleSnitch, Santa\u2026) is reconnaissance to identify what monitoring is present before evading it. Low severity \u2014 often benign admin activity."
+  },
+  {
+   "id": "b-vm-disco",
+   "name": "Virtualization / sandbox detection",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1497.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)(ioreg|system_profiler|sysctl)\\b[^\\n]*(VirtualBox|VMware|Parallels|QEMU|hypervisor)"
+    }
+   ],
+   "description": "Querying ioreg/system_profiler/sysctl for hypervisor or VM-vendor strings is sandbox evasion \u2014 malware checking whether it's under analysis before detonating."
+  },
+  {
+   "id": "b-root-enable",
+   "name": "Root account enabled",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1078.003",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bdsenableroot\\b"
+    }
+   ],
+   "description": "`dsenableroot` activates the normally-disabled root account, granting persistent superuser access (privilege escalation / persistence)."
+  },
+  {
+   "id": "b-admin-add",
+   "name": "User added to admin group",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1078.003",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "dseditgroup\\b[^\\n]*\\sadmin\\b"
+    }
+   ],
+   "description": "Adding an account to the admin group via dseditgroup grants administrative rights \u2014 privilege escalation or backdoor-account setup."
+  },
+  {
+   "id": "b-user-create",
+   "name": "Local user created (dscl / sysadminctl)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1136.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "dscl\\s+\\.\\s+-create\\s+/Users"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "sysadminctl\\b[^\\n]*-addUser"
+    }
+   ],
+   "description": "Creating a local account via dscl/sysadminctl can establish a persistent backdoor login. Complements the account-baseline collector, which independently flags the resulting account."
+  },
+  {
+   "id": "b-user-delete",
+   "name": "Local user deleted (account access removal)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1531",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "dscl\\s+\\.\\s+-delete\\s+/Users"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "sysadminctl\\b[^\\n]*-deleteUser"
+    }
+   ],
+   "description": "Deleting a local account (dscl -delete / sysadminctl -deleteUser) can be account-access removal \u2014 locking out a legitimate user or covering tracks."
+  },
+  {
+   "id": "b-ard-enable",
+   "name": "Apple Remote Desktop / screen sharing enabled",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1021.005",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "kickstart\\b[^\\n]*-activate"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "launchctl\\b[^\\n]*com\\.apple\\.screensharing"
+    }
+   ],
+   "description": "Enabling Apple Remote Desktop / Screen Sharing (kickstart -activate, loading com.apple.screensharing) opens interactive remote access \u2014 valuable to an attacker for hands-on control."
+  },
+  {
+   "id": "b-guest-enable",
+   "name": "Guest account enabled",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1078.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "sysadminctl\\b[^\\n]*-guestAccount\\s+on\\b"
+    }
+   ],
+   "description": "`sysadminctl -guestAccount on` re-enables the macOS Guest account, giving an unauthenticated local login path \u2014 a low-friction way to (re)gain access or hide activity under a throwaway identity."
+  },
+  {
+   "id": "b-rc-common",
+   "name": "Persistence via /etc/rc.common",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1037.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(>>?|\\btee\\b)[^\\n]*/etc/rc\\.common\\b"
+    }
+   ],
+   "description": "Appending to /etc/rc.common makes a command run at every boot. rc.common is a legacy startup hook almost nothing modifies today, so a write to it is a strong persistence signal."
+  },
+  {
+   "id": "b-startupitems",
+   "name": "Legacy StartupItems persistence",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1037.005",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(cp|mv|touch|tee|install|ln)\\b[^\\n]*/Library/StartupItems/"
+    }
+   ],
+   "description": "Dropping files into /Library/StartupItems/ uses the deprecated StartupItems mechanism to run a script/plist at boot. The directory is effectively unused on modern macOS, so a write is suspicious persistence."
+  },
+  {
+   "id": "b-shellrc-persist",
+   "name": "Persistence via shell init file",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1546.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(>>|\\btee\\b)[^\\n]*/?\\.(bash_profile|bashrc|bash_login|zshrc|zshenv|zprofile|profile)(['\\\"\\s]|$)"
+    }
+   ],
+   "description": "Redirecting or `tee`-ing into a shell init file (~/.bashrc, ~/.zshrc, ~/.bash_profile, ~/.zshenv, \u2026) plants a command that runs on every new shell \u2014 a classic user-level persistence trick. Keys on a write (>>/tee) into an rc file, not merely reading it."
+  },
+  {
+   "id": "b-trap-persist",
+   "name": "Bash trap handler (persistence / command logging)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1546.005",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\btrap\\b[^\\n]*\\b(EXIT|DEBUG|SIGINT|ERR)\\b"
+    }
+   ],
+   "description": "A bash `trap` on EXIT/SIGINT re-launches a payload whenever the shell ends (persistence), and a `trap ... DEBUG` fires before every command \u2014 a lightweight keylogger/command-logger. Legitimate scripts use traps too, so it's medium; review what the handler runs."
+  },
+  {
+   "id": "b-emond",
+   "name": "Persistence via emond event monitor",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1546.014",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "/etc/emond\\.d/|/private/var/db/emondClients"
+    }
+   ],
+   "description": "Writing to /etc/emond.d/rules or /private/var/db/emondClients installs an Event Monitor (emond) rule that executes on system events. emond is obscure and largely unused, making this a high-confidence persistence indicator."
+  },
+  {
+   "id": "b-python-hook",
+   "name": "Python startup-hook persistence",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1546.018",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\.pth\\b[^\\n]*(site-packages|site\\.getusersitepackages)|(site-packages|getusersitepackages)[^\\n]*\\.pth\\b"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(user|site)customize\\.py\\b"
+    }
+   ],
+   "description": "A `.pth` file in site-packages or a user/sitecustomize.py runs arbitrary Python every time the interpreter starts \u2014 stealthy persistence that hides inside the Python runtime rather than launchd/cron."
+  },
+  {
+   "id": "b-loginhook",
+   "name": "loginwindow LoginHook / re-opened-apps persistence",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1547.007",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "defaults\\s+write\\b[^\\n]*com\\.apple\\.loginwindow[^\\n]*(LoginHook|LogoutHook)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "/ByHost/com\\.apple\\.loginwindow(\\.|['\\\"\\s])"
+    }
+   ],
+   "description": "`defaults write com.apple.loginwindow LoginHook/LogoutHook`, or planting a ByHost/com.apple.loginwindow.plist, runs a script at login/logout (or via the re-opened-applications mechanism) \u2014 GUI-session persistence."
+  },
+  {
+   "id": "b-launchctl-submit",
+   "name": "Service launched via launchctl submit",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1569.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\blaunchctl\\s+submit\\b"
+    }
+   ],
+   "description": "`launchctl submit` registers and starts an ad-hoc launchd job straight from the command line without writing a plist to a watched directory \u2014 a way to run/persist a service while side-stepping the LaunchAgents/LaunchDaemons file collectors."
+  },
+  {
+   "id": "b-dyld-inject",
+   "name": "Dylib injection via DYLD_INSERT_LIBRARIES",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1574.006",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bDYLD_INSERT_LIBRARIES\\s*="
+    }
+   ],
+   "description": "`DYLD_INSERT_LIBRARIES=` forces a chosen dylib to load into another process at launch \u2014 code injection used to hijack execution, hook APIs, or steal data from the target. High confidence outside of deliberate debugging."
+  },
+  {
+   "id": "b-compile-drop",
+   "name": "Compile-after-delivery from a temp/staging path",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1027.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(gcc|clang|cc|g\\+\\+|clang\\+\\+)\\b[^\\n]*(-o\\s+)?(/tmp/|/var/tmp/|/private/tmp/|/Users/Shared/)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bgo\\s+run\\b[^\\n]*(/tmp/|/var/tmp/|/private/tmp/|/Users/Shared/)"
+    }
+   ],
+   "description": "Invoking a compiler (gcc/clang/go run) against sources in /tmp, /var/tmp or /Users/Shared is the compile-after-delivery pattern: ship source to dodge binary AV/notarization, then build and run it on the host. Low severity \u2014 developers also build in temp dirs \u2014 so corroborate with context."
+  },
+  {
+   "id": "b-upx",
+   "name": "UPX-packed binary",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1027.002",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "upx"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bupx\\b\\s+(-|--)"
+    }
+   ],
+   "description": "UPX packs an executable to shrink and obfuscate it, defeating simple signature/string scanning. Presence of UPX (or a upx-compressed binary) around other suspicious activity suggests payload obfuscation."
+  },
+  {
+   "id": "b-setuid",
+   "name": "SetUID/SetGID bit set on a file",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1548.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bchmod\\b[^\\n]*\\b([ug]\\+[rwx]*s|[42][0-7]{3})\\b"
+    }
+   ],
+   "description": "`chmod u+s`/`g+s` (or a 4xxx/2xxx numeric mode) sets the SetUID/SetGID bit so a binary runs with its owner's/group's privileges \u2014 a common privilege-escalation and persistence primitive when the owner is root."
+  },
+  {
+   "id": "b-kext-disco",
+   "name": "Kernel-extension / driver discovery",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1652",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "kextstat"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "kextfind"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bkext(stat|find)\\b|\\bkmutil\\s+showloaded\\b"
+    }
+   ],
+   "description": "kextstat / kextfind / `kmutil showloaded` enumerate loaded kernel extensions \u2014 reconnaissance to spot security kexts or driver-based defenses before tampering. Low severity; also normal admin activity."
+  },
+  {
+   "id": "b-bookmark-disco",
+   "name": "Browser bookmark discovery",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1217",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(find|cat|grep|ls|strings)\\b[^\\n]*(places\\.sqlite|/Bookmarks\\b|Bookmarks\\.plist)"
+    }
+   ],
+   "description": "Searching for browser bookmark stores (places.sqlite, Chrome Bookmarks, Safari Bookmarks.plist) profiles the user's interests and internal URLs \u2014 light discovery/collection."
+  },
+  {
+   "id": "b-pwpolicy-disco",
+   "name": "Password-policy discovery",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1201",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bpwpolicy\\b[^\\n]*getaccountpolicies"
+    }
+   ],
+   "description": "`pwpolicy getaccountpolicies` reads the local password policy (length, complexity, lockout) \u2014 reconnaissance that informs brute-force or credential attacks."
+  },
+  {
+   "id": "b-account-disco",
+   "name": "Local account / group enumeration",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1087.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bdscl\\s+\\.\\s+-?list\\s+/(Users|Groups)\\b"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bdscacheutil\\s+-q\\s+(user|group)\\b"
+    }
+   ],
+   "description": "`dscl . -list /Users`/`/Groups` and `dscacheutil -q` enumerate local accounts and groups \u2014 standard host discovery to map who exists and what privileges to target. Low severity."
+  },
+  {
+   "id": "b-geo-disco",
+   "name": "Host geolocation via IP-lookup service",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1614",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)\\b(curl|wget)\\b[^\\n]*(ipinfo\\.io|ifconfig\\.me|ip-api\\.com|ipapi\\.co|icanhazip\\.com|ident\\.me|checkip\\.\\w|wtfismyip|myexternalip|api\\.myip)"
+    }
+   ],
+   "description": "Curling an IP-geolocation service (ipinfo.io, ifconfig.me, ip-api.com, icanhazip.com, \u2026) tells malware its public IP and physical location \u2014 used for geofencing, target selection, or sandbox evasion."
+  },
+  {
+   "id": "b-proxy-config",
+   "name": "System web/SOCKS proxy configured",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1090.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "networksetup\\s+-set(web|secureweb|socksfirewall)proxy\\b"
+    }
+   ],
+   "description": "`networksetup -setwebproxy/-setsecurewebproxy/-setsocksfirewallproxy` points the host's traffic through a proxy \u2014 an attacker can route victim traffic through infrastructure they control for interception or C2."
+  },
+  {
+   "id": "b-archive-enc",
+   "name": "Collected data archived + encrypted (staging)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1560.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bzip\\b[^\\n]*(--password|\\s-P\\s|\\s-e\\b)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bgpg\\b[^\\n]*(--symmetric|\\s-c\\b)[^\\n]*(tar|zip|\\.gz|\\.tar)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\btar\\b[^\\n]*\\|[^\\n]*\\b(openssl|gpg)\\b"
+    }
+   ],
+   "description": "Bundling data into a password-protected zip, gpg-symmetric archive, or tar piped through openssl/gpg is the archive-and-encrypt staging step before exfiltration \u2014 the encryption both compresses and hides the collected data from inspection."
+  },
+  {
+   "id": "b-browser-creds",
+   "name": "Browser saved-credential store access",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1555.003",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)(Chrome|Chromium|Edge|Brave)[^\\n]*Login Data|logins\\.json|key4\\.db|signons\\.sqlite"
+    }
+   ],
+   "description": "Reading a browser's saved-credential store (Chrome/Edge/Brave 'Login Data', Firefox logins.json/key4.db/signons.sqlite) is direct credential theft from password stores."
+  },
+  {
+   "id": "b-notes-db",
+   "name": "Apple Notes database access",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1005",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "group\\.com\\.apple\\.notes|NoteStore\\.sqlite"
+    }
+   ],
+   "description": "Accessing the Apple Notes database (group.com.apple.notes, NoteStore.sqlite) pulls potentially sensitive personal/business notes \u2014 data collection from a local application store."
+  },
+  {
+   "id": "b-mailbox",
+   "name": "Local mailbox data copied / manipulated",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1070.008",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(cp|rsync|tar|mv|zip|ditto)\\b[^\\n]*/Library/Mail\\b"
+    }
+   ],
+   "description": "Copying or manipulating ~/Library/Mail (cp/rsync/tar/ditto) targets locally-stored email for collection or tampering \u2014 mailbox data theft/manipulation without touching the mail server."
+  },
+  {
+   "id": "b-clipboard-exec",
+   "name": "Command executed straight from the clipboard",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1115",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\$\\(\\s*pbpaste\\s*\\)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bpbpaste\\b[^\\n]*\\|\\s*(ba|z)?sh\\b"
+    }
+   ],
+   "description": "Executing the clipboard's contents (`$(pbpaste)` or `pbpaste | sh`) runs whatever text the user copied \u2014 the mechanism behind ClipboardEvent/paste-and-run attacks and clipboard-based collection."
+  },
+  {
+   "id": "b-split-exfil",
+   "name": "File split into size-limited chunks (exfil prep)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1030",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bsplit\\b\\s+-b\\b"
+    }
+   ],
+   "description": "`split -b` chops a file into fixed-size chunks \u2014 used to stay under size limits/DLP thresholds when exfiltrating, or to reassemble later. Low severity on its own; strong when paired with an upload."
+  },
+  {
+   "id": "b-dns-exfil",
+   "name": "DNS-tunnelled exfiltration",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1048.003",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)\\b(dig|nslookup|host)\\b[^\\n]*base64"
+    }
+   ],
+   "description": "A dig/nslookup/host query whose label contains base64-encoded data is DNS tunnelling \u2014 smuggling data out inside DNS lookups to bypass egress controls that allow DNS."
+  },
+  {
+   "id": "b-ssh-exfil",
+   "name": "Data piped out over SSH (alternative-protocol exfil)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1048",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\btar\\b[^\\n]*\\|[^\\n]*\\bssh\\b"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bssh\\b[^\\n]*\\btar\\s+-?[zc]"
+    }
+   ],
+   "description": "Piping a tar archive over ssh (`tar \u2026 | ssh` or `ssh host \"tar cz \u2026\"`) copies bulk data to a remote host over an encrypted alternative protocol \u2014 exfiltration that blends with legitimate SSH."
+  },
+  {
+   "id": "b-webhook-exfil",
+   "name": "Exfiltration to a chat/webhook endpoint",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1567.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)\\b(curl|wget)\\b[^\\n]*(discord(app)?\\.com/api/webhooks|hooks\\.slack\\.com|api\\.telegram\\.org/bot|webhook\\.site)"
+    }
+   ],
+   "description": "POSTing data to a Discord/Slack/Telegram webhook (or webhook.site) exfiltrates over a trusted, TLS-protected web service that egress filters rarely block."
+  },
+  {
+   "id": "b-timestomp",
+   "name": "Timestomping (file timestamp manipulation)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1070.006",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\btouch\\b[^\\n]*\\s-[amc]*t\\s+\\d"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\btouch\\b[^\\n]*\\s-[a-z]*r\\s"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bSetFile\\b[^\\n]*\\s-[dm]\\s"
+    }
+   ],
+   "description": "`touch -t`/`touch -r`/`SetFile -m` rewrites a file's timestamps to blend a dropped file in with its surroundings \u2014 anti-forensics that defeats timeline analysis. Low severity (build tooling also touches timestamps); weigh alongside the file involved."
+  },
+  {
+   "id": "b-log-clear",
+   "name": "System log files deleted / truncated",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1685.006",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(srm|shred)\\b[^\\n]*(/var/log|/var/audit|\\.log\\b)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(truncate\\s+-s\\s*0|:\\s*>|>\\s*)\\s*/var/log/"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bunlink\\b[^\\n]*/var/log/"
+    }
+   ],
+   "description": "Deleting or truncating system logs via srm/shred/truncate/unlink or a `> /var/log/\u2026` redirect destroys forensic evidence (anti-forensics), complementing the `log erase` detection."
+  },
+  {
+   "id": "b-data-destroy",
+   "name": "File overwritten with dd (data destruction)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1485",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bdd\\b[^\\n]*\\bif=/dev/(zero|random|urandom)\\b[^\\n]*\\bof=\\S"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bdd\\b[^\\n]*\\bof=\\S[^\\n]*\\bif=/dev/(zero|random|urandom)\\b"
+    }
+   ],
+   "description": "`dd if=/dev/zero|random of=<file>` overwrites a file's contents in place \u2014 data destruction (or secure wiping to prevent recovery). Review the target path to gauge blast radius."
+  },
+  {
+   "id": "b-shutdown",
+   "name": "System shutdown / reboot",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "low",
+   "mitre": "T1529",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bshutdown\\s+-[rhk]\\b"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(reboot|halt)\\b\\s*$"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "osascript\\b[^\\n]*\\b(shut down|restart)\\b"
+    }
+   ],
+   "description": "A scripted shutdown/reboot/halt (or an osascript 'shut down'/'restart') can be destructive-impact or used to force a reboot so a newly-planted persistence item takes effect. Low severity \u2014 legitimate admin action \u2014 surfaced for awareness."
+  },
+  {
+   "id": "b-lin-doc-shell",
+   "name": "Shell spawned by a browser or document app",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1203",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "ancestry",
+     "op": "regex",
+     "value": "(Safari|Google Chrome|Firefox|Microsoft Edge|Brave Browser|Opera|Preview|Mail|Microsoft Word|Microsoft Excel|Microsoft PowerPoint|Adobe Acrobat|Slack|Discord|zoom\\.us)"
+    },
+    {
+     "field": "label",
+     "op": "regex",
+     "value": "^(sh|bash|zsh|dash|ksh|python3?(\\.\\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$"
+    }
+   ],
+   "description": "A shell or interpreter whose ANCESTRY includes a browser, mail client, or document viewer. Those applications open untrusted content; they have no legitimate reason to spawn a shell, so this is the classic exploitation / malicious-macro / drive-by chain. Lineage-based, so it fires regardless of what the command line says \u2014 renaming the payload doesn't help."
+  },
+  {
+   "id": "b-lin-server-shell",
+   "name": "Shell spawned by an internet-facing service (possible webshell/RCE)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "critical",
+   "mitre": "T1505.003",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "ancestry",
+     "op": "regex",
+     "value": "(httpd|nginx|apache2?|tomcat|java|node|gunicorn|uwsgi|php-fpm|postgres|mysqld)"
+    },
+    {
+     "field": "label",
+     "op": "regex",
+     "value": "^(sh|bash|zsh|dash|ksh|python3?(\\.\\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$"
+    }
+   ],
+   "description": "A shell or interpreter spawned by an internet-facing service (web server, app server, database). This is the signature of a webshell or successful remote code execution against that service, and is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells."
+  },
+  {
+   "id": "b-rare-exec-drop",
+   "name": "Never-before-seen binary executing from a drop location",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1204.002",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "exe_novel",
+     "op": "eq",
+     "value": "True"
+    },
+    {
+     "field": "exe",
+     "op": "regex",
+     "value": "^/(private/)?(tmp|var/tmp|var/folders)/|^/Users/[^/]+/(Downloads|Library/Caches|Public)/|^/Volumes/"
+    }
+   ],
+   "description": "A binary NEVER SEEN on this host before, executing from a temp / cache / Downloads / removable-media path. Rarity is the signal an adversary cannot fake \u2014 they can rename the file and rewrite the command line, but the first execution is still the first. Pairing novelty with a drop location is what keeps it precise: new binaries in /usr/bin are software updates; new binaries in /tmp are droppers."
+  },
+  {
+   "id": "b-c2-webservice",
+   "name": "Command-and-control over a legitimate web service",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1102",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(discord(app)?\\.com/api/webhooks|api\\.telegram\\.org/bot|hooks\\.slack\\.com/services|pastebin\\.com/raw|gist\\.githubusercontent\\.com|raw\\.githubusercontent\\.com/[^ ]*\\.(sh|ps1|py)|transfer\\.sh|0x0\\.st|termbin\\.com|webhook\\.site)"
+    }
+   ],
+   "description": "Command-and-control riding a legitimate web service \u2014 a Discord/Slack webhook, a Telegram bot API, a paste site, a raw GitHub script, or a one-shot file host. Commodity and AI-generated malware favour these because the destination is a trusted domain that egress filtering and reputation feeds allow."
+  },
+  {
+   "id": "b-c2-doh",
+   "name": "DNS-over-HTTPS resolver used from the command line",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1071.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(dns\\.google/dns-query|cloudflare-dns\\.com/dns-query|doh\\.opendns\\.com|dns\\.quad9\\.net/dns-query|/dns-query\\?)"
+    }
+   ],
+   "description": "A DNS-over-HTTPS resolver endpoint used straight from a command line. DoH hides name resolution from local DNS monitoring, so a script reaching one directly is usually evading inspection rather than browsing."
+  },
+  {
+   "id": "b-ai-agent-risky",
+   "name": "AI coding agent performing a high-risk action",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1059",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "ancestry",
+     "op": "regex",
+     "value": "\\b(claude|codex|cursor|aider|windsurf|cline|ollama|copilot|opencode|gemini-cli)\\b"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "((curl|wget)[^|]*\\|\\s*(ba|z)?sh|base64\\s+(-{1,2}[dD]|--decode)[^|]*\\|\\s*(ba|z)?sh|/etc/(shadow|sudoers)|\\.ssh/id_|launchctl\\s+(load|bootstrap)|\\bsudo\\s+)"
+    }
+   ],
+   "description": "An AI coding agent (Claude Code, Codex, Cursor, aider, Cline, \u2026) whose child process performs a high-risk action \u2014 piping a download into a shell, reading /etc/shadow or SSH private keys, or escalating. These agents execute shell commands with the user's full privileges, so a prompt-injected or hijacked agent is remote code execution that otherwise looks exactly like normal developer activity. Scoped to dangerous actions so ordinary agent work (builds, installs, tests) stays quiet."
+  },
+  {
+   "id": "b-ai-mcp-tamper",
+   "name": "AI tool/MCP configuration modified from the command line",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1195.002",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(mcp\\.json|claude_desktop_config\\.json|\\.mcp\\.json|mcp_settings\\.json)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(>>?|\\btee\\b|\\bcp\\b|\\bmv\\b|sed\\s+-i|curl[^|]*-o\\b|\\bpython3?\\b)"
+    }
+   ],
+   "description": "An MCP server / AI tool configuration being WRITTEN from a command line. An MCP server runs locally with your privileges, so silently registering one is the AI-era equivalent of a malicious package or browser extension \u2014 persistent, privileged, and rarely reviewed. Reading these files does not alert."
+  },
+  {
+   "id": "b-ai-key-theft",
+   "name": "AI provider API key targeted",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1552.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(ANTHROPIC_API_KEY|OPENAI_API_KEY|OPENAI_KEY|GEMINI_API_KEY|XAI_API_KEY|GROQ_API_KEY|MISTRAL_API_KEY|DEEPSEEK_API_KEY|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)"
+    }
+   ],
+   "description": "A command line referencing an AI provider API key variable. These keys are high value, usually sit in plaintext in .env files, shell profiles, and tool configs, and are rarely rotated \u2014 an attractive, low-friction credential-theft target that traditional credential rules miss entirely."
+  },
+  {
+   "id": "b-ai-exfil",
+   "name": "File uploaded to an AI API endpoint",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1567",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(api\\.openai\\.com|api\\.anthropic\\.com|generativelanguage\\.googleapis\\.com|api\\.x\\.ai|api\\.mistral\\.ai|api\\.groq\\.com|api\\.deepseek\\.com)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(-d\\s*@|--data-binary\\s*@|--upload-file|-F\\s+\\S*=@)"
+    }
+   ],
+   "description": "A file being UPLOADED to an AI provider API endpoint (curl -F file=@ / --data-binary @ / --upload-file). Model APIs are a new egress channel that looks benign to network monitoring: TLS to a reputable, allow-listed domain. Ordinary inline API calls do not match \u2014 only file uploads do."
+  },
+  {
+   "id": "b-ai-local-exposed",
+   "name": "Local LLM runtime listening on a public interface",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "listen",
+   "severity": "medium",
+   "mitre": "T1571",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "lport",
+     "op": "in",
+     "value": [
+      11434,
+      1234,
+      8000,
+      5000
+     ]
+    },
+    {
+     "field": "laddr",
+     "op": "regex",
+     "value": "^(0\\.0\\.0\\.0|::|\\*)$"
+    }
+   ],
+   "description": "A local LLM runtime (Ollama and friends) listening on a wildcard interface instead of loopback. That exposes an unauthenticated model server \u2014 and often the host's files and tools \u2014 to anyone on the network. A misconfiguration far more than an attack, which is exactly why it goes unnoticed."
+  },
+  {
+   "id": "b-lin-ssh-shell",
+   "name": "Interpreter or network tool under an SSH session",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1021.004",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "ancestry",
+     "op": "regex",
+     "value": "\\bsshd\\b"
+    },
+    {
+     "field": "label",
+     "op": "regex",
+     "value": "^(sh|bash|zsh|dash|ksh|python3?(\\.\\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$"
+    }
+   ],
+   "description": "An interpreter or network tool running under an SSH session. On a workstation, remote hands-on-keyboard activity is itself notable. (Deliberately NOT shipped on Linux, where administrators drive servers over SSH constantly \u2014 there it is context, and the multi-stage SQL detections use it instead.)"
+  },
+  {
+   "id": "b-tcc-input-monitor",
+   "name": "Input monitoring granted to a non-bundled binary",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "tcc",
+   "severity": "high",
+   "mitre": "T1056.001",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "service",
+     "op": "in",
+     "value": [
+      "kTCCServiceListenEvent",
+      "kTCCServicePostEvent"
+     ]
+    },
+    {
+     "field": "client_type",
+     "op": "eq",
+     "value": "1"
+    }
+   ],
+   "description": "Input monitoring (ListenEvent / PostEvent) \u2014 the permission that allows reading and synthesising keystrokes \u2014 held by a raw executable PATH rather than a registered application bundle. Real apps ship as signed bundles and request this through the normal prompt; a loose binary holding it is a keylogger."
+  },
+  {
+   "id": "b-tcc-accessibility",
+   "name": "Accessibility or full-disk access granted to a non-bundled binary",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "tcc",
+   "severity": "high",
+   "mitre": "T1548",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "service",
+     "op": "in",
+     "value": [
+      "kTCCServiceAccessibility",
+      "kTCCServiceSystemPolicyAllFiles"
+     ]
+    },
+    {
+     "field": "client_type",
+     "op": "eq",
+     "value": "1"
+    }
+   ],
+   "description": "Accessibility or Full Disk Access held by a raw executable path. These are the two most powerful grants on macOS \u2014 Accessibility can drive any application, Full Disk Access reads every protected file \u2014 and they are the standard objective of macOS malware's social-engineering prompts."
+  },
+  {
+   "id": "b-tcc-esf",
+   "name": "Endpoint Security client entitlement held by a non-bundled binary",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "tcc",
+   "severity": "high",
+   "mitre": "T1547.006",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "service",
+     "op": "eq",
+     "value": "kTCCServiceEndpointSecurityClient"
+    },
+    {
+     "field": "client_type",
+     "op": "eq",
+     "value": "1"
+    }
+   ],
+   "description": "The Endpoint Security client entitlement held by a non-bundled binary. That entitlement is how security tools observe the system; an unregistered binary holding it is either impersonating a security product or positioned to watch everything the real one would."
+  },
+  {
+   "id": "b-tcc-screen",
+   "name": "Screen recording granted to a non-bundled binary",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "tcc",
+   "severity": "medium",
+   "mitre": "T1113",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "service",
+     "op": "eq",
+     "value": "kTCCServiceScreenCapture"
+    },
+    {
+     "field": "client_type",
+     "op": "eq",
+     "value": "1"
+    }
+   ],
+   "description": "Screen recording granted to a raw executable path \u2014 surveillance capability outside the usual bundled-application path. Complements the command-line screencapture rule with an independent, state-based route to the same technique."
+  },
+  {
+   "id": "b-tcc-avcapture",
+   "name": "Microphone or camera granted to a non-bundled binary",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "tcc",
+   "severity": "medium",
+   "mitre": "T1123",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "service",
+     "op": "in",
+     "value": [
+      "kTCCServiceMicrophone",
+      "kTCCServiceCamera"
+     ]
+    },
+    {
+     "field": "client_type",
+     "op": "eq",
+     "value": "1"
+    }
+   ],
+   "description": "Microphone or camera access held by a raw executable path rather than a registered app. Conferencing apps arrive as signed bundles; a loose binary with the microphone is surveillance."
+  },
+  {
+   "id": "b-acct-hidden",
+   "name": "Hidden local account",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "account",
+   "severity": "high",
+   "mitre": "T1564.002",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "hidden",
+     "op": "eq",
+     "value": "True"
+    }
+   ],
+   "description": "A local account flagged hidden \u2014 excluded from the login window and from casual enumeration. Legitimate service accounts are created by installers with known identifiers; a hidden account appearing on a workstation is a classic persistence backdoor."
+  },
+  {
+   "id": "b-acct-uid0",
+   "name": "Non-root account with uid 0",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "account",
+   "severity": "critical",
+   "mitre": "T1136.001",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "uid",
+     "op": "eq",
+     "value": "0"
+    },
+    {
+     "field": "user",
+     "op": "ne",
+     "value": "root"
+    }
+   ],
+   "description": "An account other than root carrying uid 0. Unix authorises on the numeric uid, not the name, so this is a full root backdoor wearing an innocuous username. There is no benign reason for it."
+  },
+  {
+   "id": "b-job-droppath",
+   "name": "Scheduled job runs from a drop location",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "job",
+   "severity": "high",
+   "mitre": "T1543.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "program",
+     "op": "regex",
+     "value": "^/(private/)?(tmp|var/tmp|var/folders)/|/Users/[^/]+/(Downloads|Public|Library/Caches)/|/\\.[^/]+/|^/Volumes/"
+    }
+   ],
+   "description": "A scheduled job (launchd / cron / systemd) whose program lives in a temp, cache, Downloads, hidden or removable-media path. Persistence is only useful if it points at a payload, and legitimate software installs its payload somewhere durable \u2014 not /tmp."
+  },
+  {
+   "id": "b-job-download-exec",
+   "name": "Scheduled job downloads and executes",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "job",
+   "severity": "critical",
+   "mitre": "T1053.003",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "raw",
+     "op": "regex",
+     "value": "(curl|wget)[^|]*\\|\\s*(ba|z)?sh|base64\\s+(-{1,2}[dD]|--decode)[^|]*\\|\\s*(ba|z)?sh"
+    }
+   ],
+   "description": "A scheduled job whose command downloads and pipes straight into a shell, or decodes base64 into one. That is persistence and staging in a single line: every execution re-fetches whatever the operator is serving, so the payload can change without touching the host again."
+  },
+  {
+   "id": "b-job-masquerade",
+   "name": "Scheduled job masquerades as an Apple component",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "job",
+   "severity": "high",
+   "mitre": "T1036.005",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "regex",
+     "value": "^(?!/System/)[^\\n]*com\\.apple\\.[^/\\n]*\\.plist$"
+    },
+    {
+     "field": "program",
+     "op": "regex",
+     "value": "^/(?!(System|usr|bin|sbin|Library/Apple)/)"
+    }
+   ],
+   "description": "A scheduled job named after a system component but whose program is NOT a system binary. Real platform jobs run platform binaries; borrowing the name while pointing elsewhere is deliberate blending, and the name/target mismatch is what gives it away."
+  },
+  {
+   "id": "b-config-defence-off",
+   "name": "Security control disabled (host state)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "config",
+   "severity": "high",
+   "mitre": "T1562.001",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "category",
+     "op": "in",
+     "value": [
+      "firewall",
+      "gatekeeper",
+      "sip",
+      "filevault"
+     ]
+    },
+    {
+     "field": "state",
+     "op": "eq",
+     "value": "disabled"
+    }
+   ],
+   "description": "A security control reported as disabled by the host-state collector. This is the state-based counterpart to the command-line rules that catch the act of disabling it \u2014 so the finding survives even if the tampering happened before Scouter was installed, or off-host."
+  },
+  {
+   "id": "b-access-remote-on",
+   "name": "Remote-access service enabled (host state)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "access",
+   "severity": "medium",
+   "mitre": "T1021.001",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "category",
+     "op": "eq",
+     "value": "service"
+    },
+    {
+     "field": "enabled",
+     "op": "eq",
+     "value": "True"
+    }
+   ],
+   "description": "An inbound remote-access service is enabled. Often deliberate, but it is an entry point that should be a known decision rather than a surprise \u2014 and attackers enable these to keep a hands-on channel."
+  },
+  {
+   "id": "b-file-persist-write",
+   "name": "Persistence file created or replaced",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "file",
+   "severity": "high",
+   "mitre": "T1543.001",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "event",
+     "op": "in",
+     "value": [
+      "create",
+      "rename"
+     ]
+    },
+    {
+     "field": "path",
+     "op": "regex",
+     "value": "(/Library/Launch(Agents|Daemons)/|/Users/[^/]+/Library/Launch(Agents|Daemons)/|/etc/(cron|periodic)|/var/at/|/etc/rc\\.common|/Library/StartupItems/)"
+    }
+   ],
+   "depth_override": 3,
+   "description": "A persistence file (launch agent/daemon, cron entry, systemd unit, init script) created or replaced, seen by the REAL-TIME FILE SENSOR rather than by a command line. This is an independent route to the same techniques the command-line persistence rules cover: reword the command, use a different tool, or write the file from a compiled binary and this still fires, because it watches the OUTCOME rather than the phrasing."
+  },
+  {
+   "id": "b-file-shellrc-write",
+   "name": "Shell startup file created or replaced",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "file",
+   "severity": "high",
+   "mitre": "T1546.004",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "event",
+     "op": "in",
+     "value": [
+      "create",
+      "rename"
+     ]
+    },
+    {
+     "field": "path",
+     "op": "regex",
+     "value": "/\\.(bashrc|bash_profile|zshrc|zshenv|zprofile|profile|bash_login)$|/etc/(profile|zshenv|bashrc)$|/etc/profile\\.d/"
+    }
+   ],
+   "depth_override": 3,
+   "description": "A shell startup file created or replaced. Same independence argument as the persistence-file rule \u2014 the command-line rule catches `echo ... >> ~/.zshrc`, this catches the file changing no matter how it was done."
+  },
+  {
+   "id": "b-file-authkeys-write",
+   "name": "SSH authorized_keys created or replaced",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "file",
+   "severity": "high",
+   "mitre": "T1098.004",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "event",
+     "op": "in",
+     "value": [
+      "create",
+      "rename"
+     ]
+    },
+    {
+     "field": "path",
+     "op": "regex",
+     "value": "/\\.ssh/authorized_keys$"
+    }
+   ],
+   "depth_override": 3,
+   "description": "An SSH authorized_keys file created or replaced \u2014 the quietest durable backdoor there is, because it needs no malware and survives password changes."
+  },
+  {
+   "id": "b-file-log-delete",
+   "name": "Log or audit file deleted",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "file",
+   "severity": "medium",
+   "mitre": "T1070.002",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "event",
+     "op": "eq",
+     "value": "unlink"
+    },
+    {
+     "field": "path",
+     "op": "regex",
+     "value": "^/(private/)?var/log/|^/Library/Logs/|/\\.(bash|zsh|sh)_history$|^/private/var/audit/"
+    }
+   ],
+   "depth_override": 3,
+   "description": "A log, audit or shell-history file deleted. Logs are removed to destroy the record of what happened; catching the deletion itself is independent of whatever command performed it."
+  },
+  {
+   "id": "b-rmm-remote",
+   "name": "Remote-management agent (RMM) installed or started",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1219",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "regex",
+     "value": "(?i)^(screenconnect|connectwisecontrol|anydesk|teamviewer|rustdesk|splashtop|ateraagent|syncro|meshagent)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)(ScreenConnect|ConnectWise ?Control|AnyDesk|TeamViewer|RustDesk|Splashtop|AteraAgent|Syncro|MeshAgent)"
+    }
+   ],
+   "description": "A commercial remote-management tool (ScreenConnect, AnyDesk, TeamViewer, RustDesk, Splashtop and friends) starting on an endpoint. These are signed, notarised, legitimate products, so nothing else flags them \u2014 which is exactly why intrusion sets install them instead of a RAT: the SMOKE#SCREEN campaign pairs ScreenConnect with Cloudflare tunnels for persistent hands-on access. Benign where the customer's own IT uses one, so confirm which product is sanctioned per site and suppress that one rather than the whole rule."
+  },
+  {
+   "id": "b-btm-write",
+   "name": "Login item / Background Task Management store modified",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "file",
+   "severity": "high",
+   "mitre": "T1547.015",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "event",
+     "op": "in",
+     "value": [
+      "create",
+      "rename"
+     ]
+    },
+    {
+     "field": "path",
+     "op": "regex",
+     "value": "/com\\.apple\\.backgroundtaskmanagementagent/|/backgrounditems\\.btm$"
+    }
+   ],
+   "depth_override": 3,
+   "description": "A write to the Background Task Management store, which is where macOS records Login Items and SMAppService agents. Malware adds itself here to start at login without a LaunchAgent plist; the store is not a file users or installers edit by hand, so a change to it is worth reading."
+  }
+ ],
+ "sql_count": 11,
+ "sql_rules": [
+  {
+   "id": "s-mass-file-write",
+   "name": "Mass file rewriting (ransomware pattern)",
+   "enabled": true,
+   "builtin": true,
+   "severity": "critical",
+   "mitre": "T1486",
+   "description": "One process creating or renaming 60+ files inside five minutes. Encryption-for-impact does not look like a command line \u2014 it looks like a storm of file rewrites \u2014 so this watches the shape of the activity instead. The five-minute bucket and single-actor grouping are what separate a ransomware run from a compiler or a backup, which touch just as many files but spread out and from a known toolchain.",
+   "sql": "SELECT actor, COUNT(*) AS files_touched, COUNT(DISTINCT path) AS distinct_paths,\n MIN(path) AS example_path,\n datetime(MIN(ts),'unixepoch','localtime') AS started,\n datetime(MAX(ts),'unixepoch','localtime') AS ended\nFROM file_events\nWHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n AND event IN ('create','rename') AND actor IS NOT NULL AND actor != ''\nGROUP BY actor, ts / 300\nHAVING COUNT(*) >= 60 AND MAX(ts) - MIN(ts) <= 300\nORDER BY files_touched DESC LIMIT 25"
+  },
+  {
+   "id": "s-mass-file-delete",
+   "name": "Mass file deletion (wiper pattern)",
+   "enabled": true,
+   "builtin": true,
+   "severity": "critical",
+   "mitre": "T1485",
+   "description": "One process deleting 60+ files inside five minutes \u2014 destruction observed as an outcome rather than inferred from an `rm` command line, so it holds regardless of the tool used.",
+   "sql": "SELECT actor, COUNT(*) AS files_deleted, MIN(path) AS example_path,\n datetime(MIN(ts),'unixepoch','localtime') AS started,\n datetime(MAX(ts),'unixepoch','localtime') AS ended\nFROM file_events\nWHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n AND event = 'unlink' AND actor IS NOT NULL AND actor != ''\nGROUP BY actor, ts / 300\nHAVING COUNT(*) >= 60 AND MAX(ts) - MIN(ts) <= 300\nORDER BY files_deleted DESC LIMIT 25"
+  },
+  {
+   "id": "s-chain-bruteforce",
+   "name": "Repeated authentication failures (brute force)",
+   "enabled": true,
+   "builtin": true,
+   "severity": "high",
+   "mitre": "T1110",
+   "description": "Counts failed authentications per user in a rolling window. A single failure is a typo; a burst is an attack, and no single event can express that \u2014 this is a question only correlation can answer, which is why it lives here rather than in a node rule. A success immediately following the burst is reported alongside, because that is the difference between a repelled attempt and a breach.",
+   "sql": "WITH fails AS (\n SELECT user, source, ts FROM auth_events\n WHERE success = 0 AND ts >= CAST(strftime('%s','now') AS INTEGER) - 86400)\nSELECT f.user, COUNT(*) AS failures,\n (SELECT GROUP_CONCAT(DISTINCT s2.source) FROM fails s2 WHERE s2.user = f.user) AS sources,\n datetime(MIN(f.ts),'unixepoch','localtime') AS first_failure,\n datetime(MAX(f.ts),'unixepoch','localtime') AS last_failure,\n (SELECT COUNT(*) FROM auth_events s WHERE s.success = 1 AND s.user = f.user\n    AND s.ts BETWEEN MIN(f.ts) AND MAX(f.ts) + 300) AS succeeded_after\nFROM fails f GROUP BY f.user\nHAVING COUNT(*) >= 8 AND MAX(f.ts) - MIN(f.ts) <= 3600\nORDER BY failures DESC LIMIT 25"
+  },
+  {
+   "id": "s-chain-new-remote-login",
+   "name": "Successful remote login from a never-before-seen source",
+   "enabled": true,
+   "builtin": true,
+   "severity": "high",
+   "mitre": "T1078",
+   "description": "A successful remote authentication from a source address this host has never accepted a login from before. Valid credentials used from a new place is what account compromise looks like from the endpoint \u2014 there is no malware to find, which is exactly why novelty is the only available signal.",
+   "sql": "WITH known AS (\n SELECT DISTINCT source FROM auth_events\n WHERE success = 1 AND ts < CAST(strftime('%s','now') AS INTEGER) - 86400)\nSELECT datetime(a.ts,'unixepoch','localtime') AS at, a.user, a.source, a.method, a.etype\nFROM auth_events a\nWHERE a.success = 1 AND a.ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n AND a.source IS NOT NULL AND a.source != '' AND a.source != 'console'\n AND a.source NOT IN (SELECT source FROM known)\nORDER BY a.ts DESC LIMIT 25"
+  },
+  {
+   "id": "s-beacon-cadence",
+   "name": "Beaconing \u2014 regular check-in to one destination",
+   "enabled": true,
+   "builtin": true,
+   "severity": "medium",
+   "mitre": "T1071",
+   "description": "Finds command-and-control by its RHYTHM rather than its content. Malware has to check in; that check-in is periodic, and periodicity is something an implant cannot hide by renaming itself or encrypting its traffic. Intervals come from the edge-triggered connection log (a connection is recorded when it APPEARS, so a beacon that reconnects on a timer leaves one row per beat), and regularity is scored as the squared coefficient of variation of those intervals \u2014 below 0.05 catches beacons jittered up to ~30%, which covers the usual C2 defaults. Three gates keep it quiet: the destination must be NEW to this host (first seen within 14 days), which removes the steady-state legitimate pollers that beacon perfectly (Slack, Dropbox, update checkers); it must be contacted by fewer than three distinct executables, which removes shared CDNs; and it needs at least 8 beats over at least 30 minutes. Thresholds are worth tuning to your environment \u2014 raise the jitter bound to catch sloppier beacons at the cost of noise.",
+   "sql": "WITH ev AS (\n SELECT exe, proc_name, raddr, rport, asorg, country, ts,\n        ts - LAG(ts) OVER (PARTITION BY exe, raddr ORDER BY ts) AS gap\n FROM conn_events WHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400),\nagg AS (\n SELECT exe, proc_name, raddr, rport, asorg, country,\n        COUNT(*) AS beats, AVG(gap) AS mean_gap, MIN(ts) AS t0, MAX(ts) AS t1,\n        (AVG(gap*gap) - AVG(gap)*AVG(gap)) AS var_gap\n FROM ev WHERE gap IS NOT NULL AND gap > 0 GROUP BY exe, raddr),\nnovel AS (\n SELECT raddr FROM connections WHERE public=1 AND raddr IS NOT NULL\n GROUP BY raddr HAVING MIN(first_seen) >= CAST(strftime('%s','now') AS INTEGER) - 1209600)\nSELECT a.proc_name, a.exe, a.raddr, a.rport, a.asorg, a.country,\n a.beats, CAST(a.mean_gap AS INTEGER) AS mean_gap_s,\n ROUND(CASE WHEN a.mean_gap > 0 THEN (a.var_gap / (a.mean_gap*a.mean_gap)) ELSE 9 END, 3) AS jitter,\n datetime(a.t0,'unixepoch','localtime') AS first_beat,\n datetime(a.t1,'unixepoch','localtime') AS last_beat\nFROM agg a JOIN novel n ON n.raddr = a.raddr\nWHERE a.beats >= 8 AND a.mean_gap >= 45 AND a.t1 - a.t0 >= 1800\n AND a.var_gap IS NOT NULL\n AND (a.var_gap / (a.mean_gap*a.mean_gap)) < 0.05\n AND a.raddr NOT IN (SELECT raddr FROM conn_events GROUP BY raddr HAVING COUNT(DISTINCT exe) >= 3)\nORDER BY jitter ASC, a.beats DESC LIMIT 25"
+  },
+  {
+   "id": "s-chain-dl-exec",
+   "name": "Downloaded file executed",
+   "enabled": true,
+   "builtin": true,
+   "severity": "high",
+   "mitre": "T1204.002",
+   "description": "Correlates the downloads table against process executions: a file that arrived from the internet and then RAN within 24 hours. This is how ordinary people actually get compromised \u2014 the fake installer, the trojanised updater, the 'codec' from a search ad \u2014 and neither half looks alarming alone.",
+   "sql": "SELECT d.name AS downloaded, d.source_url, p.exe AS executed, p.cmdline,\n datetime(d.first_seen,'unixepoch','localtime') AS downloaded_at,\n datetime(p.first_seen,'unixepoch','localtime') AS executed_at\nFROM downloads d JOIN processes p ON (p.exe = d.path OR p.exe LIKE '%/' || d.name)\nWHERE p.first_seen >= d.first_seen AND p.first_seen - d.first_seen <= 86400\n AND d.first_seen >= CAST(strftime('%s','now') AS INTEGER) - 604800\nORDER BY p.first_seen DESC LIMIT 25"
+  },
+  {
+   "id": "s-chain-drop-beacon",
+   "name": "Newly dropped binary contacted the internet",
+   "enabled": true,
+   "builtin": true,
+   "severity": "high",
+   "mitre": "T1071",
+   "description": "A binary first seen within the last day, living in a temp / cache / Downloads / removable path, that opened an outbound internet connection within ten minutes of first running. Dropper lands, dropper phones home. The location filter is what keeps it precise \u2014 legitimate software updates land in /usr and /Applications.",
+   "sql": "SELECT p.name, p.exe, c.raddr, c.rport, c.country, c.asorg,\n datetime(p.first_seen,'unixepoch','localtime') AS first_run,\n datetime(c.first_seen,'unixepoch','localtime') AS first_contact\nFROM processes p JOIN connections c ON c.exe = p.exe\nWHERE c.direction='outbound' AND c.public=1\n AND c.first_seen >= p.first_seen AND c.first_seen - p.first_seen <= 600\n AND p.first_seen >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (p.exe LIKE '/tmp/%' OR p.exe LIKE '/private/tmp/%' OR p.exe LIKE '/var/tmp/%' OR p.exe LIKE '/dev/shm/%' OR p.exe LIKE '%/Downloads/%' OR p.exe LIKE '%/.cache/%' OR p.exe LIKE '/Volumes/%' OR p.exe LIKE '/run/user/%')\nORDER BY p.first_seen DESC LIMIT 25"
+  },
+  {
+   "id": "s-chain-recon-creds",
+   "name": "Discovery burst followed by credential access",
+   "enabled": true,
+   "builtin": true,
+   "severity": "high",
+   "mitre": "T1552",
+   "description": "Three or more discovery commands (whoami / uname / netstat / ps / passwd enumeration) inside ten minutes, followed by a credential-access command. Each command is individually unremarkable \u2014 admins run all of them \u2014 but the SEQUENCE is the signature of hands-on-keyboard reconnaissance turning into theft.",
+   "sql": "WITH disco AS (SELECT ts FROM exec_events WHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (cmdline LIKE '%whoami%' OR cmdline LIKE '%uname -a%' OR cmdline LIKE '%netstat%' OR cmdline LIKE '%ifconfig%' OR cmdline LIKE '%ps aux%' OR cmdline LIKE '%/etc/passwd%' OR cmdline LIKE '%getent%' OR cmdline LIKE '%arp -a%' OR cmdline LIKE '%lsof %'))\nSELECT datetime(e.ts,'unixepoch','localtime') AS at, e.exe, e.cmdline,\n (SELECT COUNT(*) FROM disco d WHERE d.ts BETWEEN e.ts - 600 AND e.ts) AS discovery_cmds_before\nFROM exec_events e\nWHERE e.ts >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (e.cmdline LIKE '%/etc/shadow%' OR e.cmdline LIKE '%.ssh/id_%' OR e.cmdline LIKE '%keychain%' OR e.cmdline LIKE '%find-generic-password%' OR e.cmdline LIKE '%.aws/credentials%' OR e.cmdline LIKE '%API_KEY%' OR e.cmdline LIKE '%bash_history%')\n AND (SELECT COUNT(*) FROM disco d WHERE d.ts BETWEEN e.ts - 600 AND e.ts) >= 3\nORDER BY e.ts DESC LIMIT 25"
+  },
+  {
+   "id": "s-chain-creds-egress",
+   "name": "Credential access followed by outbound transfer",
+   "enabled": true,
+   "builtin": true,
+   "severity": "critical",
+   "mitre": "T1041",
+   "description": "A credential-access command followed within fifteen minutes by an outbound connection to the public internet. Steal, then send. The highest-severity chain here because it captures the moment an intrusion becomes a breach.",
+   "sql": "WITH cred AS (SELECT e.ts, e.exe, e.cmdline FROM exec_events e WHERE e.ts >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (e.cmdline LIKE '%/etc/shadow%' OR e.cmdline LIKE '%.ssh/id_%' OR e.cmdline LIKE '%keychain%' OR e.cmdline LIKE '%find-generic-password%' OR e.cmdline LIKE '%.aws/credentials%' OR e.cmdline LIKE '%API_KEY%' OR e.cmdline LIKE '%bash_history%'))\nSELECT datetime(cr.ts,'unixepoch','localtime') AS credential_access_at, cr.cmdline AS credential_cmd,\n c.proc_name AS egress_proc, c.raddr, c.rport, c.asorg,\n datetime(c.first_seen,'unixepoch','localtime') AS egress_at\nFROM cred cr JOIN connections c\n ON c.direction='outbound' AND c.public=1 AND c.first_seen BETWEEN cr.ts AND cr.ts + 900\nORDER BY cr.ts DESC LIMIT 25"
+  },
+  {
+   "id": "s-chain-exec-persist",
+   "name": "Persistence established right after a flagged execution",
+   "enabled": true,
+   "builtin": true,
+   "severity": "high",
+   "mitre": "T1543",
+   "description": "A persistence mechanism (launchd / cron / systemd job) created within fifteen minutes of a high or critical severity process running. Attackers establish persistence immediately after gaining execution; this ties the foothold to the payload that created it.",
+   "sql": "SELECT j.kind, j.label, j.program, datetime(j.first_seen,'unixepoch','localtime') AS persisted_at,\n p.name AS preceding_process, p.severity AS process_severity, p.cmdline\nFROM jobs j JOIN processes p ON p.first_seen BETWEEN j.first_seen - 900 AND j.first_seen\nWHERE j.first_seen >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND p.severity IN ('high','critical')\nORDER BY j.first_seen DESC LIMIT 25"
+  },
+  {
+   "id": "s-chain-ssh-handson",
+   "name": "Remote login followed by hands-on-keyboard activity",
+   "enabled": true,
+   "builtin": true,
+   "severity": "high",
+   "mitre": "T1021.004",
+   "description": "A successful remote login followed inside thirty minutes by three or more suspicious commands (credential paths, downloads, chmod +x, base64). Remote administration is normal; remote administration that immediately starts pulling tooling and reading secrets is not \u2014 this is the server-side counterpart to the workstation SSH rule.",
+   "sql": "WITH logins AS (SELECT ts, user, source FROM auth_events\n WHERE success=1 AND ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n  AND (etype LIKE '%ssh%' OR method LIKE '%ssh%' OR message LIKE '%sshd%'))\nSELECT datetime(l.ts,'unixepoch','localtime') AS login_at, l.user, l.source,\n COUNT(e.id) AS suspicious_cmds\nFROM logins l JOIN exec_events e ON e.ts BETWEEN l.ts AND l.ts + 1800\nWHERE (e.cmdline LIKE '%/etc/shadow%' OR e.cmdline LIKE '%.ssh/id_%' OR e.cmdline LIKE '%wget %'\n OR e.cmdline LIKE '%curl %' OR e.cmdline LIKE '%base64 %' OR e.cmdline LIKE '%chmod +x%')\nGROUP BY l.ts, l.user, l.source HAVING COUNT(e.id) >= 3\nORDER BY l.ts DESC LIMIT 25"
+  }
+ ]
+}

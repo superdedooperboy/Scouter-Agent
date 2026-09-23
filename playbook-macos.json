@@ -1,0 +1,213 @@
+{
+ "platform": "macOS",
+ "tactics": [
+  {
+   "id": "TA0043",
+   "name": "Reconnaissance"
+  },
+  {
+   "id": "TA0042",
+   "name": "Resource Development"
+  },
+  {
+   "id": "TA0001",
+   "name": "Initial Access"
+  },
+  {
+   "id": "TA0002",
+   "name": "Execution"
+  },
+  {
+   "id": "TA0003",
+   "name": "Persistence"
+  },
+  {
+   "id": "TA0004",
+   "name": "Privilege Escalation"
+  },
+  {
+   "id": "TA0005",
+   "name": "Defense Evasion"
+  },
+  {
+   "id": "TA0006",
+   "name": "Credential Access"
+  },
+  {
+   "id": "TA0007",
+   "name": "Discovery"
+  },
+  {
+   "id": "TA0008",
+   "name": "Lateral Movement"
+  },
+  {
+   "id": "TA0009",
+   "name": "Collection"
+  },
+  {
+   "id": "TA0011",
+   "name": "Command and Control"
+  },
+  {
+   "id": "TA0010",
+   "name": "Exfiltration"
+  },
+  {
+   "id": "TA0040",
+   "name": "Impact"
+  }
+ ],
+ "workflows": {
+  "TA0043": [
+   "vr_forensics"
+  ],
+  "TA0042": [
+   "vr_forensics"
+  ],
+  "TA0001": [
+   "vr_forensics",
+   "block_ip",
+   "suspend"
+  ],
+  "TA0002": [
+   "vr_forensics",
+   "suspend"
+  ],
+  "TA0003": [
+   "vr_forensics",
+   "disable_job",
+   "quarantine",
+   "suspend"
+  ],
+  "TA0004": [
+   "vr_forensics",
+   "suspend"
+  ],
+  "TA0005": [
+   "vr_forensics",
+   "suspend"
+  ],
+  "TA0006": [
+   "vr_forensics",
+   "suspend",
+   "block_ip"
+  ],
+  "TA0007": [
+   "vr_forensics"
+  ],
+  "TA0008": [
+   "vr_forensics",
+   "block_ip",
+   "suspend"
+  ],
+  "TA0009": [
+   "vr_forensics",
+   "suspend"
+  ],
+  "TA0011": [
+   "vr_forensics",
+   "block_ip",
+   "suspend"
+  ],
+  "TA0010": [
+   "vr_forensics",
+   "block_ip",
+   "suspend"
+  ],
+  "TA0040": [
+   "vr_forensics",
+   "suspend",
+   "disable_job",
+   "quarantine"
+  ]
+ },
+ "actions": [
+  {
+   "id": "suspend",
+   "label": "Suspend",
+   "icon": "\u23f8",
+   "mode": "defensive",
+   "applies": [
+    "process"
+   ],
+   "backend": "native",
+   "reversible": true,
+   "destructive": false
+  },
+  {
+   "id": "block_ip",
+   "label": "Block IP",
+   "icon": "\ud83d\udeab",
+   "mode": "defensive",
+   "applies": [
+    "remote"
+   ],
+   "backend": "native",
+   "reversible": true,
+   "destructive": false
+  },
+  {
+   "id": "disable_job",
+   "label": "Disable",
+   "icon": "\ud83d\udd0c",
+   "mode": "defensive",
+   "applies": [
+    "job"
+   ],
+   "backend": "native",
+   "reversible": true,
+   "destructive": false
+  },
+  {
+   "id": "quarantine",
+   "label": "Quarantine",
+   "icon": "\ud83d\udce6",
+   "mode": "defensive",
+   "applies": [
+    "file",
+    "download"
+   ],
+   "backend": "native",
+   "reversible": true,
+   "destructive": false
+  },
+  {
+   "id": "vr_forensics",
+   "label": "Forensics (VR)",
+   "icon": "\ud83e\udd96",
+   "mode": "defensive",
+   "applies": [
+    "process"
+   ],
+   "backend": "velociraptor",
+   "reversible": false,
+   "destructive": false
+  },
+  {
+   "id": "kill",
+   "label": "Kill",
+   "icon": "\u23f9",
+   "mode": "counter",
+   "applies": [
+    "process"
+   ],
+   "backend": "native",
+   "reversible": false,
+   "destructive": true
+  },
+  {
+   "id": "delete_file",
+   "label": "Delete",
+   "icon": "\ud83d\uddd1",
+   "mode": "counter",
+   "applies": [
+    "file",
+    "download"
+   ],
+   "backend": "native",
+   "reversible": false,
+   "destructive": true
+  }
+ ]
+}

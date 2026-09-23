@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: compile + tests (py ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Byte-compile all sources
+        run: python -m py_compile agent.py linux/agent.py
+
+      - name: Unit tests (Linux collectors)
+        run: |
+          cd linux
+          python -m unittest discover -s tests -v
+
+  stdlib-only:
+    name: enforce zero third-party dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail on any known third-party import
+        run: |
+          # Scouter is pure Python 3 standard library — no pip installs, ever. Guard against a
+          # third-party runtime import sneaking into the agents or the mesh.
+          if grep -REn '^[[:space:]]*(import|from)[[:space:]]+(requests|flask|django|numpy|pandas|aiohttp|httpx|pydantic|yaml|click|rich|fastapi|starlette|uvicorn|boto3|cryptography|sqlalchemy|redis|psutil)([[:space:].]|$)' agent.py linux/agent.py; then
+            echo "::error::Third-party import detected — Scouter must remain standard-library only (see CONTRIBUTING.md).";
+            exit 1
+          fi
+          echo "OK — standard library only."

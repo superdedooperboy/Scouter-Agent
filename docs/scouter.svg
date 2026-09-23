@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-3 -3 36 36" width="180" height="180" fill="none" role="img" aria-label="Scouter">
+  <title>Scouter</title>
+  <defs>
+    <filter id="g" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="0.6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <!-- One 7s loop: the scouter reads a RISING power level (blue -> red), overloads (boom: flash +
+       sparks), then resets. color drives every stroke/fill via currentColor; where a renderer won't
+       animate color it falls back to the static red below. Opacity/spark animation always plays. -->
+  <g color="#ff3b3b">
+    <animate attributeName="color" dur="7s" repeatCount="indefinite"
+      values="#4d9fff;#4d9fff;#d29922;#f0883e;#ff3b3b;#ffffff;#ff3b3b;#4d9fff"
+      keyTimes="0;0.12;0.35;0.55;0.72;0.78;0.86;1"/>
+    <animateTransform attributeName="transform" type="translate" dur="7s" repeatCount="indefinite"
+      values="0 0;0 0;0.5 -0.4;-0.5 0.4;0.3 0.3;0 0;0 0" keyTimes="0;0.72;0.745;0.77;0.80;0.84;1"/>
+    <!-- ear arm + hook -->
+    <path d="M21 9 H25 Q26.6 9 26.6 11 V15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    <!-- scouter lens / eyepiece -->
+    <path d="M5 8 L20 6.4 Q22 6.2 22 8.3 V20 Q22 22.2 20 22.4 L6 23 Q4 23.1 4 21 V9.6 Q4 8.2 5 8 Z"
+          fill="currentColor" fill-opacity="0.15" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    <!-- flashing readout glyphs, each blinking on its own period -->
+    <g fill="currentColor" filter="url(#g)">
+      <circle cx="8" cy="11" r="1.7">
+        <animate attributeName="opacity" values="1;0.12" keyTimes="0;0.5" calcMode="discrete" dur="1.10s" repeatCount="indefinite"/></circle>
+      <rect x="10.9" y="9.1" width="3.2" height="3.2" rx="0.4">
+        <animate attributeName="opacity" values="1;0.12" keyTimes="0;0.5" calcMode="discrete" dur="0.68s" begin="0.06s" repeatCount="indefinite"/></rect>
+      <polygon points="17,9 18.7,12.1 15.3,12.1">
+        <animate attributeName="opacity" values="1;0.12" keyTimes="0;0.5" calcMode="discrete" dur="0.88s" begin="0.17s" repeatCount="indefinite"/></polygon>
+      <polygon points="9.7,14.2 10.62,15.68 10.62,17.52 9.7,19 8.78,17.52 8.78,15.68">
+        <animate attributeName="opacity" values="1;0.12" keyTimes="0;0.5" calcMode="discrete" dur="0.54s" begin="0.11s" repeatCount="indefinite"/></polygon>
+      <polygon points="15,14 15.45,15.19 16.71,15.24 15.72,16.03 16.06,17.26 15,16.55 13.94,17.26 14.28,16.03 13.29,15.24 14.55,15.19">
+        <animate attributeName="opacity" values="1;0.12" keyTimes="0;0.5" calcMode="discrete" dur="1.21s" begin="0.23s" repeatCount="indefinite"/></polygon>
+    </g>
+    <!-- overload flash -->
+    <circle cx="13" cy="14.5" r="9" fill="currentColor" opacity="0">
+      <animate attributeName="opacity" dur="7s" repeatCount="indefinite" values="0;0;0.9;0;0" keyTimes="0;0.72;0.78;0.84;1"/></circle>
+    <!-- sparks flung outward at overload -->
+    <g fill="currentColor">
+      <circle cx="13" cy="14.5" r="1" opacity="0"><animate attributeName="opacity" dur="7s" repeatCount="indefinite" values="0;0;1;0;0" keyTimes="0;0.73;0.79;0.85;1"/><animateTransform attributeName="transform" type="translate" dur="7s" repeatCount="indefinite" values="0 0;0 0;9 0;0 0" keyTimes="0;0.73;0.85;1"/></circle>
+      <circle cx="13" cy="14.5" r="1" opacity="0"><animate attributeName="opacity" dur="7s" repeatCount="indefinite" values="0;0;1;0;0" keyTimes="0;0.73;0.79;0.85;1"/><animateTransform attributeName="transform" type="translate" dur="7s" repeatCount="indefinite" values="0 0;0 0;4.5 8;0 0" keyTimes="0;0.73;0.85;1"/></circle>
+      <circle cx="13" cy="14.5" r="1" opacity="0"><animate attributeName="opacity" dur="7s" repeatCount="indefinite" values="0;0;1;0;0" keyTimes="0;0.73;0.79;0.85;1"/><animateTransform attributeName="transform" type="translate" dur="7s" repeatCount="indefinite" values="0 0;0 0;-4.5 8;0 0" keyTimes="0;0.73;0.85;1"/></circle>
+      <circle cx="13" cy="14.5" r="1" opacity="0"><animate attributeName="opacity" dur="7s" repeatCount="indefinite" values="0;0;1;0;0" keyTimes="0;0.73;0.79;0.85;1"/><animateTransform attributeName="transform" type="translate" dur="7s" repeatCount="indefinite" values="0 0;0 0;-9 0;0 0" keyTimes="0;0.73;0.85;1"/></circle>
+      <circle cx="13" cy="14.5" r="1" opacity="0"><animate attributeName="opacity" dur="7s" repeatCount="indefinite" values="0;0;1;0;0" keyTimes="0;0.73;0.79;0.85;1"/><animateTransform attributeName="transform" type="translate" dur="7s" repeatCount="indefinite" values="0 0;0 0;-4.5 -8;0 0" keyTimes="0;0.73;0.85;1"/></circle>
+      <circle cx="13" cy="14.5" r="1" opacity="0"><animate attributeName="opacity" dur="7s" repeatCount="indefinite" values="0;0;1;0;0" keyTimes="0;0.73;0.79;0.85;1"/><animateTransform attributeName="transform" type="translate" dur="7s" repeatCount="indefinite" values="0 0;0 0;4.5 -8;0 0" keyTimes="0;0.73;0.85;1"/></circle>
+    </g>
+  </g>
+</svg>

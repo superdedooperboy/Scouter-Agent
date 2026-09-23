@@ -87,7 +87,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "0.9.33"
+__version__ = "0.9.34"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -15963,6 +15963,15 @@ class ServiceInstaller:
             return "already current with %s" % src
         rc, _, err = run(git + ["-C", dest, "merge", "--ff-only", "--quiet", "FETCH_HEAD"], timeout=120)
         if rc != 0:
+            low = (err or "").lower()
+            if ("unrelated histories" in low or "not possible to fast-forward" in low
+                    or "diverged" in low or "refusing to merge" in low):
+                # The service directory is a DEPLOYMENT, not somewhere anyone edits code, so there is
+                # nothing to preserve in its history — redeploy instead of refusing. This is what a
+                # source repository being replaced looks like (a repo split, a restore from backup, a
+                # move between forks), and failing there leaves the machine stuck on old code.
+                shutil.rmtree(os.path.join(dest, ".git"), ignore_errors=True)
+                return self.install_code(src) + " (redeployed — the source history differs)"
             raise RuntimeError("could not fast-forward the service's code: " + (err or "").strip()[:200])
         return "upgraded from %s" % src
 

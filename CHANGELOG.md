@@ -12,6 +12,21 @@ console toward XDR — pluggable connectors for non-endpoint telemetry (firewall
 cloud), cross-source entity correlation, and cross-source response, with a bounded,
 retention-light central store._
 
+## macOS agent 0.9.34 — 2026-09-23
+
+### Fixed
+
+**Installing the service from a replaced source repository failed outright.** `--install-service`
+fast-forwards the service's checkout from the source, so a source whose history does not descend from
+what is already deployed stopped with `refusing to merge unrelated histories` and the machine stayed
+on its old code. That happens whenever the source repository is replaced rather than advanced — a
+repository split, a restore from backup, a move between forks.
+
+The service directory is a deployment, not somewhere anyone edits code, so there is nothing in its
+history worth preserving: an unrelated or diverged source now triggers a clean redeploy instead of a
+refusal. State is untouched — the redeploy overlays only the files the source actually contains, so
+the history database, triage, incidents and baselines living beside the code all survive.
+
 ## macOS agent 0.9.33 · Linux agent 0.9.32 — 2026-09-23
 
 ### Fixed

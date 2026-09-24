@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "0.9.33"
+__version__ = "0.9.34"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -13450,16 +13450,89 @@ def _host_of(url):
     return h if h and _IOC_DOM.match(h) else None
 
 
-def iocs_from_alert(ntype, detail):
+# Binaries the distro ships. "Where else has /bin/bash been seen?" answers "every machine you own",
+# and the two rows that mattered are somewhere on page nine. A path under one of these is not an
+# indicator, and neither is the hash of the packaged binary sitting at it — that hash is identical
+# on every host running the same release. Both become indicators again the moment dpkg says the
+# binary there is unowned or has been modified since install.
+_OS_PREFIXES = ("/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/usr/lib/",
+                "/usr/lib64/", "/usr/share/", "/lib/", "/lib64/", "/snap/")
+_UNTRUSTED_SIG = ("unpackaged", "modified", "missing")   # dpkg provenance, not code signing
+# Interpreters and fetchers: what ran is never the indicator, what it was TOLD to run is.
+_INTERPRETERS = {"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "python", "python2",
+                 "python3", "perl", "ruby", "php", "node", "osascript", "swift", "java", "pwsh",
+                 "powershell", "curl", "wget", "env", "xargs", "sudo", "open", "nohup",
+                 "launchctl", "screen", "tmux", "ssh", "base64", "openssl"}
+# Flags whose argument IS the payload.
+_SCRIPT_FLAGS = ("-c", "-e", "-command", "--command", "-encodedcommand", "-enc", "-file", "/c", "/k")
+_RE_URL = re.compile(r"\b(?:https?|ftps?)://[^\s'\"`|;<>)]{4,}")
+_RE_B64 = re.compile(r"[A-Za-z0-9+/]{32,}={0,2}")
+_RE_PATHY = re.compile(r"(?:/[\w.@+~-]+){2,}")
+_MIN_FRAGMENT = 10                 # shorter than this is a word, not an indicator
+
+
+def _sqllike(value):
+    """A quoted LIKE pattern. % and _ are wildcards, so an indicator containing them has to be
+    escaped or the hunt quietly widens — `/tmp/a_b` would match `/tmp/axb` on every host."""
+    esc = str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return _sqlq("%" + esc + "%")
+
+
+def _is_os_path(path):
+    p = str(path or "")
+    return p.startswith(_OS_PREFIXES)
+
+
+def _sig_says_tampered(detail):
+    """True only when package provenance POSITIVELY says the binary is not the one that belongs
+    there — unowned by any package, or owned but modified since install.
+    Absence of a signature check is not evidence — so an unknown signature at a system path leaves
+    that path generic, which is the safe default: the cost of a wrong 'specific' is a fleet-wide
+    hunt that returns every host."""
+    sig = detail.get("signature") if isinstance(detail, dict) else None
+    if not isinstance(sig, dict):
+        return False
+    if str(sig.get("category") or "") in _UNTRUSTED_SIG:
+        return True
+    return sig.get("trusted") is False
+
+
+def _strip_interpreter(cmdline):
+    """The command line with its leading program dropped, so the fragment we hunt is the argument
+    list rather than the shell that happened to carry it. A bare program name with no arguments
+    leaves nothing — which is the correct answer, not a reason to hunt the program."""
+    parts = str(cmdline or "").strip().split(None, 1)
+    return parts[1].strip() if len(parts) == 2 else ""
+
+
+def _script_payload(cmdline):
+    """The argument to an inline-script flag — `zsh -c <this>`, `osascript -e <this>`,
+    `powershell -EncodedCommand <this>`. This is the thing that got the alert raised."""
+    s = str(cmdline or "")
+    toks = s.split()
+    for i, t in enumerate(toks):
+        if t.lower() in _SCRIPT_FLAGS and i + 1 < len(toks):
+            rest = s.split(t, 1)[1].strip() if t in s else " ".join(toks[i + 1:])
+            return rest.strip().strip("'\"").strip()
+    return ""
+
+
+def _basename_no_ext(path):
+    return os.path.basename(str(path or "")).split(".", 1)[0].lower()
+
+
+def iocs_from_alert(ntype, detail, exe_hint=""):
     """The indicators worth hunting from one validated alert, most specific first.
 
-    Deliberately narrow: hashes, remote addresses, download domains, and the binary's own path. A
-    process NAME or a port is not an indicator — hunting those returns the whole machine and buries
-    the two rows that mattered."""
+    Specificity is judged per VALUE, not per kind. A SHA-256 is usually the best indicator there
+    is — unless it is the hash of the zsh Apple ships, which every host has. A path is usually a
+    weak one — unless it is a file in ~/Downloads that exists on exactly one machine. So each
+    candidate is ranked, the ones a clean machine would also match are dropped, and an alert with
+    nothing specific in it produces no hunt at all rather than a hunt that returns the fleet."""
     d = detail if isinstance(detail, dict) else {}
     out, seen = [], set()
 
-    def add(kind, value, label):
+    def add(kind, value, label, title, rank):
         v = str(value or "").strip()
         if not v or (kind, v) in seen:
             return
@@ -13469,21 +13542,74 @@ def iocs_from_alert(ntype, detail):
             return
         if kind == "domain" and not _IOC_DOM.match(v):
             return
-        if kind == "path" and len(v) > 1024:
+        if kind in ("path", "url", "cmdline") and len(v) > 1024:
             return
         seen.add((kind, v))
-        out.append({"kind": kind, "value": v, "label": label})
+        out.append({"kind": kind, "value": v, "label": label, "title": title, "rank": rank})
 
+    exe = str(d.get("exe") or d.get("path") or d.get("program") or exe_hint or "")
+    cmdline = str(d.get("cmdline") or "")
+    if not cmdline and isinstance(d.get("argv"), (list, tuple)):
+        cmdline = " ".join(str(a) for a in d["argv"])
+    if not cmdline:
+        cmdline = str(d.get("argv") or d.get("raw") or "")
+    # An OS-shipped binary carrying a valid signature is the machine's own furniture; hunting it (or
+    # its hash) is how "/bin/zsh" became a fleet-wide question about nothing.
+    exe_generic = _is_os_path(exe) and not _sig_says_tampered(d)
+
+    # 1 — hashes, unless they are the hash of that furniture
     h = d.get("hashes") if isinstance(d.get("hashes"), dict) else {}
-    add("sha256", h.get("sha256"), "SHA-256 of the binary")
-    add("md5", h.get("md5"), "MD5 of the binary")
+    if not exe_generic:
+        add("sha256", h.get("sha256"), "SHA-256 of the binary", "Where else has this file been seen?", 1)
+        add("md5", h.get("md5"), "MD5 of the binary", "Where else has this file been seen?", 2)
+
+    # 2 — what the command line was actually told to do. For an interpreter this IS the detection;
+    # for anything else it is still the most specific thing the alert carries after a hash.
+    payload = _script_payload(cmdline)
+    for u in _RE_URL.findall(cmdline):
+        add("url", u.rstrip(".,'\""), "URL on the command line", "Who else fetched this URL?", 3)
+    if payload and len(payload) >= _MIN_FRAGMENT:
+        add("cmdline", payload[:300], "what the interpreter was told to run",
+            "Where else has this command been run?", 4)
+    elif cmdline:
+        args = _strip_interpreter(cmdline)
+        if len(args) >= _MIN_FRAGMENT:
+            add("cmdline", args[:300], "the arguments that triggered the detection",
+                "Where else has this command been run?", 4)
+    for b in _RE_B64.findall(cmdline):
+        if not _IOC_HEX.match(b):                 # a hash on the command line is already covered
+            add("cmdline", b[:300], "encoded payload on the command line",
+                "Where else has this encoded payload been run?", 5)
+            break
+    # a script or payload the interpreter was pointed at, as opposed to the interpreter itself.
+    # URLs are stripped first: the path half of http://host/a/b is not a file on this machine.
+    scan = _RE_URL.sub(" ", cmdline)
+    for m in _RE_PATHY.finditer(scan):
+        # "/Users/x/Library/Application Support/.hidden/b.py" matches twice, and the second match
+        # ("/.hidden/b.py") is the tail of a path, not a path. Take only matches that begin at a
+        # token boundary and carry a file extension, so a truncated path never becomes a hunt that
+        # matches nothing on every host in the fleet.
+        pth = m.group(0)
+        if m.start() and scan[m.start() - 1] not in " \t\"'=(|;&":
+            continue
+        if pth != exe and not _is_os_path(pth) and "." in os.path.basename(pth):
+            add("path", pth, "the file the command was pointed at", "Where else is this file?", 6)
+            break
+
+    # 3 — network and download provenance
     if d.get("public") is not False:
-        add("ip", d.get("raddr"), "remote address")
+        add("ip", d.get("raddr"), "remote address", "Who else talked to this address?", 7)
     for u in (d.get("source_urls") or [])[:6]:
+        add("url", u, "where it was downloaded from", "Who else downloaded from this URL?", 3)
         dom = _host_of(u)
         if dom:
-            add("domain", dom, "where it was downloaded from")
-    add("path", d.get("exe") or d.get("path") or d.get("program"), "path on disk")
+            add("domain", dom, "where it was downloaded from", "Who else downloaded from this domain?", 8)
+
+    # 4 — the path itself, last, and only when it is not something every machine has
+    if exe and not exe_generic:
+        add("path", exe, "path on disk", "Where else is this file?", 9)
+
+    out.sort(key=lambda i: i["rank"])
     return out
 
 
@@ -13506,10 +13632,32 @@ def autohunt_sql(kind, value):
                 "first_seen, last_seen, 1 FROM conn_events WHERE raddr=%s "
                 "ORDER BY last_seen DESC LIMIT %d" % (v, v, AUTOHUNT_ROWCAP))
     if kind == "domain":
-        like = _sqlq("%" + str(value) + "%")
+        like = _sqllike(value)
         return ("SELECT 'download' AS where_seen, name || ' from ' || source_url AS what, "
-                "first_seen, last_seen, times_seen FROM downloads WHERE source_url LIKE %s "
-                "ORDER BY last_seen DESC LIMIT %d" % (like, AUTOHUNT_ROWCAP))
+                "first_seen, last_seen, times_seen FROM downloads WHERE source_url LIKE %s ESCAPE '\\' "
+                "UNION ALL SELECT 'process', name || ' ' || cmdline, first_seen, last_seen, times_seen "
+                "FROM processes WHERE cmdline LIKE %s ESCAPE '\\' "
+                "UNION ALL SELECT 'exec event', cmdline, first_seen, last_seen, 1 "
+                "FROM exec_events WHERE cmdline LIKE %s ESCAPE '\\' "
+                "ORDER BY last_seen DESC LIMIT %d" % (like, like, like, AUTOHUNT_ROWCAP))
+    if kind == "url":
+        like = _sqllike(value)
+        return ("SELECT 'download' AS where_seen, name || ' from ' || source_url AS what, "
+                "first_seen, last_seen, times_seen FROM downloads WHERE source_url LIKE %s ESCAPE '\\' "
+                "UNION ALL SELECT 'process', name || ' ' || cmdline, first_seen, last_seen, times_seen "
+                "FROM processes WHERE cmdline LIKE %s ESCAPE '\\' "
+                "UNION ALL SELECT 'exec event', cmdline, first_seen, last_seen, 1 "
+                "FROM exec_events WHERE cmdline LIKE %s ESCAPE '\\' "
+                "ORDER BY last_seen DESC LIMIT %d" % (like, like, like, AUTOHUNT_ROWCAP))
+    if kind == "cmdline":
+        like = _sqllike(value)
+        return ("SELECT 'process' AS where_seen, name || ' ' || cmdline AS what, "
+                "first_seen, last_seen, times_seen FROM processes WHERE cmdline LIKE %s ESCAPE '\\' "
+                "UNION ALL SELECT 'exec event', cmdline, first_seen, last_seen, 1 "
+                "FROM exec_events WHERE cmdline LIKE %s ESCAPE '\\' "
+                "UNION ALL SELECT 'scheduled job', label || ' ' || argv, first_seen, last_seen, times_seen "
+                "FROM jobs WHERE argv LIKE %s ESCAPE '\\' "
+                "ORDER BY last_seen DESC LIMIT %d" % (like, like, like, AUTOHUNT_ROWCAP))
     if kind == "path":
         return ("SELECT 'process' AS where_seen, name || ' ' || cmdline AS what, first_seen, last_seen, "
                 "times_seen FROM processes WHERE exe=%s "
@@ -13518,9 +13666,11 @@ def autohunt_sql(kind, value):
                 "first_seen, last_seen, times_seen FROM connections WHERE exe=%s "
                 "UNION ALL SELECT 'scheduled job', label || ' ' || program, first_seen, last_seen, times_seen "
                 "FROM jobs WHERE program=%s "
-                "ORDER BY last_seen DESC LIMIT %d" % (v, v, v, v, AUTOHUNT_ROWCAP))
+                "UNION ALL SELECT 'file', path, first_seen, last_seen, 1 FROM files WHERE path=%s "
+                "UNION ALL SELECT 'download', name || ' -> ' || path, first_seen, last_seen, times_seen "
+                "FROM downloads WHERE path=%s "
+                "ORDER BY last_seen DESC LIMIT %d" % (v, v, v, v, v, v, AUTOHUNT_ROWCAP))
     return None
-
 
 class AutoHuntStore:
     """The hunts raised by validated alerts, with what they found. Small on purpose: this is the
@@ -13550,7 +13700,7 @@ class AutoHuntStore:
         question travels, never its telemetry."""
         with self.lock:
             return [{k: h.get(k) for k in ("id", "kind", "value", "title", "why", "sql", "ts",
-                                           "hits", "node_id", "label")}
+                                           "hits", "node_id", "label", "rank")}
                     for h in self.data[-12:]]
 
     def _save_locked(self):
@@ -13563,23 +13713,54 @@ class AutoHuntStore:
             pass
 
 
+def _recover_hash(history, path):
+    """The SHA-256 of a file the alert did not carry one for. A download closed minutes after it
+    landed often still reads `{"status": "pending"}` in its detail, and an alert resolved from the
+    history table carries whatever was known when it was written — so the best indicator in the
+    whole alert was missing at exactly the moment it was needed."""
+    if not history or not path:
+        return None
+    q = _sqlq(path)
+    for sql in ("SELECT sha256 FROM hashes WHERE exe=%s AND sha256 IS NOT NULL LIMIT 1" % q,
+                "SELECT sha256 FROM files WHERE path=%s AND sha256 IS NOT NULL LIMIT 1" % q,
+                "SELECT sha256 FROM downloads WHERE path=%s AND sha256 IS NOT NULL LIMIT 1" % q):
+        res = history.query(sql)
+        for row in (res.get("rows") or []):
+            sha = row.get("sha256")
+            if sha and _IOC_HEX.match(str(sha)):
+                return str(sha)
+    return None
+
+
 def autohunt_on_validated(cache, node_id, ntype, detail, label="", by="analyst"):
     """An alert was closed as Malicious: turn its indicators into hunts and run them here."""
     store = getattr(cache, "autohunts", None)
-    if not store or not getattr(cache, "history", None):
+    history = getattr(cache, "history", None)
+    if not store or not history:
         return []
+    iocs = iocs_from_alert(ntype, detail)
+    if not any(i["kind"] in ("sha256", "md5") for i in iocs):
+        d = detail if isinstance(detail, dict) else {}
+        path = d.get("path") or d.get("exe")
+        if path and not _is_os_path(path):
+            sha = _recover_hash(history, path)
+            if sha:
+                iocs.insert(0, {"kind": "sha256", "value": sha, "rank": 1,
+                                "label": "SHA-256 of the file (read back from this host's own records)",
+                                "title": "Where else has this file been seen?"})
     made = []
-    for ioc in iocs_from_alert(ntype, detail)[:6]:
+    for ioc in iocs[:6]:
         sql = autohunt_sql(ioc["kind"], ioc["value"])
         if not sql:
             continue
-        res = cache.history.query(sql)
+        res = history.query(sql)
         rows = res.get("rows") or []
         made.append({
             "id": "ah-" + secrets.token_hex(5), "ts": time.time(),
             "node_id": node_id, "label": str(label or "")[:200], "by": str(by)[:60],
             "kind": ioc["kind"], "value": ioc["value"], "why": ioc["label"],
-            "title": "Where else has this %s been seen?" % ioc["kind"],
+            "title": ioc.get("title") or ("Where else has this %s been seen?" % ioc["kind"]),
+            "rank": ioc.get("rank", 9),
             "sql": sql, "ok": bool(res.get("ok")), "error": res.get("error"),
             "hits": len(rows), "columns": res.get("columns") or [],
             "rows": rows[:50],

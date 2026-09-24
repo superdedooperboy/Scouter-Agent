@@ -43,6 +43,36 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   // one place someone would try to use it. The agent stays the authority: anything outside the
   // window's scope still comes back 403, and that error is shown as-is.
   window.__SCOUTER_BG__ = false;
+  // Break-glass: the page can never arm it — that needs root, which is the whole authentication —
+  // so this shows the exact command and the live state of any open window.
+  window.bgPanelToggle = function(){
+    var p=document.getElementById('bgPanel'); if(!p) return;
+    var open = p.style.display==='none';
+    p.style.display = open ? '' : 'none';
+    if(open) bgRefreshPanel();
+  };
+  window.bgCopy = function(){
+    var c=document.getElementById('bgCmd'); if(!c) return;
+    navigator.clipboard && navigator.clipboard.writeText(c.textContent).then(function(){
+      var b=c.parentNode.querySelector('button'); if(!b) return;
+      var t=b.textContent; b.textContent='Copied'; setTimeout(function(){ b.textContent=t; }, 1400);
+    });
+  };
+  function bgRefreshPanel(){
+    _f('/api/break-glass').then(function(r){ return r.json(); }).then(function(d){
+      var cmd=document.getElementById('bgCmd'), st=document.getElementById('bgState');
+      if(cmd) cmd.textContent = (d && d.command) ? d.command
+        : 'sudo python3 agent.py --break-glass 60 --reason "why you need it"';
+      if(!st) return;
+      if(d && d.active){
+        st.innerHTML = '<b>A window is open</b> \u2014 ' + Math.round((d.remaining||0)/60) +
+          ' min left, opened by ' + (d.by||'?') + (d.reason?(' \u00b7 ' + d.reason):'') +
+          '. End it early with <code>--break-glass 0</code>.';
+      } else {
+        st.textContent = 'No window is open. Maximum ' + ((d && d.max_minutes) || 240) + ' minutes.';
+      }
+    }).catch(function(){});
+  }
   function bgPoll(){
     _f('/api/break-glass').then(function(r){ return r.json(); }).then(function(d){
       var was = window.__SCOUTER_BG__;
@@ -632,6 +662,13 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   .tabbadge.crit{background:var(--hot)}
   #incidents{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:12px}
   .inccard{background:var(--panel);border:1px solid var(--line);border-radius:8px;margin:8px 0;overflow:hidden}
+  /* An investigation still open (open OR investigating) reads as "live": a green ring and a lit
+     dot, so it stands out among closed ones. Mirrors the same treatment in Scouter Mesh.
+     Note .inccard.open already means EXPANDED here, hence the separate .openinv class. */
+  .inccard.openinv{border-color:color-mix(in srgb,var(--good,#6bd08a) 55%,transparent);
+    box-shadow:0 0 0 1px color-mix(in srgb,var(--good,#6bd08a) 30%,transparent)}
+  .inchead .cdot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:0 0 auto}
+  .inccard.openinv .inchead .cdot{background:var(--good,#6bd08a);box-shadow:0 0 6px var(--good,#6bd08a)}
   .inchead{display:flex;align-items:center;gap:8px;padding:9px 11px;cursor:pointer;user-select:none}
   .inchead:hover{background:var(--panel2,rgba(255,255,255,.03))}
   .inchead .tdot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
@@ -742,6 +779,16 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
 #managedBar{background:var(--chip);border-bottom:1px solid var(--edge);color:var(--txt);
   padding:7px 14px;font-size:12.5px;line-height:1.45}
 #managedBar b{font-weight:650}
+/* Quiet on purpose: break-glass is for the rare day the provider cannot be reached, so it sits
+   in the managed banner (the only place it is ever relevant) as a link, not a button. */
+#managedBar .bglink{margin-left:8px;font-size:11px;color:var(--muted);text-decoration:underline;
+  text-underline-offset:2px;cursor:pointer;opacity:.75}
+#managedBar .bglink:hover{color:var(--txt);opacity:1}
+#bgPanel{background:var(--panel);border-bottom:1px solid var(--edge);padding:9px 14px;font-size:12px;
+  display:flex;flex-direction:column;gap:5px}
+#bgPanel .bgcmd{display:flex;gap:6px;align-items:center}
+#bgPanel code{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:6px;
+  padding:5px 8px;font-size:11.5px;overflow:auto;white-space:nowrap}
 #managedToast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:9999;max-width:520px;
   background:var(--panel);border:1px solid var(--edge);border-radius:10px;padding:11px 15px;font-size:13px;
   box-shadow:0 10px 30px var(--shadow);display:none}
@@ -760,7 +807,16 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
 </head>
 <body>
 <div id="managedBar" style="display:none">🔒 <b>Managed by your security provider.</b> This console is read-only:
-  Everything is visible, and changes are made by the team that monitors this machine. Ask them for any change.</div>
+  Everything is visible, and changes are made by the team that monitors this machine. Ask them for any change.
+  <span class="bglink" onclick="bgPanelToggle()" title="If you have root on this machine and cannot reach your provider">break-glass</span></div>
+<div id="bgPanel" style="display:none">
+  <div><b>Break-glass</b> — a time-boxed override of your provider’s authority, for when they cannot be reached.</div>
+  <div class="bgcmd"><code id="bgCmd"></code><button class="btn" onclick="bgCopy()">Copy</button></div>
+  <div class="hint">Run it in Terminal. It must be root — that is the check — so it cannot be armed from this page.
+    It covers triage, reversible containment and restarting the agent; never the mesh link, collection or response
+    settings. It expires by itself, and every window is recorded and reported to your provider.</div>
+  <div class="hint" id="bgState"></div>
+</div>
 
 <div id="app">
   <header>
@@ -807,10 +863,10 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <div class="tabs">
       <button id="tabAlerts" class="on" onclick="showTab('alerts')">Alerts</button>
       <button id="tabIncidents" onclick="showTab('incidents')">Investigations<span id="incBadge" class="tabbadge" style="display:none"></span></button>
-      <button id="tabGraph" onclick="showTab('graph')">Graph</button>
-      <button id="tabTree" onclick="showTab('tree')">Tree</button>
+      <button id="tabGraph" onclick="showTab('graph')">Node Graph</button>
+      <button id="tabTree" onclick="showTab('tree')">Process Tree</button>
       <button id="tabHunt" onclick="showTab('hunt')">Hunt</button>
-      <button id="tabTimeline" onclick="showTab('timeline')">Timeline</button>
+      <button id="tabTimeline" onclick="showTab('timeline')">Event Timeline</button>
       <button id="tabDetections" onclick="showTab('detections')">Detections</button>
       <button id="tabResponse" onclick="showTab('response')">Response</button>
       <button id="tabSensors" onclick="showTab('sensors')">Sensors<span id="senBadge" class="tabbadge" style="display:none"></span></button>
@@ -845,12 +901,17 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <span id="incLeftBadge" class="tabbadge" style="display:none"></span></h2>
     <div class="hint" id="incLeftNote" style="cursor:pointer" onclick="showTab('incidents')">No open investigations.</div>
 
-    <h2>Filter</h2>
+    <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
+        title="Show / hide filters" onclick="toggleSection('filterBody','filterCaret')">
+      <span id="filterCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Filter
+    </h2>
+    <div id="filterBody" style="display:none">
     <input type="text" id="search" placeholder="search pid, name, cmd, host, port…" oninput="applyFilters()">
     <label class="switch"><input type="checkbox" id="fOnlyFlagged" checked onchange="applyFilters()"> Only flagged (+ their neighbors)</label>
     <label>Minimum severity: <span class="val" id="minSevVal">low</span></label>
     <input type="range" id="minSev" min="0" max="4" value="1" step="1" oninput="applyFilters()">
 
+    </div>
     <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
         title="Show / hide notification settings" onclick="toggleSection('notifyBody','notifyCaret')">
       <span id="notifyCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Notifications
@@ -887,13 +948,6 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <div id="exportBody" style="display:none"><div id="exportPanel"><div class="hint">Loading…</div></div></div>
 
     <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
-        title="Show / hide Scouter Mesh multi-host reporting" onclick="toggleSection('meshBody','meshCaret');meshLoad()">
-      <span id="meshCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Scouter Mesh
-      <span class="hint" style="font-weight:400;font-size:9.5px">multi-host</span>
-    </h2>
-    <div id="meshBody" style="display:none"><div id="meshPanel"><div class="hint">Loading…</div></div></div>
-
-    <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
         title="Show / hide decoys (bait credentials planted on this host)" onclick="toggleSection('decoyBody','decoyCaret');decoyLoad()">
       <span id="decoyCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Decoys
       <span style="flex:1"></span>
@@ -903,53 +957,6 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <div class="hint" style="margin-bottom:6px">Bait credentials no real user or service has a reason to use. Any use of one is an intrusion signal, so they run by default.</div>
       <div id="decoyState"></div>
     </div>
-    <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
-        title="Show / hide the legend" onclick="toggleSection('legendBody','legendCaret')">
-      <span id="legendCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Legend
-    </h2>
-    <div class="legend" id="legendBody" style="display:none">
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><circle r="6" fill="#5a6b80"/></svg> Process</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><rect x="-5" y="-5" width="10" height="10" fill="#5a6b80"/></svg> Remote endpoint</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,-6 6,5 -6,5" fill="#5a6b80"/></svg> Listening port</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><rect x="-5" y="-5" width="10" height="10" fill="#5a6b80" transform="rotate(45)"/></svg> Cron / launchd job</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="6,0 3,5.2 -3,5.2 -6,0 -3,-5.2 3,-5.2" fill="#5a6b80"/></svg> Downloaded file</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="2.5,-6 6,-2.5 6,2.5 2.5,6 -2.5,6 -6,2.5 -6,-2.5 -2.5,-6" fill="#5a6b80"/></svg> Login / auth event</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,-6 5.7,-1.85 3.5,4.85 -3.5,4.85 -5.7,-1.85" fill="#5a6b80"/></svg> New file on disk</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="2.3,-6 2.3,-2.3 6,-2.3 6,2.3 2.3,2.3 2.3,6 -2.3,6 -2.3,2.3 -6,2.3 -6,-2.3 -2.3,-2.3 -2.3,-6" fill="#5a6b80"/></svg> New persistence</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="-3.6,-6 3.6,-6 6,6 -6,6" fill="#5a6b80"/></svg> Privacy permission (TCC)</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="-4.8,-6 6,0 -4.8,6" fill="#5a6b80"/></svg> Remote access / SSH key</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,-6 1.47,-2.02 5.71,-1.85 2.38,0.77 3.53,4.85 0,2.5 -3.53,4.85 -2.38,0.77 -5.71,-1.85 -1.47,-2.02" fill="#5a6b80"/></svg> Account / privilege</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,6 6,-5.1 -6,-5.1" fill="#5a6b80"/></svg> Security posture (config)</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="-3.3,-4.8 6,-4.8 3.3,4.8 -6,4.8" fill="#5a6b80"/></svg> Shell-history command</div>
-      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,-6 1.5,-2.6 5.2,-3 3,0 5.2,3 1.5,2.6 0,6 -1.5,2.6 -5.2,3 -3,0 -5.2,-3 -1.5,-2.6" fill="#5a6b80"/></svg> Custom detection (SQL)</div>
-      <div class="lr" style="margin-top:6px"><span class="sw" style="background:var(--accent2)"></span> outbound connection</div>
-      <div class="lr"><span class="sw" style="background:#56d4dd"></span> listens on</div>
-      <div class="lr"><span class="sw" style="background:#a371f7"></span> job launches process</div>
-      <div class="lr"><span class="sw" style="background:#3a4a64"></span> parent → child</div>
-    </div>
-
-    <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
-        title="Show / hide node-type filters" onclick="toggleSection('ntBody','ntCaret')">
-      <span id="ntCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Node types
-    </h2>
-    <div id="ntBody" style="display:none">
-    <label class="switch"><input type="checkbox" class="ftype" value="process" checked onchange="applyFilters()"> ● Processes</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="remote" checked onchange="applyFilters()"> ■ Remote endpoints</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="listen" checked onchange="applyFilters()"> ▲ Listening ports</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="job" checked onchange="applyFilters()"> ◆ Cron / LaunchAgents</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="download" checked onchange="applyFilters()"> ⬡ Downloaded files</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="auth" checked onchange="applyFilters()"> 🔑 Auth / logins</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="file" checked onchange="applyFilters()"> ⬠ New files (FIM)</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="persist" checked onchange="applyFilters()"> ✚ Persistence (BTM/ext)</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="tcc" checked onchange="applyFilters()"> 🛡 Privacy perms (TCC)</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="access" checked onchange="applyFilters()"> 📡 Remote access / SSH keys</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="account" checked onchange="applyFilters()"> ★ Accounts / privilege</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="config" checked onchange="applyFilters()"> ⚙ Security posture</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="shell" checked onchange="applyFilters()"> $ Shell history</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="detection" checked onchange="applyFilters()"> 🎯 Detections (SQL)</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="decoy" checked onchange="applyFilters()"> 🪤 Decoys (bait)</label>
-    </div>
-
     <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
         title="Show / hide threat-intel feeds" onclick="iocToggleSection()">
       <span id="iocCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Threat Intel Feeds
@@ -1015,11 +1022,20 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     </h2>
     <div id="aiBody" style="display:none"><div id="aiPanel"></div></div>
 
-    <h2>Graph</h2>
+    <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
+        title="Show / hide node-graph display options" onclick="toggleSection('graphBody','graphCaret')">
+      <span id="graphCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Node Graph
+    </h2>
+    <div id="graphBody" style="display:none">
     <label class="switch"><input type="checkbox" id="fLabels" checked onchange="updateLabels()"> Always show labels</label>
     <button class="btn" style="width:100%;margin-top:4px" onclick="freezeToggle()" id="freezeBtn">❄ Freeze layout</button>
 
-    <h2>Appearance</h2>
+    </div>
+    <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
+        title="Show / hide appearance settings" onclick="toggleSection('appearBody','appearCaret')">
+      <span id="appearCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Appearance
+    </h2>
+    <div id="appearBody" style="display:none">
     <div class="row" style="display:flex;align-items:center;gap:6px">
       <span class="hint" style="flex:0 0 auto">Theme</span>
       <select id="dispTheme" onchange="setTheme(this.value)" style="flex:1">
@@ -1028,7 +1044,63 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
         <option value="light">Light</option>
       </select>
     </div>
+    </div>
+    <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
+        title="Show / hide the legend" onclick="toggleSection('legendBody','legendCaret')">
+      <span id="legendCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Legend
+    </h2>
+    <div class="legend" id="legendBody" style="display:none">
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><circle r="6" fill="#5a6b80"/></svg> Process</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><rect x="-5" y="-5" width="10" height="10" fill="#5a6b80"/></svg> Remote endpoint</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,-6 6,5 -6,5" fill="#5a6b80"/></svg> Listening port</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><rect x="-5" y="-5" width="10" height="10" fill="#5a6b80" transform="rotate(45)"/></svg> Cron / launchd job</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="6,0 3,5.2 -3,5.2 -6,0 -3,-5.2 3,-5.2" fill="#5a6b80"/></svg> Downloaded file</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="2.5,-6 6,-2.5 6,2.5 2.5,6 -2.5,6 -6,2.5 -6,-2.5 -2.5,-6" fill="#5a6b80"/></svg> Login / auth event</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,-6 5.7,-1.85 3.5,4.85 -3.5,4.85 -5.7,-1.85" fill="#5a6b80"/></svg> New file on disk</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="2.3,-6 2.3,-2.3 6,-2.3 6,2.3 2.3,2.3 2.3,6 -2.3,6 -2.3,2.3 -6,2.3 -6,-2.3 -2.3,-2.3 -2.3,-6" fill="#5a6b80"/></svg> New persistence</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="-3.6,-6 3.6,-6 6,6 -6,6" fill="#5a6b80"/></svg> Privacy permission (TCC)</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="-4.8,-6 6,0 -4.8,6" fill="#5a6b80"/></svg> Remote access / SSH key</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,-6 1.47,-2.02 5.71,-1.85 2.38,0.77 3.53,4.85 0,2.5 -3.53,4.85 -2.38,0.77 -5.71,-1.85 -1.47,-2.02" fill="#5a6b80"/></svg> Account / privilege</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,6 6,-5.1 -6,-5.1" fill="#5a6b80"/></svg> Security posture (config)</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="-3.3,-4.8 6,-4.8 3.3,4.8 -6,4.8" fill="#5a6b80"/></svg> Shell-history command</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,-6 1.5,-2.6 5.2,-3 3,0 5.2,3 1.5,2.6 0,6 -1.5,2.6 -5.2,3 -3,0 -5.2,-3 -1.5,-2.6" fill="#5a6b80"/></svg> Custom detection (SQL)</div>
+      <div class="lr" style="margin-top:6px"><span class="sw" style="background:var(--accent2)"></span> outbound connection</div>
+      <div class="lr"><span class="sw" style="background:#56d4dd"></span> listens on</div>
+      <div class="lr"><span class="sw" style="background:#a371f7"></span> job launches process</div>
+      <div class="lr"><span class="sw" style="background:#3a4a64"></span> parent → child</div>
+    </div>
+
+    <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
+        title="Show / hide node-type filters" onclick="toggleSection('ntBody','ntCaret')">
+      <span id="ntCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Node types
+    </h2>
+    <div id="ntBody" style="display:none">
+    <label class="switch"><input type="checkbox" class="ftype" value="process" checked onchange="applyFilters()"> ● Processes</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="remote" checked onchange="applyFilters()"> ■ Remote endpoints</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="listen" checked onchange="applyFilters()"> ▲ Listening ports</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="job" checked onchange="applyFilters()"> ◆ Cron / LaunchAgents</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="download" checked onchange="applyFilters()"> ⬡ Downloaded files</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="auth" checked onchange="applyFilters()"> 🔑 Auth / logins</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="file" checked onchange="applyFilters()"> ⬠ New files (FIM)</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="persist" checked onchange="applyFilters()"> ✚ Persistence (BTM/ext)</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="tcc" checked onchange="applyFilters()"> 🛡 Privacy perms (TCC)</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="access" checked onchange="applyFilters()"> 📡 Remote access / SSH keys</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="account" checked onchange="applyFilters()"> ★ Accounts / privilege</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="config" checked onchange="applyFilters()"> ⚙ Security posture</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="shell" checked onchange="applyFilters()"> $ Shell history</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="detection" checked onchange="applyFilters()"> 🎯 Detections (SQL)</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="decoy" checked onchange="applyFilters()"> 🪤 Decoys (bait)</label>
+    </div>
+
+    <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
+        title="Show / hide Scouter Mesh multi-host reporting" onclick="toggleSection('meshBody','meshCaret');meshLoad()">
+      <span id="meshCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Scouter Mesh
+      <span class="hint" style="font-weight:400;font-size:9.5px">multi-host</span>
+    </h2>
+    <div id="meshBody" style="display:none"><div id="meshPanel"><div class="hint">Loading…</div></div></div>
+
     <div class="hint" style="margin-top:14px">Read-only. Runs <code>ps</code>/<code>lsof</code>/<code>codesign</code> locally; nothing leaves your Mac.</div>
+
   </aside>
 
   <!-- CENTER: graph + alerts -->
@@ -4087,12 +4159,12 @@ function incidentCard(c){
   const ev=(c.events||[]).slice().reverse().map(e=>
     `<div class="auditrow"><span class="audts">${esc(String(e.iso||'').replace('T',' ').replace('Z',''))}</span>`+
     `<span class="audtag" style="color:var(--accent2)">${esc(TAG[e.kind]||e.kind)}</span><span class="auddet">${esc(e.detail||'')}</span></div>`).join('');
-  return `<div class="inccard${incOpenSet.has(c.id)?' open':''}" style="border-left:3px solid ${col}">
+  return `<div class="inccard${incOpenSet.has(c.id)?' open':''}${st!=='closed'?' openinv':''}" style="border-left:3px solid ${col}">
     <div class="inchead" onclick="incToggle('${esc(c.id)}',this)">
       <input type="checkbox" class="incsel" data-id="${esc(c.id)}" ${incSel.has(c.id)?'checked':''} title="Select for a bulk status change" onclick="event.stopPropagation()" onchange="incSelToggle(this.dataset.id,this.checked)">
       <span class="tdot" style="background:${col}"></span>
       <b>#${c.case_no||'?'}</b> ${titleTxt?`<b>${titleTxt}</b>`:''} <span class="hint">${c.size} alert${c.size===1?'':'s'}${types?' \u00b7 '+esc(types):''}</span>
-      <span class="incstatus ${esc(st)}">${esc(stlabel)}</span>
+      <span class="cdot" title="${st!=='closed'?'still open':'closed'}"></span><span class="incstatus ${esc(st)}">${esc(stlabel)}</span>
     </div>
     <div class="incbody">
       <div class="incrow"><span class="inck">title</span><div>${titleTxt||'<span class="hint">untitled</span>'} <span class="va" onclick="event.stopPropagation();incSetTitle('${esc(c.id)}')">\u270e edit</span></div></div>

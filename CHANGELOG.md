@@ -12,6 +12,34 @@ console toward XDR — pluggable connectors for non-endpoint telemetry (firewall
 cloud), cross-source entity correlation, and cross-source response, with a bounded,
 retention-light central store._
 
+## macOS agent 0.9.36 / Linux agent 0.9.33 — 2026-09-23
+
+### Added
+
+**Open investigations are marked as such.** An investigation that is not closed now carries a green
+ring and a lit green dot beside its status, matching what the Mesh already showed. Status was only
+ever a word at the end of the row, so scanning the list meant reading it; the ring makes the open
+work visible at a glance. `.inccard.open` already meant *expanded* in this console, so the new state
+is a separate `.openinv` class.
+
+**Break-glass is reachable from the console.** The managed banner — the only place the override is
+ever relevant — carries a quiet `break-glass` link that opens the exact command for this install,
+with a Copy button and the live state of any open window. The page deliberately cannot arm it: the
+command must run as root, and that is the whole authentication. `/api/break-glass` now returns that
+command built from the running interpreter and the agent's absolute path, because a service runs
+from a directory nobody has open in a terminal.
+
+### Changed
+
+**Tabs say what they are.** `Graph` → **Node Graph**, `Tree` → **Process Tree**, `Timeline` →
+**Event Timeline**. The sidebar's `Graph` section follows the same name.
+
+**Sidebar order follows how it is used.** Scouter Mesh moves to the bottom, with Legend and Node
+types just above it — reference material and the multi-host link sit below the controls you touch
+daily, not above them. Filter, Node Graph and Appearance became collapsible and start collapsed,
+like every other section. The "nothing leaves your machine" line stays pinned at the foot of the
+sidebar rather than collapsing with Appearance.
+
 ## macOS agent 0.9.35 — 2026-09-23
 
 ### Fixed

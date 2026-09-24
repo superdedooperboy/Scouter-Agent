@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "0.9.32"
+__version__ = "0.9.33"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -12551,7 +12551,12 @@ def make_handler(cache):
                 self._send_json({"ok": True, "hunts": st.list() if st else [],
                                  "enabled": bool(st)})
             elif path == "/api/break-glass":
-                self._send_json(dict(breakglass_report(), managed=self._managed(),
+                # Hand back the command for THIS install, absolute. A service runs from a directory
+                # nobody has open in a terminal, so a copyable line that works from anywhere is the
+                # difference between using break-glass and hunting for where the agent lives.
+                cmd = "sudo %s %s --break-glass 60 --reason \"why you need it\"" % (
+                    sys.executable or "python3", os.path.abspath(__file__))
+                self._send_json(dict(breakglass_report(), managed=self._managed(), command=cmd,
                                      scope=sorted(BREAKGLASS_PATHS), actions=sorted(BREAKGLASS_RESPOND_OPS)))
             elif path == "/api/metrics":
                 # ?from=/?to= are epoch MILLIseconds, matching the lifecycle record timestamps. The

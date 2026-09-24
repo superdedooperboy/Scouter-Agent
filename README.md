@@ -1323,11 +1323,11 @@ files, hashes — including things no longer present on the host). Results are g
 result navigates you there — focusing a live node in the graph, opening an alert, jumping to a
 technique or group, or running a scoped Hunt query for a history hit.
 
-- Graph tab — force-directed graph. Shape = type (● process, ■ remote, ▲ listener,
+- Node Graph tab — force-directed graph. Shape = type (● process, ■ remote, ▲ listener,
   ◆ job, ⬡ download, 🔑 auth, ⬠ new file); color = severity. Drag nodes, scroll to zoom, drag
   the background to pan, ⤢ to fit. New nodes pulse in; gone nodes disappear — it updates live
   every few seconds.
-- Tree tab — the process hierarchy as a collapsible outline (parent → child), with
+- Process Tree tab — the process hierarchy as a collapsible outline (parent → child), with
   each process's monitored events nested underneath it: the cron/launchd job that
   launched it, its listening ports, and its outbound connections. Rows are colored by
   severity; by default it prunes to branches that contain something flagged (ancestors
@@ -1373,7 +1373,7 @@ technique or group, or running a scoped Hunt query for a history hit.
   column, long fields like `message`/`command`/`source_url` shown untruncated) plus an
   Indicators section that auto-extracts hashes, public IPs, and URLs/domains from the
   row and links each out to VirusTotal and URLScan.io (same view as the Alerts detail).
-- Timeline tab — a single chronological feed across the whole history database, newest first
+- Event Timeline tab — a single chronological feed across the whole history database, newest first
   and grouped by day. It unifies eight event streams — generated alerts, flagged processes,
   outbound network connections, auth events, persistence jobs, downloads, and the
   real-time exec / file streams — into one time-ordered lane, each row color-coded by type
@@ -1424,7 +1424,7 @@ technique or group, or running a scoped Hunt query for a history hit.
   > "Where are my apps?" Every running process *is* collected — but the graph only ever
   > shows alerts (flagged items) + their neighbors, so the force-layout stays fast and readable
   > (routine `info`-level processes like Signal, Photos, Messages are never drawn there). To see
-  > the full inventory, open the Tree tab and click Show all — that's a Tree-only
+  > the full inventory, open the Process Tree tab and click Show all — that's a Process-Tree-only
   > toggle and does not affect the graph. (Clicking an alert/relationship still pins that one
   > node into the graph without flooding it.)
 - Notifications — pick a threshold under Notifications (High only, Medium & above,

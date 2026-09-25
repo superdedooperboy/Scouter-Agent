@@ -8934,10 +8934,16 @@ def correlate_incidents(alerts, node_by_id, edges, proc_parent):
     for a in alerts:
         d = a.get("detail") or {}
         keys = {}
-        h = d.get("hashes") or {}
-        for k in (h.get("sha256"), h.get("md5")):
-            if k:
-                keys["hash:%s" % k] = 1
+        # A hash is the strongest tie there is — unless it is the hash of a binary the OS ships,
+        # which is identical on every machine in the fleet. Apple's zsh tying five alerts together
+        # is the same over-merge as its path doing so, and is excluded for the same reason. A
+        # signature that says the binary there has been tampered with makes it an indicator again.
+        _exe = str(d.get("exe") or d.get("path") or d.get("program") or "")
+        if not (_is_os_path(_exe) and not _sig_says_tampered(d)):
+            h = d.get("hashes") or {}
+            for k in (h.get("sha256"), h.get("md5")):
+                if k:
+                    keys["hash:%s" % k] = 1
         ra = d.get("raddr")
         if ra and not is_private_ip(ra):
             keys["ip:%s" % ra] = 2

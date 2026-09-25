@@ -979,7 +979,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
         title="Show / hide AI assist settings" onclick="aiToggleSection()">
       <span id="aiCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>AI Assist
-      <span class="hint" style="font-weight:400;font-size:9.5px">advisory</span>
+      <span class="hint" style="font-weight:400;font-size:9.5px">advisory unless armed</span>
     </h2>
     <div id="aiBody" style="display:none"><div id="aiPanel"></div></div>
 
@@ -4851,7 +4851,8 @@ function toggleSection(bodyId, caretId){
   body.style.display = open ? '' : 'none';
   if(caret) caret.textContent = open ? '▾' : '▸';
 }
-// ---- AI assist (optional, provider-agnostic, advisory) ----
+// ---- AI assist (optional, provider-agnostic). Advisory for Explain / false-positive checks;
+// as the in-the-loop second stage it can also add or undo a reversible action when armed. ----
 let aiState=null, aiCurrentCtx=null;
 function aiToggleSection(){
   const body=document.getElementById('aiBody'), caret=document.getElementById('aiCaret');
@@ -4868,7 +4869,7 @@ function aiRenderPanel(s){
   const presetOpts=Object.entries(presets).map(([n,u])=>`<option value="${esc(u)}">${esc(n)}</option>`).join('');
   const offhost=(s.base_url && !s.is_local);
   p.innerHTML=`
-    <div class="hint" style="margin-bottom:5px">Works with any OpenAI-compatible endpoint — local (Ollama, LM Studio) or cloud. Advisory only; nothing is auto-sent.</div>
+    <div class="hint" style="margin-bottom:5px">Works with any OpenAI-compatible endpoint — local (Ollama, LM Studio) or cloud. Nothing is auto-sent. Explain / FP-check are advisory; the Preferred model also drives the in-the-loop stage, which armed to Live can add or undo a reversible action.</div>
     <label class="switch" style="margin-top:2px"><input type="checkbox" id="aiEnable" ${s.enabled?'checked':''} onchange="aiSaveConfig()"> Enable AI Assist</label>
     <label>Provider preset<select id="aiPreset" onchange="document.getElementById('aiBase').value=this.value"><option value="">— pick to fill URL —</option>${presetOpts}</select></label>
     <label>Endpoint base URL<input type="text" id="aiBase" value="${esc(s.base_url||'')}" placeholder="http://127.0.0.1:11434/v1" autocomplete="off" spellcheck="false"></label>

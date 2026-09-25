@@ -1018,7 +1018,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
         title="Show / hide AI assist settings" onclick="aiToggleSection()">
       <span id="aiCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>AI Assist
-      <span class="hint" style="font-weight:400;font-size:9.5px">advisory</span>
+      <span class="hint" style="font-weight:400;font-size:9.5px">advisory unless armed</span>
     </h2>
     <div id="aiBody" style="display:none"><div id="aiPanel"></div></div>
 
@@ -5032,7 +5032,8 @@ function toggleSection(bodyId, caretId){
   body.style.display = open ? '' : 'none';
   if(caret) caret.textContent = open ? '▾' : '▸';
 }
-// ---- AI assist (optional, provider-agnostic, advisory) ----
+// ---- AI assist (optional, provider-agnostic). Advisory for Explain / false-positive checks;
+// as the in-the-loop second stage it can also add or undo a reversible action when armed. ----
 let aiState=null, aiCurrentCtx=null;
 let aiPickModel='';   // chosen model id for AI generation ('' = use the preferred model)
 const aiNodeAnalysis={};   // node_id -> {kind,text} : last on-demand AI analysis run this session (for closure-note pre-fill)
@@ -5072,7 +5073,7 @@ function aiRenderPanel(s){
   const cards=(s.profiles||[]).map(pr=>aiProfileCardHTML(pr,presetOpts)).join('')
     || '<div class="hint">No models yet — add one to enable AI assist.</div>';
   p.innerHTML=`
-    <div class="hint" style="margin-bottom:6px">Add one or more OpenAI-compatible models (local or cloud). <b>★ Preferred</b> is used for Hunt-query generation and the in-the-loop auto-response; <b>Explain / FP-check</b> run across <b>all enabled</b> models for comparison. Advisory only.</div>
+    <div class="hint" style="margin-bottom:6px">Add one or more OpenAI-compatible models (local or cloud). <b>★ Preferred</b> is used for Hunt-query generation and the in-the-loop auto-response; <b>Explain / FP-check</b> run across <b>all enabled</b> models for comparison, and those two are advisory only. The Preferred model is not: armed to Live, its verdict can add or undo a reversible action.</div>
     ${cards}
     <button class="btn pri" style="padding:3px 11px;font-size:11px;margin-top:2px" onclick="aiAddProfile()">+ Add Model</button>
     <label style="margin-top:8px">Max tokens<input type="number" id="aiMaxTok" value="${s.max_tokens||1024}" min="64" max="8192" onchange="aiPost({op:'max-tokens',max_tokens:this.value},false)" style="width:100%;box-sizing:border-box"></label>

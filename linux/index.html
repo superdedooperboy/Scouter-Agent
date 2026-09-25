@@ -815,7 +815,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <span class="pill m-scouting" id="respPill" title="" onclick="respOpen()"></span>
       <span class="tag" id="hostTag"></span>
       <span class="pill" id="privPill" title="">…</span>
-      <span class="pill" id="livePill"><span class="live-dot" id="liveDot"></span><span id="liveTxt">live</span></span>
+      <span class="pill" id="livePill"><span class="live-dot" id="liveDot"></span><span id="liveTxt">Live</span></span>
       <span class="pill" id="obPill" title="Search everything — processes, IPs, hashes, files, alerts, ATT&CK techniques, threat groups (Ctrl-K)" onclick="obToggle()" style="cursor:pointer">🔍 Search <kbd class="obkbd">Ctrl-K</kbd></span>
       <span class="pill" id="restartPill" title="Restart the agent — reloads the latest code and keeps running at the same address" onclick="restartAgent()" style="cursor:pointer">↻ Restart</span>
       <span class="pill" id="verPill" title="Version" onclick="onVerClick()" style="cursor:pointer">v…</span>
@@ -868,7 +868,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     </h2>
     <div id="filterBody" style="display:none">
     <input type="text" id="search" placeholder="search pid, name, cmd, host, port…" oninput="applyFilters()">
-    <label class="switch"><input type="checkbox" id="fOnlyFlagged" checked onchange="applyFilters()"> Only flagged (+ their neighbors)</label>
+    <label class="switch"><input type="checkbox" id="fOnlyFlagged" checked onchange="applyFilters()"> Only Flagged (+ Their Neighbors)</label>
     <label>Minimum severity: <span class="val" id="minSevVal">low</span></label>
     <input type="range" id="minSev" min="0" max="3" value="1" step="1" oninput="applyFilters()">
     </div>
@@ -881,23 +881,23 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <label>Alert me on new activity</label>
       <select id="notifyLevel" onchange="setNotifyLevel(this.value)">
         <option value="off">Off</option>
-        <option value="high">High severity only</option>
-        <option value="medium">Medium &amp; above</option>
-        <option value="low">Low &amp; above (any flagged)</option>
-        <option value="all">Everything (noisy)</option>
+        <option value="high">High Severity Only</option>
+        <option value="medium">Medium &amp; Above</option>
+        <option value="low">Low &amp; Above (Any Flagged)</option>
+        <option value="all">Everything (Noisy)</option>
       </select>
       <label style="margin-top:6px">Deliver via</label>
       <select id="notifyDeliver" onchange="setNotifyDeliver(this.value)">
-        <option value="macos">Desktop notification (native)</option>
-        <option value="browser">Browser notification</option>
+        <option value="macos">Desktop Notification (Native)</option>
+        <option value="browser">Browser Notification</option>
         <option value="both">Desktop + Browser</option>
-        <option value="wearable">📱 Mobile devices (ntfy)</option>
+        <option value="wearable">📱 Mobile Devices (Ntfy)</option>
         <option value="macos_wearable">Desktop + 📱 Mobile</option>
         <option value="all">Everything (Desktop + Browser + Mobile)</option>
       </select>
       <div id="ntfyPanel" style="display:none"></div>
       <div id="chatPanel" style="margin-top:8px"></div>
-      <button class="btn" id="notifyTest" style="display:none" onclick="testNotify()">🔔 Send test alert</button>
+      <button class="btn" id="notifyTest" style="display:none" onclick="testNotify()">🔔 Send Test Alert</button>
       <div class="hint" id="notifyHint" style="margin-top:6px">Desktop alerts when new items appear.</div>
     </div>
 
@@ -927,10 +927,10 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <div id="iocBody" style="display:none">
       <div class="hint" id="iocSummary" style="margin-bottom:6px">Offline STIX/TAXII + IOC matching — no VirusTotal calls.</div>
       <div id="iocFeeds"></div>
-      <div style="margin-top:6px"><span class="btn" style="padding:2px 9px;font-size:11px" onclick="iocAddOpen()">➕ Add custom feed</span></div>
+      <div style="margin-top:6px"><span class="btn" style="padding:2px 9px;font-size:11px" onclick="iocAddOpen()">➕ Add Custom Feed</span></div>
       <div id="iocFeedForm" style="display:none;margin-top:8px;border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:var(--chip)">
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-          <b id="iocFormTitle" style="font-size:12px">Add custom feed</b><span style="flex:1"></span>
+          <b id="iocFormTitle" style="font-size:12px">Add Custom Feed</b><span style="flex:1"></span>
           <span class="hint" style="font-size:10px">fetched locally · matched offline</span>
         </div>
         <input type="hidden" id="iocfId">
@@ -939,11 +939,11 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
           <label>Severity<select id="iocfSev"><option value="high">high</option><option value="medium" selected>medium</option><option value="low">low</option></select></label>
           <label style="grid-column:1/-1">Feed URL<input id="iocfUrl" placeholder="https://example.com/iocs.txt"></label>
           <label>Format<select id="iocfParser" onchange="iocFormSync()">
-            <option value="plaintext">plaintext list (one per line)</option>
-            <option value="hashlist">hash list</option>
-            <option value="cidr">CIDR ranges</option>
-            <option value="stix_bundle">STIX 2.x bundle (JSON)</option>
-            <option value="taxii21">TAXII 2.1 collection</option>
+            <option value="plaintext">Plaintext List (One per Line)</option>
+            <option value="hashlist">Hash List</option>
+            <option value="cidr">CIDR Ranges</option>
+            <option value="stix_bundle">STIX 2.x Bundle (JSON)</option>
+            <option value="taxii21">TAXII 2.1 Collection</option>
           </select></label>
           <label id="iocfCollWrap" style="display:none">TAXII collection id<input id="iocfColl" placeholder="collection-uuid"></label>
           <label style="grid-column:1/-1">Indicator type(s)
@@ -955,12 +955,12 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
             </span>
           </label>
           <label style="grid-column:1/-1">Description (optional)<input id="iocfDesc" maxlength="200" placeholder="what this feed flags"></label>
-          <label class="switch" style="grid-column:1/-1"><input type="checkbox" id="iocfAuth" onchange="iocFormSync()"> Requires an API key (Bearer token)</label>
+          <label class="switch" style="grid-column:1/-1"><input type="checkbox" id="iocfAuth" onchange="iocFormSync()"> Requires an API Key (Bearer Token)</label>
           <label id="iocfEnvWrap" style="grid-column:1/-1;display:none">API-key env var (optional fallback)<input id="iocfEnv" placeholder="MYFEED_API_KEY"></label>
         </div>
         <div id="iocFormErr" class="hint" style="color:var(--sev-high);margin-top:5px;display:none"></div>
         <div style="display:flex;gap:6px;margin-top:8px">
-          <button class="btn pri" style="padding:3px 12px;font-size:11px" onclick="iocFormSave()">Save feed</button>
+          <button class="btn pri" style="padding:3px 12px;font-size:11px" onclick="iocFormSave()">Save Feed</button>
           <button class="btn" style="padding:3px 12px;font-size:11px" onclick="iocFormCancel()">Cancel</button>
           <span style="flex:1"></span>
           <span class="hint" style="font-size:10px;align-self:center">add the key after saving (auth feeds)</span>
@@ -988,8 +988,8 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <span id="graphCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Node Graph
     </h2>
     <div id="graphBody" style="display:none">
-    <label class="switch"><input type="checkbox" id="fLabels" checked onchange="updateLabels()"> Always show labels</label>
-    <button class="btn" style="width:100%;margin-top:4px" onclick="freezeToggle()" id="freezeBtn">❄ Freeze layout</button>
+    <label class="switch"><input type="checkbox" id="fLabels" checked onchange="updateLabels()"> Always Show Labels</label>
+    <button class="btn" style="width:100%;margin-top:4px" onclick="freezeToggle()" id="freezeBtn">❄ Freeze Layout</button>
     </div>
 
     <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
@@ -1000,7 +1000,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <div class="row" style="display:flex;align-items:center;gap:6px">
       <span class="hint" style="flex:0 0 auto">Theme</span>
       <select id="dispTheme" onchange="setTheme(this.value)" style="flex:1">
-        <option value="system">Match system</option>
+        <option value="system">Match System</option>
         <option value="dark">Dark</option>
         <option value="light">Light</option>
       </select>
@@ -1036,19 +1036,19 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     </h2>
     <div id="ntBody" style="display:none">
     <label class="switch"><input type="checkbox" class="ftype" value="process" checked onchange="applyFilters()"> ● Processes</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="remote" checked onchange="applyFilters()"> ■ Remote endpoints</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="listen" checked onchange="applyFilters()"> ▲ Listening ports</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="remote" checked onchange="applyFilters()"> ■ Remote Endpoints</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="listen" checked onchange="applyFilters()"> ▲ Listening Ports</label>
     <label class="switch"><input type="checkbox" class="ftype" value="job" checked onchange="applyFilters()"> ◆ Cron / LaunchAgents</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="download" checked onchange="applyFilters()"> ⬡ Downloaded files</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="auth" checked onchange="applyFilters()"> 🔑 Auth / logins</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="file" checked onchange="applyFilters()"> ⬠ New files (FIM)</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="persist" checked onchange="applyFilters()"> ✚ Persistence (autostart/units)</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="access" checked onchange="applyFilters()"> 📡 Remote access / SSH keys</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="account" checked onchange="applyFilters()"> ★ Accounts / privilege</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="config" checked onchange="applyFilters()"> ⚙ Security posture</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="shell" checked onchange="applyFilters()"> $ Shell history</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="download" checked onchange="applyFilters()"> ⬡ Downloaded Files</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="auth" checked onchange="applyFilters()"> 🔑 Auth / Logins</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="file" checked onchange="applyFilters()"> ⬠ New Files (FIM)</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="persist" checked onchange="applyFilters()"> ✚ Persistence (Autostart/units)</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="access" checked onchange="applyFilters()"> 📡 Remote Access / SSH Keys</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="account" checked onchange="applyFilters()"> ★ Accounts / Privilege</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="config" checked onchange="applyFilters()"> ⚙ Security Posture</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="shell" checked onchange="applyFilters()"> $ Shell History</label>
     <label class="switch"><input type="checkbox" class="ftype" value="detection" checked onchange="applyFilters()"> 🎯 Detections (SQL)</label>
-    <label class="switch"><input type="checkbox" class="ftype" value="decoy" checked onchange="applyFilters()"> 🪤 Decoys (bait)</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="decoy" checked onchange="applyFilters()"> 🪤 Decoys (Bait)</label>
     </div>
 
     <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
@@ -1084,13 +1084,13 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <div id="aiHuntBar" style="display:none;margin-bottom:6px">
         <div style="display:flex;gap:6px">
           <input type="text" id="aiHuntQ" placeholder="Ask in plain English → AI writes a read-only SQL query…" style="flex:1;font-size:12px;padding:5px 8px;background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px" onkeydown="if(event.key==='Enter'){event.preventDefault();aiHuntGenerate()}">
-          <button class="aibtn" onclick="aiHuntGenerate()">🤖 Generate query</button>
+          <button class="aibtn" onclick="aiHuntGenerate()">🤖 Generate Query</button>
         </div>
         <div class="hint" id="aiHuntMsg" style="font-size:10px;margin-top:2px">AI drafts the SQL — it runs through the same read-only sandbox; review before Run.</div>
       </div>
       <textarea id="huntSql" spellcheck="false" placeholder="SELECT … FROM processes / connections / jobs / hashes   (read-only, single SELECT)"></textarea>
       <div class="hrun">
-        <button class="btn pri" onclick="runHunt()">▶ Run query</button>
+        <button class="btn pri" onclick="runHunt()">▶ Run Query</button>
         <span class="hint" id="huntMeta">history DB</span>
       </div>
       </div>
@@ -1104,7 +1104,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
         </div>
         <textarea id="vqlText" spellcheck="false" placeholder="SELECT Pid, Name, Exe, CommandLine FROM pslist() LIMIT 100"></textarea>
         <div class="hrun">
-          <button class="btn pri" onclick="runVql()">▶ Run VQL on this machine</button>
+          <button class="btn pri" onclick="runVql()">▶ Run VQL on This Machine</button>
           <span class="hint" id="vqlMeta">Velociraptor, headless · runs on this machine only</span>
         </div>
       </div>
@@ -1121,25 +1121,25 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <div id="toasts"></div>
     <div id="vtq" class="modal" style="display:none" onclick="if(event.target===this)vtQueueClose()">
       <div class="modalpanel">
-        <div class="modalhd"><b>VirusTotal queue</b><span id="vtqMeta" class="hint"></span>
+        <div class="modalhd"><b>VirusTotal Queue</b><span id="vtqMeta" class="hint"></span>
           <span style="flex:1"></span>
-          <button class="btn" id="vtqCancelAll" onclick="vtQueueAction('cancel-all')">Cancel all</button>
+          <button class="btn" id="vtqCancelAll" onclick="vtQueueAction('cancel-all')">Cancel All</button>
           <button class="btn" onclick="vtQueueClose()">✕</button></div>
         <div id="vtqBody"></div>
       </div>
     </div>
     <div id="vrLog" class="modal" style="display:none" onclick="if(event.target===this)vrLogClose()">
       <div class="modalpanel">
-        <div class="modalhd"><b>🦖 Velociraptor — output</b><span id="vrLogSub" class="hint"></span>
+        <div class="modalhd"><b>🦖 Velociraptor — Output</b><span id="vrLogSub" class="hint"></span>
           <span style="flex:1"></span>
-          <button class="btn pri" id="vrLogRetry" onclick="vrLogRetry()">↻ Retry launch</button>
+          <button class="btn pri" id="vrLogRetry" onclick="vrLogRetry()">↻ Retry Launch</button>
           <button class="btn" onclick="vrLogClose()">✕</button></div>
         <div id="vrLogBody"></div>
       </div>
     </div>
     <div id="respModal" class="modal" style="display:none" onclick="if(event.target===this)respClose()">
       <div class="modalpanel">
-        <div class="modalhd"><b>Response posture</b><span class="hint">pick how Linux Scouter is allowed to act</span>
+        <div class="modalhd"><b>Response Posture</b><span class="hint">pick how Linux Scouter is allowed to act</span>
           <span style="flex:1"></span>
           <button class="btn" onclick="respClose()">✕</button></div>
         <div id="respModalBody" style="overflow:auto;padding:10px 12px 14px"></div>
@@ -1161,7 +1161,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     </div>
     <div id="incPickModal" class="modal" style="display:none" onclick="if(event.target===this)closeIncPick()">
       <div class="modalpanel">
-        <div class="modalhd"><b>Add to investigation</b><span id="incPickSub" class="hint"></span>
+        <div class="modalhd"><b>Add to Investigation</b><span id="incPickSub" class="hint"></span>
           <span style="flex:1"></span><button class="btn" onclick="closeIncPick()">✕</button></div>
         <div style="padding:12px 14px">
           <label class="hint">Investigation</label>
@@ -1174,12 +1174,12 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     </div>
     <div id="closeModal" class="modal" style="display:none" onclick="if(event.target===this)closeModalCancel()">
       <div class="modalpanel">
-        <div class="modalhd"><b id="closeModalTitle">Close alert</b><span id="closeModalSub" class="hint"></span>
+        <div class="modalhd"><b id="closeModalTitle">Close Alert</b><span id="closeModalSub" class="hint"></span>
           <span style="flex:1"></span><button class="btn" onclick="closeModalCancel()">✕</button></div>
         <div style="padding:12px">
           <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:4px">Reason / notes — captured with the closure (⌘/Ctrl-Enter to confirm)</label>
           <textarea id="closeNote" spellcheck="false" onkeydown="if((event.metaKey||event.ctrlKey)&&event.key==='Enter')closeModalConfirm()" placeholder="Why is this being closed?  e.g. confirmed benign — system updater, packaged by apt" style="width:100%;box-sizing:border-box;min-height:84px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:12px;font-family:inherit;resize:vertical"></textarea>
-          <div style="display:flex;gap:6px;margin-top:10px"><button class="btn pri" onclick="closeModalConfirm()">Close alert</button><button class="btn" onclick="closeModalCancel()">Cancel</button></div>
+          <div style="display:flex;gap:6px;margin-top:10px"><button class="btn pri" onclick="closeModalConfirm()">Close Alert</button><button class="btn" onclick="closeModalCancel()">Cancel</button></div>
         </div>
       </div>
     </div>
@@ -1199,7 +1199,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
           <input id="obInput" type="text" autocomplete="off" spellcheck="false"
             placeholder="Search processes, IPs, hashes, files, alerts, ATT&CK techniques, threat groups…"
             oninput="obOnInput()" onkeydown="obKey(event)">
-          <button class="btn" onclick="obClose()">esc</button></div>
+          <button class="btn" onclick="obClose()">Esc</button></div>
         <div id="obResults" class="obresults"></div>
         <div class="obfoot"><span><kbd class="obkbd">↑</kbd><kbd class="obkbd">↓</kbd> navigate · <kbd class="obkbd">↵</kbd> open · <kbd class="obkbd">esc</kbd> close</span><span id="obDbHint"></span></div>
       </div>
@@ -1209,7 +1209,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <span style="font-size:16px">⬆</span>
     <div style="flex:1;min-width:0"><b id="updTitle"></b> <span class="hint" id="updCur"></span>
       <div class="hint" id="updSub" style="margin-top:2px"></div></div>
-    <a id="updLink" href="#" target="_blank" rel="noopener noreferrer" class="btn" style="text-decoration:none;white-space:nowrap">View release ↗</a>
+    <a id="updLink" href="#" target="_blank" rel="noopener noreferrer" class="btn" style="text-decoration:none;white-space:nowrap">View Release ↗</a>
     <span onclick="dismissUpdate()" title="Dismiss until the next release" style="cursor:pointer;font-size:15px;opacity:.6;padding:0 2px">✕</span>
   </div>
   <details id="updNotesWrap" style="margin-top:8px;display:none"><summary class="hint" style="cursor:pointer">Release notes</summary>
@@ -1384,7 +1384,7 @@ function triageSelectHTML(id, tr){
     ['closed:Unknown','? Close · Unknown'],['closed:Security Testing','⚙ Close · Security Testing']];
   return `<select class="trsel" onclick="event.stopPropagation()" onchange="triageChange('${esc(id)}',this.value)">`+
     opts.map(([v,l])=>`<option value="${v}"${v===val?' selected':''}>${l}</option>`).join('')+
-    '<option value="inc:add">➕ Add to investigation…</option><option value="inc:remove">➖ Remove from investigation</option>'+
+    '<option value="inc:add">➕ Add to Investigation…</option><option value="inc:remove">➖ Remove From Investigation</option>'+
     '</select>';
 }
 function triageChange(id,val){
@@ -2032,7 +2032,7 @@ function vtStatusHTML(vt, kind, id, excluded){
     const note = excluded ? 'skipped — browser traffic (excluded from auto-lookup)'
                           : 'baseline item — not auto-scanned';
     return `<span class="vmut">${note}</span>`+
-           (id?`<button class="btn vtbtn" onclick="vtScan('${kind}','${esc(id)}')">Scan now</button>`:'');
+           (id?`<button class="btn vtbtn" onclick="vtScan('${kind}','${esc(id)}')">Scan Now</button>`:'');
   }
   const s=vt.status;
   if(s==='queued') return `<span class="vmut">VirusTotal: queued…</span>`;
@@ -2258,7 +2258,7 @@ function renderAlerts(){
   const selN=alertSel.size;
   const bulkBar = selN ? `<div class="bulkbar"><b>${selN}</b> selected ·
     <select class="trsel bulksel" onchange="applyBulk(this.value); this.selectedIndex=0;">
-      <option value="">Set selected to…</option>
+      <option value="">Set Selected to…</option>
       <option value="investigating">◐ Investigating</option>
       <option value="open">● Open</option>
       <option value="closed:Benign">✓ Close · Benign</option>
@@ -2266,11 +2266,11 @@ function renderAlerts(){
       <option value="closed:False Positive">⚑ Close · False Positive</option>
       <option value="closed:Unknown">? Close · Unknown</option>
       <option value="closed:Security Testing">⚙ Close · Security Testing</option>
-      <option value="inc:add">➕ Add to investigation…</option>
-      <option value="inc:remove">➖ Remove from investigation</option>
-    </select> · <span class="va" onclick="clearAlertSel()">clear selection</span></div>` : '';
+      <option value="inc:add">➕ Add to Investigation…</option>
+      <option value="inc:remove">➖ Remove From Investigation</option>
+    </select> · <span class="va" onclick="clearAlertSel()">Clear Selection</span></div>` : '';
   const toolbar=`<div class="atoolbar">
-    <label class="switch"><input type="checkbox" ${showClosed?'checked':''} onchange="toggleClosed(this)"> Show closed${closedCount?` (${closedCount})`:''}</label>
+    <label class="switch"><input type="checkbox" ${showClosed?'checked':''} onchange="toggleClosed(this)"> Show Closed${closedCount?` (${closedCount})`:''}</label>
     <span class="hint">Open &amp; investigating alerts persist here even after their node goes away (marked <b>inactive</b>). Closing one keeps your notes &amp; reasoning. States persist across restarts.</span>
   </div>${bulkBar}`;
   if(!rows.length){
@@ -2507,8 +2507,8 @@ function renderTree(){
   const totalProcs=raw.nodes.reduce((a,n)=>a+(n.type==='process'&&triageStatus(n)!=='closed'?1:0),0);
   const hidden = shown<totalProcs;
   const action = treeShowAll
-    ? ' · showing all routine items · <span class="va" onclick="hideRoutineNodes()">Hide routine</span>'
-    : (hidden ? ' · routine items hidden · <span class="va" onclick="showAllNodes()">Show all</span>'
+    ? ' · showing all routine items · <span class="va" onclick="hideRoutineNodes()">Hide Routine</span>'
+    : (hidden ? ' · routine items hidden · <span class="va" onclick="showAllNodes()">Show All</span>'
               : ' · connections, listeners &amp; jobs nested by process');
   // collapsible "Processes" section header, consistent with the auth/posture/etc. sections
   const pcol=treeCollapsed.has('process:section');
@@ -2519,11 +2519,11 @@ function renderTree(){
   const procBody = pcol ? '' : out.join('');
   const body = (shown || authNodes.length || persistNodes.length || tccNodes.length || accessNodes.length || acctNodes.length || cfgNodes.length || shNodes.length || detNodes.length) ? '<div class="tbody">'+authOut+persistOut+tccOut+accessOut+acctOut+cfgOut+shOut+detOut+procHdr+procBody+'</div>'
     : `<div class="empty-big">No flagged processes right now.<br>
-       <span class="va" onclick="showAllNodes()">Show all ${totalProcs} processes</span> to see the full tree.</div>`;
+       <span class="va" onclick="showAllNodes()">Show All ${totalProcs} processes</span> to see the full tree.</div>`;
   host.innerHTML =
     `<div class="ttoolbar">
-       <button class="btn" onclick="treeExpandAll()">⊞ Expand all</button>
-       <button class="btn" onclick="treeCollapseAll()">⊟ Collapse all</button>
+       <button class="btn" onclick="treeExpandAll()">⊞ Expand All</button>
+       <button class="btn" onclick="treeCollapseAll()">⊟ Collapse All</button>
        <span class="tcount">Showing <b>${shown}</b> of <b>${totalProcs}</b> processes${action}</span>
      </div>` + body;
   host.scrollTop=scroll;
@@ -2629,7 +2629,7 @@ function incBulkBarHTML(){
   const n=incSel.size; if(!n) return '';
   return `<div class="bulkbar"><b>${n}</b> investigation${n===1?'':'s'} selected ·
     <select class="trsel bulksel" onchange="applyIncBulk(this.value); this.selectedIndex=0;">
-      <option value="">Set selected to…</option>
+      <option value="">Set Selected to…</option>
       <option value="investigating">◐ Investigating</option>
       <option value="open">● Open</option>
       <option value="closed:Benign">✓ Close · Benign</option>
@@ -2639,7 +2639,7 @@ function incBulkBarHTML(){
       <option value="closed:Security Testing">⚙ Close · Security Testing</option>
     </select>
     <label class="hint" style="cursor:pointer"><input type="checkbox" ${incBulkCascade?'checked':''} onchange="incBulkCascade=this.checked"> apply to their member alerts</label>
-    · <span class="va" onclick="incSelClear()">clear selection</span></div>`;
+    · <span class="va" onclick="incSelClear()">Clear Selection</span></div>`;
 }
 function applyIncBulk(val){
   if(!val || !incSel.size) return;
@@ -2670,7 +2670,7 @@ function openIncidentPicker(ids){
   fetch('/api/incidents').then(r=>r.json()).then(d=>{
     const list=(d.incidents||[]).filter(c=>c.status!=='closed');
     const sel=document.getElementById('incPickSel');
-    sel.innerHTML='<option value="new">➕ New investigation…</option>'+list.map(c=>`<option value="${esc(c.id)}">${esc(incName(c))}</option>`).join('');
+    sel.innerHTML='<option value="new">➕ New Investigation…</option>'+list.map(c=>`<option value="${esc(c.id)}">${esc(incName(c))}</option>`).join('');
     incPickOnSelChange();
     document.getElementById('incPickTitle').value='';
     document.getElementById('incPickSub').textContent=incPickIds.length+' alert'+(incPickIds.length>1?'s':'')+' selected';
@@ -2787,7 +2787,7 @@ function incidentCard(c){
         <div class="casenotes">${notes}</div>
         <div style="display:flex;gap:6px;margin-top:6px">
           <textarea id="incnote_${c.id}" class="incnotein" placeholder="Add a note\u2026  (\u2318/Ctrl-Enter)" onclick="event.stopPropagation()" onkeydown="if((event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();incAddNote('${esc(c.id)}');}"></textarea>
-          <button class="btn" onclick="event.stopPropagation();incAddNote('${esc(c.id)}')">Add note</button>
+          <button class="btn" onclick="event.stopPropagation();incAddNote('${esc(c.id)}')">Add Note</button>
         </div>
       </div></div>
       <div class="incrow"><span class="inck">activity</span><div style="flex:1"><details class="auditbox"><summary>Activity (${(c.events||[]).length})</summary><div class="auditlist">${ev}</div></details></div></div>
@@ -2877,9 +2877,9 @@ function drawAttack(){
     <span class="atkstat">Coverage: <b>${cov}</b> / ${tot} ${macOnly?'Linux-relevant':'enterprise'} techniques · observed on this host: <b>${obs}</b></span>
     ${macAvail?`<label class="atkstat" style="cursor:pointer;user-select:none"><input type="checkbox" ${macOnly?'checked':''} onchange="atkToggleMac(this.checked)"> Linux only</label>`:''}
     <select onchange="atkSelectGroup(this.value)">${groupOpts}</select>
-    ${atkGroup?'<button class="btn" onclick="atkSelectGroup(\'\')">clear overlay</button>':''}
+    ${atkGroup?'<button class="btn" onclick="atkSelectGroup(\'\')">Clear Overlay</button>':''}
     <span style="flex:1"></span>
-    <button class="btn" onclick="atkExport()" title="Download a MITRE ATT&CK Navigator layer of your coverage">⤓ Navigator layer</button>
+    <button class="btn" onclick="atkExport()" title="Download a MITRE ATT&CK Navigator layer of your coverage">⤓ Navigator Layer</button>
   </div>
   <div class="atklegend">
     <span><span class="sw" style="background:rgba(248,81,73,.6)"></span>observed (fired)</span>
@@ -3035,13 +3035,13 @@ function grpInit(){
   box.innerHTML=`<div class="grpbar">
     <span class="gstat"><b>${groupsData.counts.groups}</b> groups${groupsData.counts.feed?` (<b>${groupsData.counts.feed}</b> from feeds)`:''} · <b id="grpEdgeN">0</b> links</span>
     <label>metric <select onchange="grpSetMetric(this.value)">
-      <option value="jaccard"${grpMetric==='jaccard'?' selected':''}>Jaccard (shared / total)</option>
-      <option value="overlap"${grpMetric==='overlap'?' selected':''}>Overlap coef. (shared / smaller)</option>
-      <option value="shared"${grpMetric==='shared'?' selected':''}>Shared count (raw #)</option></select></label>
+      <option value="jaccard"${grpMetric==='jaccard'?' selected':''}>Jaccard (Shared / Total)</option>
+      <option value="overlap"${grpMetric==='overlap'?' selected':''}>Overlap Coef. (Shared / Smaller)</option>
+      <option value="shared"${grpMetric==='shared'?' selected':''}>Shared Count (Raw #)</option></select></label>
     <label id="grpThLbl">${thrLabel}<input type="range" min="0" max="1" step="0.02" value="${grpThresh}" oninput="grpSetThresh(this.value)"></label>
     <label><input type="checkbox" ${grpSoft?'checked':''} onchange="grpSetSoft(this.checked)"> include malware/tools</label>
     <input type="text" placeholder="find a group…" value="${esc(grpQuery)}" oninput="grpSearch(this.value)" style="min-width:140px">
-    <button class="btn" onclick="grpClear()">clear</button>
+    <button class="btn" onclick="grpClear()">Clear</button>
   </div>
   <svg id="grpSvg" viewBox="0 0 ${GRP_W} ${GRP_H}" preserveAspectRatio="xMidYMid meet"><g id="grpVP"><g id="grpLinks"></g><g id="grpNodes"></g></g></svg>`;
   grpTx=0; grpTy=0; grpScale=1;
@@ -3206,7 +3206,7 @@ function decoyRender(){
   const d=decoyState||{};
   if(d.ok===false && d.error){ box.innerHTML=`<div class="hint">${esc(d.error)}</div>`; return; }
   const kinds={aws:'AWS credentials', ssh_key:'SSH private key', kube:'kubeconfig', pgpass:'Postgres password file', ssh_config:'SSH config'};
-  let h=`<label class="switch" style="margin-bottom:6px"><input type="checkbox" ${d.enabled?'checked':''} onchange="decoyToggle(this.checked)"> Plant decoys on this host</label>`;
+  let h=`<label class="switch" style="margin-bottom:6px"><input type="checkbox" ${d.enabled?'checked':''} onchange="decoyToggle(this.checked)"> Plant Decoys on This Host</label>`;
   if(d.enabled){
     h+=`<div class="hint" style="margin-bottom:6px"><b>${d.planted||0}</b> planted · <b>${d.intact||0}</b> intact`+
        (d.hits?` · <b style="color:var(--sev-critical)">${d.hits}</b> bait credential use${d.hits===1?'':'s'}`:'')+
@@ -3251,12 +3251,12 @@ function suppressRender(){
     });
     h+=`<div style="display:flex;gap:6px;align-items:center;margin-top:7px">`+
        `<label style="font-size:11px;color:var(--muted)">Scope:</label>`+
-       `<select id="sNodeType" style="flex:0 0 130px;font-size:11px;padding:2px 5px"><option value="${esc(ctx.type)}">${esc(ctx.type)} only</option><option value="any">any type</option></select>`+
+       `<select id="sNodeType" style="flex:0 0 130px;font-size:11px;padding:2px 5px"><option value="${esc(ctx.type)}">${esc(ctx.type)} only</option><option value="any">Any Type</option></select>`+
        `<input type="text" id="sName" placeholder="name (optional)" style="flex:1 1 auto;min-width:140px;font-size:11px;padding:3px 6px">`+
        `</div>`;
     h+=`<input type="text" id="sReason" placeholder="reason / note (optional)" style="width:100%;box-sizing:border-box;font-size:11px;padding:3px 6px;margin-top:5px">`;
     h+=`<div style="display:flex;gap:8px;align-items:center;margin-top:9px">`+
-       `<button class="btn pri" style="padding:3px 12px;font-size:11px" onclick="suppressSave()">Create suppression</button>`+
+       `<button class="btn pri" style="padding:3px 12px;font-size:11px" onclick="suppressSave()">Create Suppression</button>`+
        `<span class="hint" id="sPreview">select fields to preview impact</span></div>`;
     h+=`</div>`;
   } else {
@@ -3343,7 +3343,7 @@ function tlBar(){
   }).join('');
   const sevOpts=['info:All','low:Low+','medium:Med+','high:High+','critical:Crit']
     .map(o=>{const p=o.split(':');return `<option value="${p[0]}" ${tlSev===p[0]?'selected':''}>${p[1]}</option>`;}).join('');
-  const winOpts=['1:Last hour','24:Last 24h','168:Last 7 days','720:Last 30 days','0:All time']
+  const winOpts=['1:Last Hour','24:Last 24h','168:Last 7 Days','720:Last 30 Days','0:All Time']
     .map(o=>{const p=o.split(':');return `<option value="${p[0]}" ${String(tlWin)===p[0]?'selected':''}>${p[1]}</option>`;}).join('');
   return `<div class="tlbar">${chips}<span class="tlsep"></span>`+
     `<label style="color:var(--muted);font-size:11px">min sev</label><select onchange="tlSetSev(this.value)">${sevOpts}</select>`+
@@ -3422,7 +3422,7 @@ function tlDetail(i){
     .map(([k,v])=>`<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join('')+'</div>';
   if(r.sub) html+=`<div class="k" style="color:var(--muted);font-size:11px">DETAIL</div><div class="mono">${esc(String(r.sub))}</div>`;
   if(r.ref && R.get(r.ref))
-    html+=`<div style="margin:9px 0"><button class="btn" onclick="focusNode('${esc(String(r.ref))}')">↗ Focus in graph</button>`+
+    html+=`<div style="margin:9px 0"><button class="btn" onclick="focusNode('${esc(String(r.ref))}')">↗ Focus in Graph</button>`+
           `<span class="hint" style="margin-left:8px">still live on host</span></div>`;
   html+=huntIntelHTML(r);
   host.innerHTML=html;
@@ -3600,7 +3600,7 @@ function pbListEditor(kind,key,list){
   });
   if(!ro){ const avail=((pbData&&pbData.actions)||[]).filter(a=>!inList.has(a.id));
     if(avail.length) h+=`<select class="pbadd" onchange="if(this.value){pbAdd('${kind}','${esc(key)}',this.value);this.value=''}">`+
-      `<option value="">+ add…</option>`+avail.map(a=>`<option value="${esc(a.id)}">${a.icon} ${esc(a.label)}${a.destructive?' (destructive)':(a.reversible?'':' (collect)')}</option>`).join('')+`</select>`;
+      `<option value="">+ add…</option>`+avail.map(a=>`<option value="${esc(a.id)}">${a.icon} ${esc(a.label)}${a.destructive?' (Destructive)':(a.reversible?'':' (Collect)')}</option>`).join('')+`</select>`;
   }
   return h+'</div>';
 }
@@ -3631,12 +3631,12 @@ function renderPlaybook(){
   if(!ovIds.length) h+='<div class="hint">No overrides yet — every alert uses its ATT&CK tactic workflow below.</div>';
   ovIds.forEach(id=>{
     h+=`<div class="pbcard"><div class="pbhd"><b>${esc(pbDetName(id))}</b> <span class="dmeta">${esc(id)}</span>`+
-       `<span style="flex:1"></span>${pbData.mesh_managed?'':`<button class="btn" onclick="pbClearOverride('${esc(id)}')">✕ remove override</button>`}</div>`+
+       `<span style="flex:1"></span>${pbData.mesh_managed?'':`<button class="btn" onclick="pbClearOverride('${esc(id)}')">✕ Remove Override</button>`}</div>`+
        pbListEditor('override',id,pbData.overrides[id])+`</div>`;
   });
   const haveOv=new Set(ovIds);
   const dets=(pbData.detections||[]).filter(d=>d.id&&!haveOv.has(d.id));
-  if(!pbData.mesh_managed) h+=`<div style="margin-top:8px"><select id="pbNewOverride" style="max-width:340px"><option value="">Add an override for a detection…</option>`+
+  if(!pbData.mesh_managed) h+=`<div style="margin-top:8px"><select id="pbNewOverride" style="max-width:340px"><option value="">Add an Override for a Detection…</option>`+
      dets.map(d=>`<option value="${esc(d.id)}">${d.builtin?'● built-in':'○ custom'} · ${esc(d.name)}${d.mitre?' ['+esc(d.mitre)+']':''}</option>`).join('')+
      `</select> <button class="btn pri" onclick="pbAddOverride()">+ Override</button></div>`;
   h+='</div>';
@@ -3703,7 +3703,7 @@ function meshRender(){
       <label style="flex:1 1 55%;margin:0">Report every (s)<input type="number" id="meshInterval" min="10" value="${esc(s.interval||30)}"></label>
       <label style="flex:1 1 45%;margin:0">Display name<input type="text" id="meshName" value="${esc(s.name||'')}" placeholder="${esc(s.hostname||'this host')}" autocomplete="off" spellcheck="false"></label>
     </div>
-    <label class="switch" style="margin:6px 0 0;font-size:11px;color:var(--muted)"><input type="checkbox" id="meshInsecure" ${s.insecure?'checked':''}> Skip TLS verification ${s.is_https?'':'<span style="opacity:.7">(only used for an https:// mesh with a self-signed cert)</span>'}</label>
+    <label class="switch" style="margin:6px 0 0;font-size:11px;color:var(--muted)"><input type="checkbox" id="meshInsecure" ${s.insecure?'checked':''}> Skip TLS Verification ${s.is_https?'':'<span style="opacity:.7">(only used for an https:// mesh with a self-signed cert)</span>'}</label>
     <div style="margin-top:9px;padding-top:8px;border-top:1px solid var(--line)">
       <label class="switch" style="margin:0"><input type="checkbox" id="meshRemote" ${s.remote_enabled?'checked':''} ${s.remote_can?'':'disabled'} onchange="meshSetRemote(this.checked)"> <b>Allow remote containment</b> from the console</label>
       <div class="hint" style="font-size:10px;margin-top:3px;line-height:1.5">${s.remote_can
@@ -3939,22 +3939,22 @@ document.addEventListener('keydown',e=>{
 // ---- threat hunting ----
 const HUNT_QUERIES=[
   ['Flagged processes (ever)', "SELECT name, exe, severity, max_score, times_seen,\n  datetime(first_seen,'unixepoch','localtime') AS first_seen,\n  datetime(last_seen,'unixepoch','localtime') AS last_seen\nFROM processes WHERE severity IN ('high','medium','low')\nORDER BY max_score DESC, last_seen DESC"],
-  ['Outbound connections', "SELECT proc_name, exe, raddr, rport, proto, public, severity, times_seen,\n  datetime(last_seen,'unixepoch','localtime') AS last_seen\nFROM connections WHERE direction='outbound'\nORDER BY last_seen DESC"],
-  ['Parent → child', "SELECT ppid_name AS parent, name AS child, user, exe, times_seen,\n  datetime(first_seen,'unixepoch','localtime') AS first_seen\nFROM processes WHERE ppid_name IS NOT NULL\nORDER BY parent, child"],
-  ['Listening ports', "SELECT proc_name, lport, proto, severity, times_seen,\n  datetime(last_seen,'unixepoch','localtime') AS last_seen\nFROM connections WHERE direction='listen'\nORDER BY CAST(lport AS INTEGER)"],
+  ['Outbound Connections', "SELECT proc_name, exe, raddr, rport, proto, public, severity, times_seen,\n  datetime(last_seen,'unixepoch','localtime') AS last_seen\nFROM connections WHERE direction='outbound'\nORDER BY last_seen DESC"],
+  ['Parent → Child', "SELECT ppid_name AS parent, name AS child, user, exe, times_seen,\n  datetime(first_seen,'unixepoch','localtime') AS first_seen\nFROM processes WHERE ppid_name IS NOT NULL\nORDER BY parent, child"],
+  ['Listening Ports', "SELECT proc_name, lport, proto, severity, times_seen,\n  datetime(last_seen,'unixepoch','localtime') AS last_seen\nFROM connections WHERE direction='listen'\nORDER BY CAST(lport AS INTEGER)"],
   ['Cron / systemd jobs', "SELECT label, kind, program, schedule, severity,\n  datetime(first_seen,'unixepoch','localtime') AS first_seen\nFROM jobs ORDER BY first_seen DESC"],
-  ['Downloaded files', "SELECT name, source_app, source_url, severity, sha256,\n  datetime(first_seen,'unixepoch','localtime') AS downloaded\nFROM downloads ORDER BY first_seen DESC"],
-  ['Auth outliers', "SELECT datetime(ts,'unixepoch','localtime') AS t, etype, user, source, method, severity, message\nFROM auth_events WHERE severity!='info' ORDER BY ts DESC"],
-  ['Failed authentications', "SELECT datetime(ts,'unixepoch','localtime') AS t, etype, user, source, message\nFROM auth_events WHERE success=0 ORDER BY ts DESC"],
-  ['Logins by user & source', "SELECT user, source, method, count(*) AS logins,\n  datetime(max(ts),'unixepoch','localtime') AS last_seen\nFROM auth_events WHERE etype='login' GROUP BY user, source ORDER BY logins DESC"],
-  ['Find an IP / host', "SELECT proc_name, exe, raddr, rport, times_seen,\n  datetime(last_seen,'unixepoch','localtime') AS last_seen\nFROM connections WHERE raddr LIKE '%CHANGE_ME%'\nORDER BY last_seen DESC"],
+  ['Downloaded Files', "SELECT name, source_app, source_url, severity, sha256,\n  datetime(first_seen,'unixepoch','localtime') AS downloaded\nFROM downloads ORDER BY first_seen DESC"],
+  ['Auth Outliers', "SELECT datetime(ts,'unixepoch','localtime') AS t, etype, user, source, method, severity, message\nFROM auth_events WHERE severity!='info' ORDER BY ts DESC"],
+  ['Failed Authentications', "SELECT datetime(ts,'unixepoch','localtime') AS t, etype, user, source, message\nFROM auth_events WHERE success=0 ORDER BY ts DESC"],
+  ['Logins by User & Source', "SELECT user, source, method, count(*) AS logins,\n  datetime(max(ts),'unixepoch','localtime') AS last_seen\nFROM auth_events WHERE etype='login' GROUP BY user, source ORDER BY logins DESC"],
+  ['Find an IP / Host', "SELECT proc_name, exe, raddr, rport, times_seen,\n  datetime(last_seen,'unixepoch','localtime') AS last_seen\nFROM connections WHERE raddr LIKE '%CHANGE_ME%'\nORDER BY last_seen DESC"],
   ['Process executions (real-time)', "SELECT datetime(ts,'unixepoch','localtime') AS t, pid, ppid, exe, cmdline, uid,\n  CASE platform WHEN 1 THEN 'system' ELSE '' END AS packaged\nFROM exec_events ORDER BY ts DESC"],
   ['Find an exec by path / cmdline (real-time)', "SELECT datetime(ts,'unixepoch','localtime') AS t, pid, ppid, exe, cmdline\nFROM exec_events WHERE exe LIKE '%CHANGE_ME%' OR cmdline LIKE '%CHANGE_ME%'\nORDER BY ts DESC"],
   ['File events in watched dirs (real-time)', "SELECT datetime(ts,'unixepoch','localtime') AS t, event, path, actor, actor_pid\nFROM file_events ORDER BY ts DESC"],
-  ['Find a hash (binaries + downloads + files)', "SELECT 'process' AS source, exe AS item, sha256, md5 FROM hashes WHERE sha256 LIKE '%CHANGE_ME%' OR md5 LIKE '%CHANGE_ME%'\nUNION ALL\nSELECT 'download' AS source, name AS item, sha256, md5 FROM downloads WHERE sha256 LIKE '%CHANGE_ME%' OR md5 LIKE '%CHANGE_ME%'\nUNION ALL\nSELECT 'file' AS source, path AS item, sha256, md5 FROM files WHERE sha256 LIKE '%CHANGE_ME%' OR md5 LIKE '%CHANGE_ME%'"],
-  ['New files since baseline', "SELECT path, sha256, severity,\n  datetime(first_seen,'unixepoch','localtime') AS first_seen\nFROM files WHERE baseline=0 ORDER BY first_seen DESC"],
-  ['Flagged files (FIM)', "SELECT path, sha256, severity,\n  datetime(first_seen,'unixepoch','localtime') AS first_seen\nFROM files WHERE severity!='info' ORDER BY first_seen DESC"],
-  ['Connections to a process', "SELECT proc_name, direction, proto, raddr, rport, lport, severity\nFROM connections WHERE proc_name LIKE '%CHANGE_ME%'\nORDER BY direction"],
+  ['Find a Hash (Binaries + Downloads + Files)', "SELECT 'process' AS source, exe AS item, sha256, md5 FROM hashes WHERE sha256 LIKE '%CHANGE_ME%' OR md5 LIKE '%CHANGE_ME%'\nUNION ALL\nSELECT 'download' AS source, name AS item, sha256, md5 FROM downloads WHERE sha256 LIKE '%CHANGE_ME%' OR md5 LIKE '%CHANGE_ME%'\nUNION ALL\nSELECT 'file' AS source, path AS item, sha256, md5 FROM files WHERE sha256 LIKE '%CHANGE_ME%' OR md5 LIKE '%CHANGE_ME%'"],
+  ['New Files Since Baseline', "SELECT path, sha256, severity,\n  datetime(first_seen,'unixepoch','localtime') AS first_seen\nFROM files WHERE baseline=0 ORDER BY first_seen DESC"],
+  ['Flagged Files (FIM)', "SELECT path, sha256, severity,\n  datetime(first_seen,'unixepoch','localtime') AS first_seen\nFROM files WHERE severity!='info' ORDER BY first_seen DESC"],
+  ['Connections to a Process', "SELECT proc_name, direction, proto, raddr, rport, lport, severity\nFROM connections WHERE proc_name LIKE '%CHANGE_ME%'\nORDER BY direction"],
 ];
 let huntInit=false;
 function openHunt(){
@@ -4213,10 +4213,10 @@ function renderDetections(){
   if(detEdit) h+=detEditorHTML();
   h+='<div class="drsec"><h3>Live rules \u00b7 per node'+(detData.mesh_managed?' <span style="text-transform:none;font-weight:400">\u2014 local to this host</span>':'')+'</h3>'+
      (detData.node_rules.map((r,i)=>detRuleCard(r,i,'node')).join('')||'<div class="hint">No live rules yet.</div>')+
-     '<button class="btn pri" style="margin-top:6px" onclick="detNew(\'node\')">+ New live rule</button></div>';
+     '<button class="btn pri" style="margin-top:6px" onclick="detNew(\'node\')">+ New Live Rule</button></div>';
   h+='<div class="drsec"><h3>SQL detections · over history</h3>'+
      (detData.sql_rules.map((r,i)=>detRuleCard(r,i,'sql')).join('')||'<div class="hint">No SQL detections yet.</div>')+
-     '<button class="btn pri" style="margin-top:6px" onclick="detNew(\'sql\')">+ New SQL detection</button></div>';
+     '<button class="btn pri" style="margin-top:6px" onclick="detNew(\'sql\')">+ New SQL Detection</button></div>';
   const mn=detData.mesh_node_rules||[], ms=detData.mesh_sql_rules||[];
   if(detData.mesh_managed && (mn.length||ms.length)){
     h+='<div class="drsec"><h3>\ud83d\udef0 Mesh-managed rules ('+(mn.length+ms.length)+') <span style="text-transform:none;font-weight:400">\u2014 pushed from the Mesh, read-only</span></h3>'+
@@ -4333,8 +4333,8 @@ function detEditorHTML(){
   if(kind==='node'){
     const fh=((detData.fields||{})[r.node_type]||[]).concat((detData.fields||{}).any||[]);
     h+=`<label>Match <select id="detMatch" style="width:auto;display:inline-block">
-        <option value="all" ${r.match!=='any'?'selected':''}>all conditions (AND)</option>
-        <option value="any" ${r.match==='any'?'selected':''}>any condition (OR)</option></select></label>
+        <option value="all" ${r.match!=='any'?'selected':''}>All Conditions (AND)</option>
+        <option value="any" ${r.match==='any'?'selected':''}>Any Condition (OR)</option></select></label>
       <div id="detConds">${(r.conditions||[]).map((c,ci)=>detCondRow(c,ci)).join('')}</div>
       <button class="btn" onclick="detAddCond()">+ condition</button>`;
     if(fh.length) h+=`<div class="hint" style="margin-top:5px">Fields for <b>${esc(r.node_type)}</b>: ${fh.map(esc).join(', ')} (any node field works)</div>`;
@@ -4451,8 +4451,8 @@ function updateMeta(){
   const m=raw.meta; if(!m)return;
   document.getElementById('hostTag').textContent=m.hostname+' · '+m.generated;
   const p=document.getElementById('privPill');
-  if(m.privilege==='full'){ p.className='pill full'; p.innerHTML='<span class="dot" style="background:var(--good)"></span>Full visibility'; p.title='Running as root — sees all processes, sockets and daemons.'; }
-  else { p.className='pill warn'; p.innerHTML='<span class="dot" style="background:var(--tint-warn-txt)"></span>User-level view'; p.title='Sees only your own processes/sockets. Relaunch with: sudo python3 agent.py — for full system visibility.'; }
+  if(m.privilege==='full'){ p.className='pill full'; p.innerHTML='<span class="dot" style="background:var(--good)"></span>Full Visibility'; p.title='Running as root — sees all processes, sockets and daemons.'; }
+  else { p.className='pill warn'; p.innerHTML='<span class="dot" style="background:var(--tint-warn-txt)"></span>User-Level View'; p.title='Sees only your own processes/sockets. Relaunch with: sudo python3 agent.py — for full system visibility.'; }
   updateSevCounts();   // left-pane counts = all open/investigating alerts (live + historical)
   updateSensorBadge();
   if(currentTab==='sensors') renderSensors();   // keep the health panel live
@@ -4530,7 +4530,7 @@ function exportRender(){
   const sev=['critical','high','medium','low'];
   p.innerHTML=`
     <div class="hint" style="margin:4px 0 6px">Streams each <b>new or escalated</b> alert as one JSON record to a <b>webhook</b> (Splunk HEC / Elastic / Sentinel / SOAR) and/or a local <b>JSONL file</b> for a log shipper. Runs server-side, so it works even with this page closed. Webhook data leaves the Mac; the JSONL file stays local.</div>
-    <label class="switch" style="margin:2px 0"><input type="checkbox" id="expEnabled" ${s.enabled?'checked':''} onchange="exportToggle(this.checked)"> Enable alert export</label>
+    <label class="switch" style="margin:2px 0"><input type="checkbox" id="expEnabled" ${s.enabled?'checked':''} onchange="exportToggle(this.checked)"> Enable Alert Export</label>
     <label>Minimum severity
       <select id="expSev">${sev.map(x=>`<option value="${x}" ${s.min_severity===x?'selected':''}>${x[0].toUpperCase()+x.slice(1)} &amp; above${x==='high'?' (default)':''}</option>`).join('')}</select></label>
     <label style="margin-top:6px">Webhook URL <span class="hint" style="font-weight:400">(blank = JSONL file only)</span>
@@ -4541,11 +4541,11 @@ function exportRender(){
         <div style="display:flex;gap:5px;margin-top:3px"><input type="password" id="expToken" autocomplete="off" placeholder="${s.has_token?'replace value…':'e.g. Bearer …, Splunk …'}" style="flex:1 1 auto;min-width:70px;font-size:11px;padding:3px 6px">
           <button class="btn" style="padding:2px 9px;font-size:11px" onclick="exportSaveToken()">Save</button></div></div>
     </div>
-    <label class="switch" style="margin:8px 0 2px"><input type="checkbox" id="expJsonl" ${s.jsonl_enabled?'checked':''}> Also append to a JSONL file</label>
+    <label class="switch" style="margin:8px 0 2px"><input type="checkbox" id="expJsonl" ${s.jsonl_enabled?'checked':''}> Also Append to a JSONL File</label>
     <label>File path<input type="text" id="expPath" value="${esc(s.jsonl_path||'')}" placeholder="alerts.jsonl" autocomplete="off" spellcheck="false"></label>
     <div style="display:flex;gap:5px;margin-top:6px">
       <button class="btn pri" style="padding:3px 10px;font-size:11px" onclick="exportSave()">Save</button>
-      <button class="btn" style="padding:3px 10px;font-size:11px" onclick="exportTest()">Send test</button>
+      <button class="btn" style="padding:3px 10px;font-size:11px" onclick="exportTest()">Send Test</button>
       <span class="hint" id="expMsg" style="align-self:center"></span>
     </div>
     <div class="hint" style="margin-top:6px;font-size:10px">emitted ${c.emitted||0} · webhook ✓${c.webhook_ok||0}/✗${c.webhook_err||0} · jsonl ✓${c.jsonl_ok||0}/✗${c.jsonl_err||0}${c.dropped?` · dropped ${c.dropped}`:''}${s.queued?` · queued ${s.queued}`:''}</div>
@@ -4713,12 +4713,12 @@ function ntfyRender(){
     <label>Topic <span class="hint" style="font-weight:400">(a long random name = your shared secret)</span><input type="text" id="ntfyTopic" value="${esc(s.topic||'')}" placeholder="scouter-alerts-3f9q2x" autocomplete="off" spellcheck="false"></label>
     <div style="display:flex;gap:5px;margin-top:6px">
       <button class="btn pri" style="padding:3px 10px;font-size:11px" onclick="ntfySaveConfig()">Save</button>
-      <button class="btn" style="padding:3px 10px;font-size:11px" onclick="ntfyTest()">Send test</button>
+      <button class="btn" style="padding:3px 10px;font-size:11px" onclick="ntfyTest()">Send Test</button>
       <span class="hint" id="ntfyMsg" style="align-self:center"></span>
     </div>
     <div style="margin-top:6px">${tok}
       <div style="display:flex;gap:5px;margin-top:3px"><input type="password" id="ntfyToken" autocomplete="off" placeholder="${s.has_token?'replace access token…':'access token (optional)…'}" style="flex:1 1 auto;min-width:120px;font-size:11px;padding:3px 6px">
-        <button class="btn" style="padding:2px 9px;font-size:11px" onclick="ntfySaveToken()">Save key</button></div></div>
+        <button class="btn" style="padding:2px 9px;font-size:11px" onclick="ntfySaveToken()">Save Key</button></div></div>
     ${s.last_error?`<div class="hint" style="color:var(--sev-high);margin-top:5px">last error: ${esc(s.last_error)}</div>`:''}
     <div class="hint" style="margin-top:6px;font-size:10px">Get the ntfy app (App Store / Play Store) on each device → subscribe to your topic. Backend-initiated alerts (auto-response) also push here.</div>`;
 }
@@ -4776,13 +4776,13 @@ function chatRender(){
         'style="width:100%;box-sizing:border-box;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:11.5px">'+
       '<div style="display:flex;gap:6px;margin-top:4px">'+
         '<button class="btn" style="flex:1" onclick="chatSave(\''+t.name+'\')">Save</button>'+
-        '<button class="btn" style="flex:1" onclick="chatTest(\''+t.name+'\')"'+(t.configured?'':' disabled title="save a webhook URL first"')+'>Send test</button>'+
+        '<button class="btn" style="flex:1" onclick="chatTest(\''+t.name+'\')"'+(t.configured?'':' disabled title="save a webhook URL first"')+'>Send Test</button>'+
       '</div></div>').join('');
   box.innerHTML='<div class="hint" style="margin:8px 0 5px">💬 <b>Chat alerts</b> — post alerts into a channel you actually watch. '+
     'The webhook URL is the credential: it is stored in your '+esc(s.secret_backend==='keychain'?'Keychain':'0600 settings file')+
     ' and never shown again.</div>'+
     '<label class="switch" style="margin:2px 0"><input type="checkbox" '+(s.enabled?'checked':'')+
-      ' onchange="chatEnable(this.checked)"> Send alerts to chat</label>'+
+      ' onchange="chatEnable(this.checked)"> Send Alerts to Chat</label>'+
     '<label style="margin-top:4px">Only at or above'+
       '<select id="chatSev" onchange="chatSev()">'+['critical','high','medium','low','info'].map(v=>
         '<option value="'+v+'"'+((s.min_severity||'high')===v?' selected':'')+'>'+v+'</option>').join('')+'</select></label>'+
@@ -4869,7 +4869,7 @@ function aiRenderPanel(s){
   const offhost=(s.base_url && !s.is_local);
   p.innerHTML=`
     <div class="hint" style="margin-bottom:5px">Works with any OpenAI-compatible endpoint — local (Ollama, LM Studio) or cloud. Advisory only; nothing is auto-sent.</div>
-    <label class="switch" style="margin-top:2px"><input type="checkbox" id="aiEnable" ${s.enabled?'checked':''} onchange="aiSaveConfig()"> Enable AI assist</label>
+    <label class="switch" style="margin-top:2px"><input type="checkbox" id="aiEnable" ${s.enabled?'checked':''} onchange="aiSaveConfig()"> Enable AI Assist</label>
     <label>Provider preset<select id="aiPreset" onchange="document.getElementById('aiBase').value=this.value"><option value="">— pick to fill URL —</option>${presetOpts}</select></label>
     <label>Endpoint base URL<input type="text" id="aiBase" value="${esc(s.base_url||'')}" placeholder="http://127.0.0.1:11434/v1" autocomplete="off" spellcheck="false"></label>
     <label>Model<input type="text" id="aiModel" value="${esc(s.model||'')}" placeholder="llama3.1 / gpt-4o-mini / claude-…" autocomplete="off" spellcheck="false"></label>
@@ -4889,7 +4889,7 @@ function aiKeyHTML(s){
   const stored=s.has_key?`<span class="hint">🔑 key stored in <b>${s.key_source==='keychain'?'system keyring':'0600 file'}</b> · <span style="${lnk}" onclick="aiClearKey()">clear</span></span>`:'';
   return `<div style="margin-top:6px">${stored}
     <div style="display:flex;gap:5px;margin-top:3px"><input type="password" id="aiKey" autocomplete="off" placeholder="${s.has_key?'replace API key…':'API key (blank for local)…'}" style="flex:1;min-width:0;font-size:11px;padding:3px 6px" onkeydown="if(event.key==='Enter'){event.preventDefault();aiSaveKey()}">
-      <button class="btn" style="padding:2px 9px;font-size:11px" onclick="aiSaveKey()">Save key</button></div></div>`;
+      <button class="btn" style="padding:2px 9px;font-size:11px" onclick="aiSaveKey()">Save Key</button></div></div>`;
 }
 function aiSaveConfig(){
   const body={enabled:document.getElementById('aiEnable').checked,
@@ -4940,11 +4940,11 @@ function geoRenderPanel(s){
     : (s.has_token ? 'waiting for first download…' : 'add a token to download')));
   p.innerHTML=`
     <div class="hint" style="margin-bottom:5px">Resolves every public IP locally from an ipinfo database — the IPs you talk to are <b>never</b> sent to ipinfo (only the periodic DB download is).</div>
-    <label class="switch" style="margin-top:2px"><input type="checkbox" id="geoEnable" ${s.enabled?'checked':''} onchange="geoToggleEnable()"> Enable enrichment</label>
+    <label class="switch" style="margin-top:2px"><input type="checkbox" id="geoEnable" ${s.enabled?'checked':''} onchange="geoToggleEnable()"> Enable Enrichment</label>
     <label style="display:block;font-size:10.5px;color:var(--muted);margin-top:7px">Database tier
       <select id="geoTier" onchange="geoSetTier(this.value)" style="width:100%;box-sizing:border-box;font-size:11px;padding:3px 6px;margin-top:2px">
         <option value="free" ${s.tier==='free'?'selected':''}>Free — country + ASN/org</option>
-        <option value="paid" ${s.tier==='paid'?'selected':''}>Paid — city / region / ISP</option>
+        <option value="paid" ${s.tier==='paid'?'selected':''}>Paid — City / Region / ISP</option>
       </select></label>
     <div class="hint" style="margin-top:5px">${stored}</div>
     <div style="display:flex;gap:5px;margin-top:3px">
@@ -5137,8 +5137,8 @@ function iocVTRow(f,lnk){
   const ipModeHTML = on ? `<div class="hint" style="margin-left:14px;margin-top:4px;font-size:10px">
       IP lookups:
       <select onchange="vtSetIpMode(this.value)" style="font-size:10px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:1px 3px">
-        <option value="signal"${mode==='signal'?' selected':''}>only on another signal</option>
-        <option value="all"${mode==='all'?' selected':''}>all public IPs (Enterprise)</option>
+        <option value="signal"${mode==='signal'?' selected':''}>Only on Another Signal</option>
+        <option value="all"${mode==='all'?' selected':''}>All Public IPs (Enterprise)</option>
       </select>
       <div style="margin-top:2px;opacity:.75">${mode==='all'
         ? 'Every newly-seen public IP is checked — best for high-quota/Enterprise keys.'
@@ -5226,7 +5226,7 @@ function iocFormSet(f){   // f=null => blank (add); else prefill (edit)
   document.getElementById('iocfAuth').checked = f?!!f.auth:false;
   const ks=(f&&f.kinds)||[];
   document.querySelectorAll('#iocfKinds input').forEach(c=>{ c.checked=ks.includes(c.value); });
-  document.getElementById('iocFormTitle').textContent = f?('Edit '+f.name):'Add custom feed';
+  document.getElementById('iocFormTitle').textContent = f?('Edit '+f.name):'Add Custom Feed';
   iocFormErr(''); iocFormSync();
 }
 function iocAddOpen(){ iocFormSet(null);
@@ -5274,7 +5274,7 @@ function loop(){ if(!paused) fetchSnapshot(false); }
 function togglePause(){ paused=!paused;
   document.getElementById('pauseBtn').innerHTML=paused?'▶ Resume':'⏸ Pause';
   document.getElementById('liveDot').classList.toggle('paused',paused);
-  document.getElementById('liveTxt').textContent=paused?'paused':'live';
+  document.getElementById('liveTxt').textContent=paused?'Paused':'Live';
   if(!paused) fetchSnapshot(false);
 }
 function refreshNow(){ fetchSnapshot(true); }
@@ -5456,7 +5456,7 @@ function respRender(s){
     h+=`<div class="hint" style="margin-bottom:6px">What posture to come back in after the app restarts. Default is read-only (Scouting); opt into resuming your last armed posture — and any live automation — <b>hot</b>.</div>`;
     h+='<div class="respact" style="margin-bottom:4px">'+
       `<button class="btn ${lp==='scouting'?'pri':''}" style="padding:3px 11px;font-size:11px" onclick="respSetLaunchPolicy('scouting')">Start in Scouting</button>`+
-      `<button class="btn cnt ${lp==='restore'?'pri':''}" style="padding:3px 11px;font-size:11px" onclick="respSetLaunchPolicy('restore')">Restore last posture</button>`+
+      `<button class="btn cnt ${lp==='restore'?'pri':''}" style="padding:3px 11px;font-size:11px" onclick="respSetLaunchPolicy('restore')">Restore Last Posture</button>`+
       `<span class="hint" style="align-self:center">${lp==='restore'?'⚠ resumes armed / hot':'boots read-only'}</span></div>`;
   }
   const act=s.active||[];
@@ -5541,7 +5541,7 @@ function respSetAiAuto(mode){
 }
 function respSetLaunchPolicy(policy){
   if(policy==='restore'){
-    if(!confirm('Restore last posture on restart?\n\nAfter a restart, Linux Scouter will come back up in whatever mode you were last in (Defensive / Counter-Offensive) AND resume any LIVE auto-response / in-the-loop AI — without re-arming. The host can reboot straight into autonomously acting.\n\nKeep "Start in Scouting" if you want every launch to be read-only until you arm it.')) return;
+    if(!confirm('Restore Last posture on restart?\n\nAfter a restart, Linux Scouter will come back up in whatever mode you were last in (Defensive / Counter-Offensive) AND resume any LIVE auto-response / in-the-loop AI — without re-arming. The host can reboot straight into autonomously acting.\n\nKeep "Start in Scouting" if you want every launch to be read-only until you arm it.')) return;
   }
   fetch('/api/respond',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:'set-launch-policy',policy})})
     .then(r=>r.json()).then(res=>{ if(res&&res.ok){ respState=res.status; respRender(res.status); respRenderPill(res.status); }

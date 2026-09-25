@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "0.9.35"
+__version__ = "0.9.36"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -7651,32 +7651,53 @@ def correlate_incidents(alerts, node_by_id, edges, proc_parent):
 
     # Map every correlation key to the alerts that carry it, in one pass.
     key_members = {}        # correlation key -> [alert ids]
+    key_rank = {}           # correlation key -> specificity (1 = a hash, 9 = a bare path)
     for a in alerts:
         d = a.get("detail") or {}
-        keys = set()
+        keys = {}
         h = d.get("hashes") or {}
         for k in (h.get("sha256"), h.get("md5")):
             if k:
-                keys.add(f"hash:{k}")
+                keys["hash:%s" % k] = 1
         ra = d.get("raddr")
         if ra and not is_private_ip(ra):
-            keys.add(f"ip:{ra}")
-        if d.get("path"):
-            keys.add(f"path:{d['path']}")
+            keys["ip:%s" % ra] = 2
+        if d.get("path"):                      # the file an alert is ABOUT, not a binary's home
+            keys["path:%s" % d["path"]] = 6
+        # Two keys read out of the command line, and only two. A URL identifies a thing that was
+        # fetched; the argument to -c / -e / -EncodedCommand identifies what was actually run. Both
+        # are equality-grade. What is deliberately NOT a key is the rest of the command line: the
+        # hunting extractor happily returns "/Users/x/Library/Application" (truncated at a space)
+        # or a Chrome framework path, which appear in hundreds of alerts apiece and chain unrelated
+        # activity into one case through nothing but shared application boilerplate.
+        cmdline = str(d.get("cmdline") or "")
+        if cmdline:
+            for u in _RE_URL.findall(cmdline):
+                keys["url:%s" % u.rstrip(".,'\"")] = 3
+            payload = _script_payload(cmdline)
+            if payload and len(payload) >= _MIN_FRAGMENT:
+                keys["ran:%s" % payload[:300]] = 4
+        for u in (d.get("source_urls") or [])[:4]:
+            keys["url:%s" % u] = 3
         pid = anchor_pid(a)
         if pid is not None:
-            keys.add(f"root:{_proc_root(pid, proc_parent)}")
-        for k in keys:
+            keys["root:%s" % _proc_root(pid, proc_parent)] = 0
+        for k, rank in keys.items():
             key_members.setdefault(k, []).append(a["id"])
+            key_rank[k] = min(key_rank.get(k, 99), rank)
 
-    # Union alerts that share a key — but a *shared indicator* (hash/IP/path) linking an unusually
-    # large number of alerts is almost always a common resource (a CDN/Apple IP, a system path), not
-    # an intrusion tie, so don't merge on it. Ancestry roots are exempt: a big process tree is
+    # Union alerts that share a key — but a shared indicator linking an unusually large number of
+    # alerts is often a common resource rather than an intrusion tie, so each key gets a fan-out
+    # budget scaled to how specific it is. A SHA-256 or a full URL across forty alerts is one
+    # campaign; a file path across forty is /tmp. Ancestry roots stay exempt: a big process tree is
     # legitimately one case.
-    INDICATOR_FANOUT_CAP = 8
+    SPECIFIC_FANOUT_CAP = 64        # hash / URL / command line — identifies a thing, not a place
+    GENERIC_FANOUT_CAP = 8          # address / domain / path — identifies somewhere things live
     for k, members in key_members.items():
-        if not k.startswith("root:") and len(members) > INDICATOR_FANOUT_CAP:
-            continue
+        if not k.startswith("root:"):
+            cap = SPECIFIC_FANOUT_CAP if key_rank.get(k, 9) <= 5 else GENERIC_FANOUT_CAP
+            if len(members) > cap:
+                continue
         for m in members[1:]:
             union(members[0], m)
 
@@ -9813,6 +9834,16 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
     if incident_store is not None:
         try:
             proc_parent = {pid: pr.get("ppid") for pid, pr in procs.items()}
+            # The realtime collector records the parent at exec time, and a short-lived process is
+            # gone from the live table long before the snapshot runs. Without its recorded ppid,
+            # _proc_root() cannot walk anywhere and returns the pid itself — a key unique to that one
+            # alert, so every ephemeral exec was structurally incapable of correlating with anything.
+            # That is the shape of hands-on-keyboard activity, which made it the one shape the
+            # correlator could never group.
+            for _n in nodes:
+                _d = _n.get("detail") or {}
+                if _d.get("via") in ("esf", "realtime") and isinstance(_d.get("pid"), int):
+                    proc_parent.setdefault(_d["pid"], _d.get("ppid"))
             node_by_id = {n["id"]: n for n in nodes}
             alert_nodes = [n for n in nodes if n.get("severity") != "info"
                            and n.get("triage", {}).get("status") != "closed"]

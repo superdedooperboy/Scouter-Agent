@@ -28,7 +28,9 @@
      "value": "\\bn(c|cat)\\b[^|]*\\s-e\\b"
     }
    ],
-   "description": "Matches classic interactive reverse-shell constructs in a command line \u2014 bash's /dev/tcp pseudo-device, `bash -i`, or netcat with `-e`. These hand an attacker an interactive shell back to their host and essentially never occur in legitimate software, so it's high-confidence."
+   "description": "Matches classic interactive reverse-shell constructs in a command line \u2014 bash's /dev/tcp pseudo-device, `bash -i`, or netcat with `-e`. These hand an attacker an interactive shell back to their host and essentially never occur in legitimate software, so it's high-confidence.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-curlpipe",
@@ -46,7 +48,9 @@
      "value": "(curl|wget)\\b[^|]*\\|\\s*(sudo\\s+)?(ba|z)?sh\\b"
     }
    ],
-   "description": "Flags `curl`/`wget` whose output is piped straight into a shell (the \u201ccurl | sh\u201d pattern). It executes remote code with nothing written to disk and is the staple of droppers and one-line installers \u2014 treat unexpected hits as remote code execution."
+   "description": "Flags `curl`/`wget` whose output is piped straight into a shell (the \u201ccurl | sh\u201d pattern). It executes remote code with nothing written to disk and is the staple of droppers and one-line installers \u2014 treat unexpected hits as remote code execution.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-b64pipe",
@@ -64,7 +68,9 @@
      "value": "base64\\s+(-{1,2}[dD]|--decode)\\b[^|]*\\|\\s*(ba|z)?sh\\b"
     }
    ],
-   "description": "Detects a base64-decoded blob piped into a shell \u2014 a standard way to smuggle and run an obfuscated payload past plain-text inspection (deobfuscation + execution). Legitimate use is rare."
+   "description": "Detects a base64-decoded blob piped into a shell \u2014 a standard way to smuggle and run an obfuscated payload past plain-text inspection (deobfuscation + execution). Legitimate use is rare.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-osa-cred",
@@ -87,7 +93,9 @@
      "value": "password"
     }
    ],
-   "description": "AppleScript `display dialog` that asks for a \u201cpassword\u201d is the macOS credential-phishing pattern: malware pops a native-looking prompt to harvest the user's password with no privilege needed. Keys on a dialog whose text mentions a password."
+   "description": "AppleScript `display dialog` that asks for a \u201cpassword\u201d is the macOS credential-phishing pattern: malware pops a native-looking prompt to harvest the user's password with no privilege needed. Keys on a dialog whose text mentions a password.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-la-apple-masq",
@@ -102,16 +110,18 @@
     {
      "field": "path",
      "op": "regex",
-     "value": "/Library/Launch(Agents|Daemons)/com\\.apple\\.[^/]*\\.plist$"
+     "value": "^(/Library/|/Users/[^/]+/Library/)Launch(Agents|Daemons)/com\\.apple\\.[^/]*\\.plist$"
     },
     {
      "field": "program",
      "op": "regex",
-     "value": "^(?!/System/|/usr/libexec/|/usr/sbin/|/usr/bin/)"
+     "value": "^/(?!(System|usr|bin|sbin|Library/Apple)/)"
     }
    ],
    "depth_override": 3,
-   "description": "A LaunchAgent or LaunchDaemon named like an Apple component but pointing at a program outside the system directories. CrashStealer ships com.apple.crashreporter.helper and AmnesiaStealer masquerades as a crash reporter too; Apple's own agents run Apple's own binaries, so the mismatch is the signal."
+   "description": "A LaunchAgent or LaunchDaemon named like an Apple component but pointing at a program outside the system directories. CrashStealer ships com.apple.crashreporter.helper and AmnesiaStealer masquerades as a crash reporter too; Apple's own agents run Apple's own binaries, so the mismatch is the signal.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-la-updater-masq",
@@ -135,7 +145,9 @@
     }
    ],
    "depth_override": 3,
-   "description": "Persistence labelled as a software updater (Keystone, GoogleUpdate) whose program lives in Application Support. SHub Reaper installs com.google.keystone.agent.plist running a bash script from Application Support/Google/GoogleUpdate.app \u2014 real Google Keystone does not."
+   "description": "Persistence labelled as a software updater (Keystone, GoogleUpdate) whose program lives in Application Support. SHub Reaper installs com.google.keystone.agent.plist running a bash script from Application Support/Google/GoogleUpdate.app \u2014 real Google Keystone does not.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-la-hidden-support",
@@ -154,7 +166,9 @@
     }
    ],
    "depth_override": 3,
-   "description": "Persistence running out of a hidden dot-directory under Application Support, as SHub Reaper does with /Library/Application Support/.com.apple.accountsd/. Hiding the payload directory has no legitimate purpose."
+   "description": "Persistence running out of a hidden dot-directory under Application Support, as SHub Reaper does with /Library/Application Support/.com.apple.accountsd/. Hiding the payload directory has no legitimate purpose.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-shub-staging",
@@ -173,7 +187,9 @@
     }
    ],
    "depth_override": 3,
-   "description": "The /tmp/shub_ staging prefix named in SentinelOne's SHub Reaper analysis \u2014 a direct indicator rather than a heuristic."
+   "description": "The /tmp/shub_ staging prefix named in SentinelOne's SHub Reaper analysis \u2014 a direct indicator rather than a heuristic.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-clicklock-backdoor",
@@ -192,7 +208,9 @@
     }
    ],
    "depth_override": 3,
-   "description": "ClickLock stores its backdoor at ~/Library/Application Support/iCloudsync/iCloud. Apple ships no product by that name."
+   "description": "ClickLock stores its backdoor at ~/Library/Application Support/iCloudsync/iCloud. Apple ships no product by that name.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-osa-passloop",
@@ -220,7 +238,9 @@
      "value": "(?i)(repeat|until|while)\\b"
     }
    ],
-   "description": "ClickLock kills applications in a loop and re-prompts until the user types their macOS password. An AppleScript password dialog inside a repeat loop is that pattern, and the payoff is a validated login password that unlocks the Keychain offline."
+   "description": "ClickLock kills applications in a loop and re-prompts until the user types their macOS password. An AppleScript password dialog inside a repeat loop is that pattern, and the payoff is a validated login password that unlocks the Keychain offline.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-chrome-safestorage",
@@ -248,7 +268,9 @@
      "value": "(?i)(chrome|brave|edge|arc|opera) safe storage"
     }
    ],
-   "description": "Reading a browser's Safe Storage key from the login Keychain is what turns copied cookie and password databases into plaintext. Every current macOS stealer does it."
+   "description": "Reading a browser's Safe Storage key from the login Keychain is what turns copied cookie and password databases into plaintext. Every current macOS stealer does it.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-tcc-db-read",
@@ -266,7 +288,9 @@
      "value": "com\\.apple\\.TCC/TCC\\.db"
     }
    ],
-   "description": "Direct reads of TCC.db enumerate which applications already hold Full Disk Access \u2014 reconnaissance for picking a host process, or a check that a bypass worked."
+   "description": "Direct reads of TCC.db enumerate which applications already hold Full Disk Access \u2014 reconnaissance for picking a host process, or a check that a bypass worked.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-apfs-snapshot-mount",
@@ -289,7 +313,9 @@
      "value": "(?i)com\\.apple\\.TimeMachine[^\\n]*local"
     }
    ],
-   "description": "Mounting an APFS local snapshot reaches TCC-protected files by a path the policy does not cover; reported against macOS 26 as a working bypass for Keychain and browser data."
+   "description": "Mounting an APFS local snapshot reaches TCC-protected files by a path the policy does not cover; reported against macOS 26 as a working bypass for Keychain and browser data.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-keychain-copy",
@@ -307,7 +333,9 @@
      "value": "(?i)(cp|ditto|rsync|zip|tar)\\b[^\\n]*login\\.keychain(-db)?\\b"
     }
    ],
-   "description": "Copying login.keychain-db wholesale exfiltrates every stored secret, ready for offline cracking once the user's password is captured."
+   "description": "Copying login.keychain-db wholesale exfiltrates every stored secret, ready for offline cracking once the user's password is captured.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-browser-profile-sweep",
@@ -330,7 +358,9 @@
      "value": "(?i)(Chrome|Brave|Arc|Edge|Firefox|Opera)"
     }
    ],
-   "description": "Bulk collection of Cookies, Login Data and Local Storage across browser profiles \u2014 the collection stage of every 2026 macOS stealer, whatever the family."
+   "description": "Bulk collection of Cookies, Login Data and Local Storage across browser profiles \u2014 the collection stage of every 2026 macOS stealer, whatever the family.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-keychain-dump",
@@ -348,7 +378,9 @@
      "value": "dump-keychain"
     }
    ],
-   "description": "`security dump-keychain` exports stored secrets (passwords, keys, certificates) from the keychain \u2014 a direct credential-theft action with essentially no legitimate interactive use."
+   "description": "`security dump-keychain` exports stored secrets (passwords, keys, certificates) from the keychain \u2014 a direct credential-theft action with essentially no legitimate interactive use.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-keychain-find",
@@ -366,7 +398,9 @@
      "value": "security\\b[^\\n]*find-(generic|internet)-password"
     }
    ],
-   "description": "`security find-generic-password`/`find-internet-password` reads individual secrets out of the keychain. Some legitimate CLIs do this, so it's medium \u2014 confirm the requesting process."
+   "description": "`security find-generic-password`/`find-internet-password` reads individual secrets out of the keychain. Some legitimate CLIs do this, so it's medium \u2014 confirm the requesting process.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-lazagne",
@@ -389,7 +423,9 @@
      "value": "lazagne"
     }
    ],
-   "description": "LaZagne is a well-known open-source credential harvester that scrapes passwords from browsers, the keychain and apps. Its presence on an endpoint is almost always malicious."
+   "description": "LaZagne is a well-known open-source credential harvester that scrapes passwords from browsers, the keychain and apps. Its presence on an endpoint is almost always malicious.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-cloud-creds",
@@ -422,7 +458,9 @@
      "value": ".azure/"
     }
    ],
-   "description": "A command line explicitly referencing cloud-credential files (~/.aws/credentials, gcloud, Azure, OCI) indicates someone is reading long-lived cloud keys \u2014 a common pivot into cloud infrastructure. Keys on the credential path appearing in the command (e.g. cat/cp/grep)."
+   "description": "A command line explicitly referencing cloud-credential files (~/.aws/credentials, gcloud, Azure, OCI) indicates someone is reading long-lived cloud keys \u2014 a common pivot into cloud infrastructure. Keys on the credential path appearing in the command (e.g. cat/cp/grep).",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-ssh-keys",
@@ -440,7 +478,9 @@
      "value": "\\b(cat|cp|scp|rsync|tar|gpg|base64|grep|find|less|more)\\b[^|]*\\bid_(rsa|dsa|ecdsa|ed25519)\\b"
     }
    ],
-   "description": "Reading or copying a private SSH key (id_rsa/id_ed25519/\u2026) via cat/cp/scp/tar/etc. is a precursor to lateral movement. Matches a file-handling command that references a private-key filename."
+   "description": "Reading or copying a private SSH key (id_rsa/id_ed25519/\u2026) via cat/cp/scp/tar/etc. is a precursor to lateral movement. Matches a file-handling command that references a private-key filename.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-cookies",
@@ -463,7 +503,9 @@
      "value": "--remote-debugging-port"
     }
    ],
-   "description": "Accessing Safari's Cookies.binarycookies or launching Chrome with `--remote-debugging-port` targets live session cookies \u2014 used for session hijacking and MFA-bypass."
+   "description": "Accessing Safari's Cookies.binarycookies or launching Chrome with `--remote-debugging-port` targets live session cookies \u2014 used for session hijacking and MFA-bypass.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-sip-off",
@@ -481,7 +523,9 @@
      "value": "csrutil disable"
     }
    ],
-   "description": "`csrutil disable` turns off System Integrity Protection, the core macOS kernel/file protection. It's only settable from Recovery and is a hallmark of deep system tampering \u2014 high confidence."
+   "description": "`csrutil disable` turns off System Integrity Protection, the core macOS kernel/file protection. It's only settable from Recovery and is a hallmark of deep system tampering \u2014 high confidence.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-gatekeeper-off",
@@ -499,7 +543,9 @@
      "value": "--master-disable"
     }
    ],
-   "description": "`spctl --master-disable` turns Gatekeeper off so unsigned / unnotarized code runs without prompting \u2014 a deliberate weakening of macOS code-trust controls."
+   "description": "`spctl --master-disable` turns Gatekeeper off so unsigned / unnotarized code runs without prompting \u2014 a deliberate weakening of macOS code-trust controls.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-fw-off",
@@ -517,7 +563,9 @@
      "value": "socketfilterfw\\b[^\\n]*--setglobalstate\\s+off"
     }
    ],
-   "description": "Turning the Application Firewall off via socketfilterfw removes inbound connection filtering. Less abnormal than SIP/Gatekeeper (the firewall is off by default on macOS), hence medium."
+   "description": "Turning the Application Firewall off via socketfilterfw removes inbound connection filtering. Less abnormal than SIP/Gatekeeper (the firewall is off by default on macOS), hence medium.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-edr-tamper",
@@ -535,7 +583,9 @@
      "value": "\\b(launchctl\\s+(unload|bootout|remove|disable)|kextunload|killall|pkill|kill)\\b[^\\n]*(crowdstrike|falcon|csagent|carbonblack|cbdaemon|little\\s?snitch|littlesnitch|sentinel|wdav|mdatp|defender|umbrella|opendns|sophos|esets|santad?)"
     }
    ],
-   "description": "Unloading or killing a known security agent (CrowdStrike/Falcon, LittleSnitch, Defender/MDATP, SentinelOne, Sophos, Santa, OpenDNS\u2026) via launchctl/kextunload/pkill is defense evasion aimed at blinding monitoring \u2014 high confidence."
+   "description": "Unloading or killing a known security agent (CrowdStrike/Falcon, LittleSnitch, Defender/MDATP, SentinelOne, Sophos, Santa, OpenDNS\u2026) via launchctl/kextunload/pkill is defense evasion aimed at blinding monitoring \u2014 high confidence.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-rootca",
@@ -553,7 +603,9 @@
      "value": "security\\b[^\\n]*add-trusted-cert"
     }
    ],
-   "description": "`security add-trusted-cert` installs a new trusted root certificate, letting an adversary transparently intercept TLS (adversary-in-the-middle) or trust malicious code. Legitimate installs are rare and normally done by MDM."
+   "description": "`security add-trusted-cert` installs a new trusted root certificate, letting an adversary transparently intercept TLS (adversary-in-the-middle) or trust malicious code. Legitimate installs are rare and normally done by MDM.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-tmutil-off",
@@ -571,7 +623,9 @@
      "value": "tmutil\\s+(disable|disablelocal|deletelocalsnapshots)"
     }
    ],
-   "description": "Disabling Time Machine or deleting local snapshots removes the user's ability to recover files \u2014 a common precursor to ransomware or destructive attacks (inhibit system recovery)."
+   "description": "Disabling Time Machine or deleting local snapshots removes the user's ability to recover files \u2014 a common precursor to ransomware or destructive attacks (inhibit system recovery).",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-quarantine-strip",
@@ -589,7 +643,9 @@
      "value": "xattr\\b[^\\n]*com\\.apple\\.quarantine"
     }
    ],
-   "description": "Removing the com.apple.quarantine extended attribute clears the mark-of-the-web so a downloaded file executes without a Gatekeeper prompt \u2014 a manual Gatekeeper bypass."
+   "description": "Removing the com.apple.quarantine extended attribute clears the mark-of-the-web so a downloaded file executes without a Gatekeeper prompt \u2014 a manual Gatekeeper bypass.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-log-erase",
@@ -607,7 +663,9 @@
      "value": "\\blog\\s+erase\\b"
     }
    ],
-   "description": "`log erase` wipes the macOS unified logs, destroying forensic evidence (anti-forensics / defense evasion)."
+   "description": "`log erase` wipes the macOS unified logs, destroying forensic evidence (anti-forensics / defense evasion).",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-hist-off",
@@ -625,7 +683,9 @@
      "value": "unset\\s+HISTFILE|HISTFILE=/dev/null|HISTSIZE=0|set\\s+\\+o\\s+history|HISTCONTROL=ignore"
     }
    ],
-   "description": "Disabling shell-history logging (unset HISTFILE, HISTSIZE=0, set +o history) is an anti-forensics step so the attacker's typed commands aren't recorded."
+   "description": "Disabling shell-history logging (unset HISTFILE, HISTSIZE=0, set +o history) is an anti-forensics step so the attacker's typed commands aren't recorded.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-screencap",
@@ -648,7 +708,9 @@
      "value": "\\s-x\\b"
     }
    ],
-   "description": "`screencapture -x` takes a screenshot silently (no shutter sound or UI). The silent flag is the scripted/surveillance pattern \u2014 interactive user screenshots don't use it."
+   "description": "`screencapture -x` takes a screenshot silently (no shutter sound or UI). The silent flag is the scripted/surveillance pattern \u2014 interactive user screenshots don't use it.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-openssl-enc",
@@ -666,7 +728,9 @@
      "value": "openssl\\s+enc\\b[^\\n]*\\s-e\\b"
     }
    ],
-   "description": "`openssl enc -e` encrypts files from the command line \u2014 used to stage/exfiltrate data and, when run broadly across a directory, as poor-man's ransomware. Review what is being encrypted."
+   "description": "`openssl enc -e` encrypts files from the command line \u2014 used to stage/exfiltrate data and, when run broadly across a directory, as poor-man's ransomware. Review what is being encrypted.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-tunnel",
@@ -714,7 +778,9 @@
      "value": "\\bssh\\b[^\\n]*\\s-R\\s"
     }
    ],
-   "description": "cloudflared / ngrok / dev-tunnels and reverse SSH (`ssh -R`) expose the host or proxy C2 traffic out through an allowed service, bypassing inbound firewall rules \u2014 a common tunneling / C2 setup."
+   "description": "cloudflared / ngrok / dev-tunnels and reverse SSH (`ssh -R`) expose the host or proxy C2 traffic out through an allowed service, bypassing inbound firewall rules \u2014 a common tunneling / C2 setup.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-tor",
@@ -737,7 +803,9 @@
      "value": "--SocksPort\\b"
     }
    ],
-   "description": "Running Tor (or a process opening a SocksPort) anonymizes outbound traffic, frequently to hide C2 or exfiltration destinations."
+   "description": "Running Tor (or a process opening a SocksPort) anonymizes outbound traffic, frequently to hide C2 or exfiltration destinations.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-vpn-provider",
@@ -825,7 +893,9 @@
      "value": "perfect privacy"
     }
    ],
-   "description": "A connection whose remote peer (by offline ASN/org enrichment) belongs to a consumer privacy/anonymity VPN provider (Mullvad, Proton, NordVPN, ExpressVPN, \u2026). Attackers use such networks to mask the true source or destination of remote access, C2 and exfiltration; legitimate privacy use also occurs, so triage in context. Keys on the PEER ASN, so it catches the connection in either direction (inbound from, or outbound to, the provider). Requires Geo/ASN enrichment to be enabled."
+   "description": "A connection whose remote peer (by offline ASN/org enrichment) belongs to a consumer privacy/anonymity VPN provider (Mullvad, Proton, NordVPN, ExpressVPN, \u2026). Attackers use such networks to mask the true source or destination of remote access, C2 and exfiltration; legitimate privacy use also occurs, so triage in context. Keys on the PEER ASN, so it catches the connection in either direction (inbound from, or outbound to, the provider). Requires Geo/ASN enrichment to be enabled.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-vpn-hosting",
@@ -918,7 +988,9 @@
      "value": "1337 services"
     }
    ],
-   "description": "A connection whose remote peer belongs to hosting/ASN infrastructure predominantly used to run VPN / proxy exit nodes and anonymization services (M247, DataCamp, Clouvider, Choopa/Vultr, \u2026). Lower severity because these datacenters also host plenty of legitimate services \u2014 surfaced for awareness rather than as a strong signal. Tor exit nodes vary by ASN and are best caught by enabling the Tor exit-list IOC feed (Threat Intel Feeds). Requires Geo/ASN enrichment."
+   "description": "A connection whose remote peer belongs to hosting/ASN infrastructure predominantly used to run VPN / proxy exit nodes and anonymization services (M247, DataCamp, Clouvider, Choopa/Vultr, \u2026). Lower severity because these datacenters also host plenty of legitimate services \u2014 surfaced for awareness rather than as a strong signal. Tor exit nodes vary by ASN and are best caught by enabling the Tor exit-list IOC feed (Threat Intel Feeds). Requires Geo/ASN enrichment.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-vpn-inbound",
@@ -1096,7 +1168,9 @@
      ]
     }
    ],
-   "description": "An INBOUND connection (a remote peer dialed in to a local listening port) whose source belongs to a privacy-VPN or anonymization-hosting network. Something on this Mac is accepting connections FROM anonymized infrastructure \u2014 a strong remote-access / pivot / backdoor signal, since legitimate inbound traffic rarely originates from VPN/hosting exit nodes. Higher severity than the direction-agnostic peer rules because inbound-from-anon is far more likely to be adversarial. Requires Geo/ASN enrichment; only public peers are classified."
+   "description": "An INBOUND connection (a remote peer dialed in to a local listening port) whose source belongs to a privacy-VPN or anonymization-hosting network. Something on this Mac is accepting connections FROM anonymized infrastructure \u2014 a strong remote-access / pivot / backdoor signal, since legitimate inbound traffic rarely originates from VPN/hosting exit nodes. Higher severity than the direction-agnostic peer rules because inbound-from-anon is far more likely to be adversarial. Requires Geo/ASN enrichment; only public peers are classified.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-rclone",
@@ -1114,7 +1188,9 @@
      "value": "rclone"
     }
    ],
-   "description": "rclone syncs data to dozens of cloud providers and is frequently abused for bulk exfiltration to attacker-controlled storage."
+   "description": "rclone syncs data to dozens of cloud providers and is frequently abused for bulk exfiltration to attacker-controlled storage.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-mitm",
@@ -1142,7 +1218,9 @@
      "value": "mitmweb"
     }
    ],
-   "description": "mitmproxy / mitmdump / mitmweb intercept and modify traffic (adversary-in-the-middle), used to capture credentials and tokens or inject content."
+   "description": "mitmproxy / mitmdump / mitmweb intercept and modify traffic (adversary-in-the-middle), used to capture credentials and tokens or inject content.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-badport",
@@ -1160,7 +1238,9 @@
      "value": "4444,5555,6666,1337,31337,12345"
     }
    ],
-   "description": "A process listening on a port strongly associated with backdoors / C2 frameworks (4444 = Metasploit default, 1337/31337, 12345, \u2026) suggests an implant awaiting inbound connections."
+   "description": "A process listening on a port strongly associated with backdoors / C2 frameworks (4444 = Metasploit default, 1337/31337, 12345, \u2026) suggests an implant awaiting inbound connections.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-nmap",
@@ -1183,7 +1263,9 @@
      "value": "\\bnmap\\b"
     }
    ],
-   "description": "nmap performs active network/port scanning \u2014 internal reconnaissance to map reachable services, unusual on an endpoint outside admin or security work."
+   "description": "nmap performs active network/port scanning \u2014 internal reconnaissance to map reachable services, unusual on an endpoint outside admin or security work.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-sniff",
@@ -1211,7 +1293,9 @@
      "value": "/dev/bpf"
     }
    ],
-   "description": "tcpdump / tshark or raw /dev/bpf access captures network traffic, used to harvest credentials or map the network."
+   "description": "tcpdump / tshark or raw /dev/bpf access captures network traffic, used to harvest credentials or map the network.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-secsw-disco",
@@ -1229,7 +1313,9 @@
      "value": "(?i)\\b(ps|pgrep|grep|mdfind|find|ls|cat)\\b[^\\n]*(crowdstrike|falcon|csagent|carbonblack|cbdaemon|little\\s?snitch|littlesnitch|sentinel|sophos|eset|defender|mdatp|wdav|santa|jamf|kolide|nessus|osquery)"
     }
    ],
-   "description": "Listing processes filtered for security products (CrowdStrike, Defender, LittleSnitch, Santa\u2026) is reconnaissance to identify what monitoring is present before evading it. Low severity \u2014 often benign admin activity."
+   "description": "Listing processes filtered for security products (CrowdStrike, Defender, LittleSnitch, Santa\u2026) is reconnaissance to identify what monitoring is present before evading it. Low severity \u2014 often benign admin activity.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-vm-disco",
@@ -1247,7 +1333,9 @@
      "value": "(?i)(ioreg|system_profiler|sysctl)\\b[^\\n]*(VirtualBox|VMware|Parallels|QEMU|hypervisor)"
     }
    ],
-   "description": "Querying ioreg/system_profiler/sysctl for hypervisor or VM-vendor strings is sandbox evasion \u2014 malware checking whether it's under analysis before detonating."
+   "description": "Querying ioreg/system_profiler/sysctl for hypervisor or VM-vendor strings is sandbox evasion \u2014 malware checking whether it's under analysis before detonating.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-root-enable",
@@ -1265,7 +1353,9 @@
      "value": "\\bdsenableroot\\b"
     }
    ],
-   "description": "`dsenableroot` activates the normally-disabled root account, granting persistent superuser access (privilege escalation / persistence)."
+   "description": "`dsenableroot` activates the normally-disabled root account, granting persistent superuser access (privilege escalation / persistence).",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-admin-add",
@@ -1283,7 +1373,9 @@
      "value": "dseditgroup\\b[^\\n]*\\sadmin\\b"
     }
    ],
-   "description": "Adding an account to the admin group via dseditgroup grants administrative rights \u2014 privilege escalation or backdoor-account setup."
+   "description": "Adding an account to the admin group via dseditgroup grants administrative rights \u2014 privilege escalation or backdoor-account setup.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-user-create",
@@ -1306,7 +1398,9 @@
      "value": "sysadminctl\\b[^\\n]*-addUser"
     }
    ],
-   "description": "Creating a local account via dscl/sysadminctl can establish a persistent backdoor login. Complements the account-baseline collector, which independently flags the resulting account."
+   "description": "Creating a local account via dscl/sysadminctl can establish a persistent backdoor login. Complements the account-baseline collector, which independently flags the resulting account.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-user-delete",
@@ -1329,7 +1423,9 @@
      "value": "sysadminctl\\b[^\\n]*-deleteUser"
     }
    ],
-   "description": "Deleting a local account (dscl -delete / sysadminctl -deleteUser) can be account-access removal \u2014 locking out a legitimate user or covering tracks."
+   "description": "Deleting a local account (dscl -delete / sysadminctl -deleteUser) can be account-access removal \u2014 locking out a legitimate user or covering tracks.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-ard-enable",
@@ -1352,7 +1448,9 @@
      "value": "launchctl\\b[^\\n]*com\\.apple\\.screensharing"
     }
    ],
-   "description": "Enabling Apple Remote Desktop / Screen Sharing (kickstart -activate, loading com.apple.screensharing) opens interactive remote access \u2014 valuable to an attacker for hands-on control."
+   "description": "Enabling Apple Remote Desktop / Screen Sharing (kickstart -activate, loading com.apple.screensharing) opens interactive remote access \u2014 valuable to an attacker for hands-on control.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-guest-enable",
@@ -1370,7 +1468,9 @@
      "value": "sysadminctl\\b[^\\n]*-guestAccount\\s+on\\b"
     }
    ],
-   "description": "`sysadminctl -guestAccount on` re-enables the macOS Guest account, giving an unauthenticated local login path \u2014 a low-friction way to (re)gain access or hide activity under a throwaway identity."
+   "description": "`sysadminctl -guestAccount on` re-enables the macOS Guest account, giving an unauthenticated local login path \u2014 a low-friction way to (re)gain access or hide activity under a throwaway identity.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-rc-common",
@@ -1388,7 +1488,9 @@
      "value": "(>>?|\\btee\\b)[^\\n]*/etc/rc\\.common\\b"
     }
    ],
-   "description": "Appending to /etc/rc.common makes a command run at every boot. rc.common is a legacy startup hook almost nothing modifies today, so a write to it is a strong persistence signal."
+   "description": "Appending to /etc/rc.common makes a command run at every boot. rc.common is a legacy startup hook almost nothing modifies today, so a write to it is a strong persistence signal.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-startupitems",
@@ -1406,7 +1508,9 @@
      "value": "\\b(cp|mv|touch|tee|install|ln)\\b[^\\n]*/Library/StartupItems/"
     }
    ],
-   "description": "Dropping files into /Library/StartupItems/ uses the deprecated StartupItems mechanism to run a script/plist at boot. The directory is effectively unused on modern macOS, so a write is suspicious persistence."
+   "description": "Dropping files into /Library/StartupItems/ uses the deprecated StartupItems mechanism to run a script/plist at boot. The directory is effectively unused on modern macOS, so a write is suspicious persistence.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-shellrc-persist",
@@ -1424,7 +1528,9 @@
      "value": "(>>|\\btee\\b)[^\\n]*/?\\.(bash_profile|bashrc|bash_login|zshrc|zshenv|zprofile|profile)(['\\\"\\s]|$)"
     }
    ],
-   "description": "Redirecting or `tee`-ing into a shell init file (~/.bashrc, ~/.zshrc, ~/.bash_profile, ~/.zshenv, \u2026) plants a command that runs on every new shell \u2014 a classic user-level persistence trick. Keys on a write (>>/tee) into an rc file, not merely reading it."
+   "description": "Redirecting or `tee`-ing into a shell init file (~/.bashrc, ~/.zshrc, ~/.bash_profile, ~/.zshenv, \u2026) plants a command that runs on every new shell \u2014 a classic user-level persistence trick. Keys on a write (>>/tee) into an rc file, not merely reading it.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-trap-persist",
@@ -1442,7 +1548,9 @@
      "value": "\\btrap\\b[^\\n]*\\b(EXIT|DEBUG|SIGINT|ERR)\\b"
     }
    ],
-   "description": "A bash `trap` on EXIT/SIGINT re-launches a payload whenever the shell ends (persistence), and a `trap ... DEBUG` fires before every command \u2014 a lightweight keylogger/command-logger. Legitimate scripts use traps too, so it's medium; review what the handler runs."
+   "description": "A bash `trap` on EXIT/SIGINT re-launches a payload whenever the shell ends (persistence), and a `trap ... DEBUG` fires before every command \u2014 a lightweight keylogger/command-logger. Legitimate scripts use traps too, so it's medium; review what the handler runs.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-emond",
@@ -1460,7 +1568,9 @@
      "value": "/etc/emond\\.d/|/private/var/db/emondClients"
     }
    ],
-   "description": "Writing to /etc/emond.d/rules or /private/var/db/emondClients installs an Event Monitor (emond) rule that executes on system events. emond is obscure and largely unused, making this a high-confidence persistence indicator."
+   "description": "Writing to /etc/emond.d/rules or /private/var/db/emondClients installs an Event Monitor (emond) rule that executes on system events. emond is obscure and largely unused, making this a high-confidence persistence indicator.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-python-hook",
@@ -1483,7 +1593,9 @@
      "value": "\\b(user|site)customize\\.py\\b"
     }
    ],
-   "description": "A `.pth` file in site-packages or a user/sitecustomize.py runs arbitrary Python every time the interpreter starts \u2014 stealthy persistence that hides inside the Python runtime rather than launchd/cron."
+   "description": "A `.pth` file in site-packages or a user/sitecustomize.py runs arbitrary Python every time the interpreter starts \u2014 stealthy persistence that hides inside the Python runtime rather than launchd/cron.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-loginhook",
@@ -1506,7 +1618,9 @@
      "value": "/ByHost/com\\.apple\\.loginwindow(\\.|['\\\"\\s])"
     }
    ],
-   "description": "`defaults write com.apple.loginwindow LoginHook/LogoutHook`, or planting a ByHost/com.apple.loginwindow.plist, runs a script at login/logout (or via the re-opened-applications mechanism) \u2014 GUI-session persistence."
+   "description": "`defaults write com.apple.loginwindow LoginHook/LogoutHook`, or planting a ByHost/com.apple.loginwindow.plist, runs a script at login/logout (or via the re-opened-applications mechanism) \u2014 GUI-session persistence.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-launchctl-submit",
@@ -1524,7 +1638,9 @@
      "value": "\\blaunchctl\\s+submit\\b"
     }
    ],
-   "description": "`launchctl submit` registers and starts an ad-hoc launchd job straight from the command line without writing a plist to a watched directory \u2014 a way to run/persist a service while side-stepping the LaunchAgents/LaunchDaemons file collectors."
+   "description": "`launchctl submit` registers and starts an ad-hoc launchd job straight from the command line without writing a plist to a watched directory \u2014 a way to run/persist a service while side-stepping the LaunchAgents/LaunchDaemons file collectors.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-dyld-inject",
@@ -1542,7 +1658,9 @@
      "value": "\\bDYLD_INSERT_LIBRARIES\\s*="
     }
    ],
-   "description": "`DYLD_INSERT_LIBRARIES=` forces a chosen dylib to load into another process at launch \u2014 code injection used to hijack execution, hook APIs, or steal data from the target. High confidence outside of deliberate debugging."
+   "description": "`DYLD_INSERT_LIBRARIES=` forces a chosen dylib to load into another process at launch \u2014 code injection used to hijack execution, hook APIs, or steal data from the target. High confidence outside of deliberate debugging.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-compile-drop",
@@ -1565,7 +1683,9 @@
      "value": "\\bgo\\s+run\\b[^\\n]*(/tmp/|/var/tmp/|/private/tmp/|/Users/Shared/)"
     }
    ],
-   "description": "Invoking a compiler (gcc/clang/go run) against sources in /tmp, /var/tmp or /Users/Shared is the compile-after-delivery pattern: ship source to dodge binary AV/notarization, then build and run it on the host. Low severity \u2014 developers also build in temp dirs \u2014 so corroborate with context."
+   "description": "Invoking a compiler (gcc/clang/go run) against sources in /tmp, /var/tmp or /Users/Shared is the compile-after-delivery pattern: ship source to dodge binary AV/notarization, then build and run it on the host. Low severity \u2014 developers also build in temp dirs \u2014 so corroborate with context.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-upx",
@@ -1588,7 +1708,9 @@
      "value": "\\bupx\\b\\s+(-|--)"
     }
    ],
-   "description": "UPX packs an executable to shrink and obfuscate it, defeating simple signature/string scanning. Presence of UPX (or a upx-compressed binary) around other suspicious activity suggests payload obfuscation."
+   "description": "UPX packs an executable to shrink and obfuscate it, defeating simple signature/string scanning. Presence of UPX (or a upx-compressed binary) around other suspicious activity suggests payload obfuscation.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-setuid",
@@ -1606,7 +1728,9 @@
      "value": "\\bchmod\\b[^\\n]*\\b([ug]\\+[rwx]*s|[42][0-7]{3})\\b"
     }
    ],
-   "description": "`chmod u+s`/`g+s` (or a 4xxx/2xxx numeric mode) sets the SetUID/SetGID bit so a binary runs with its owner's/group's privileges \u2014 a common privilege-escalation and persistence primitive when the owner is root."
+   "description": "`chmod u+s`/`g+s` (or a 4xxx/2xxx numeric mode) sets the SetUID/SetGID bit so a binary runs with its owner's/group's privileges \u2014 a common privilege-escalation and persistence primitive when the owner is root.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-kext-disco",
@@ -1634,7 +1758,9 @@
      "value": "\\bkext(stat|find)\\b|\\bkmutil\\s+showloaded\\b"
     }
    ],
-   "description": "kextstat / kextfind / `kmutil showloaded` enumerate loaded kernel extensions \u2014 reconnaissance to spot security kexts or driver-based defenses before tampering. Low severity; also normal admin activity."
+   "description": "kextstat / kextfind / `kmutil showloaded` enumerate loaded kernel extensions \u2014 reconnaissance to spot security kexts or driver-based defenses before tampering. Low severity; also normal admin activity.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-bookmark-disco",
@@ -1652,7 +1778,9 @@
      "value": "\\b(find|cat|grep|ls|strings)\\b[^\\n]*(places\\.sqlite|/Bookmarks\\b|Bookmarks\\.plist)"
     }
    ],
-   "description": "Searching for browser bookmark stores (places.sqlite, Chrome Bookmarks, Safari Bookmarks.plist) profiles the user's interests and internal URLs \u2014 light discovery/collection."
+   "description": "Searching for browser bookmark stores (places.sqlite, Chrome Bookmarks, Safari Bookmarks.plist) profiles the user's interests and internal URLs \u2014 light discovery/collection.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-pwpolicy-disco",
@@ -1670,7 +1798,9 @@
      "value": "\\bpwpolicy\\b[^\\n]*getaccountpolicies"
     }
    ],
-   "description": "`pwpolicy getaccountpolicies` reads the local password policy (length, complexity, lockout) \u2014 reconnaissance that informs brute-force or credential attacks."
+   "description": "`pwpolicy getaccountpolicies` reads the local password policy (length, complexity, lockout) \u2014 reconnaissance that informs brute-force or credential attacks.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-account-disco",
@@ -1693,7 +1823,9 @@
      "value": "\\bdscacheutil\\s+-q\\s+(user|group)\\b"
     }
    ],
-   "description": "`dscl . -list /Users`/`/Groups` and `dscacheutil -q` enumerate local accounts and groups \u2014 standard host discovery to map who exists and what privileges to target. Low severity."
+   "description": "`dscl . -list /Users`/`/Groups` and `dscacheutil -q` enumerate local accounts and groups \u2014 standard host discovery to map who exists and what privileges to target. Low severity.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-geo-disco",
@@ -1711,7 +1843,9 @@
      "value": "(?i)\\b(curl|wget)\\b[^\\n]*(ipinfo\\.io|ifconfig\\.me|ip-api\\.com|ipapi\\.co|icanhazip\\.com|ident\\.me|checkip\\.\\w|wtfismyip|myexternalip|api\\.myip)"
     }
    ],
-   "description": "Curling an IP-geolocation service (ipinfo.io, ifconfig.me, ip-api.com, icanhazip.com, \u2026) tells malware its public IP and physical location \u2014 used for geofencing, target selection, or sandbox evasion."
+   "description": "Curling an IP-geolocation service (ipinfo.io, ifconfig.me, ip-api.com, icanhazip.com, \u2026) tells malware its public IP and physical location \u2014 used for geofencing, target selection, or sandbox evasion.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-proxy-config",
@@ -1729,7 +1863,9 @@
      "value": "networksetup\\s+-set(web|secureweb|socksfirewall)proxy\\b"
     }
    ],
-   "description": "`networksetup -setwebproxy/-setsecurewebproxy/-setsocksfirewallproxy` points the host's traffic through a proxy \u2014 an attacker can route victim traffic through infrastructure they control for interception or C2."
+   "description": "`networksetup -setwebproxy/-setsecurewebproxy/-setsocksfirewallproxy` points the host's traffic through a proxy \u2014 an attacker can route victim traffic through infrastructure they control for interception or C2.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-archive-enc",
@@ -1757,7 +1893,9 @@
      "value": "\\btar\\b[^\\n]*\\|[^\\n]*\\b(openssl|gpg)\\b"
     }
    ],
-   "description": "Bundling data into a password-protected zip, gpg-symmetric archive, or tar piped through openssl/gpg is the archive-and-encrypt staging step before exfiltration \u2014 the encryption both compresses and hides the collected data from inspection."
+   "description": "Bundling data into a password-protected zip, gpg-symmetric archive, or tar piped through openssl/gpg is the archive-and-encrypt staging step before exfiltration \u2014 the encryption both compresses and hides the collected data from inspection.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-browser-creds",
@@ -1775,7 +1913,9 @@
      "value": "(?i)(Chrome|Chromium|Edge|Brave)[^\\n]*Login Data|logins\\.json|key4\\.db|signons\\.sqlite"
     }
    ],
-   "description": "Reading a browser's saved-credential store (Chrome/Edge/Brave 'Login Data', Firefox logins.json/key4.db/signons.sqlite) is direct credential theft from password stores."
+   "description": "Reading a browser's saved-credential store (Chrome/Edge/Brave 'Login Data', Firefox logins.json/key4.db/signons.sqlite) is direct credential theft from password stores.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-notes-db",
@@ -1793,7 +1933,9 @@
      "value": "group\\.com\\.apple\\.notes|NoteStore\\.sqlite"
     }
    ],
-   "description": "Accessing the Apple Notes database (group.com.apple.notes, NoteStore.sqlite) pulls potentially sensitive personal/business notes \u2014 data collection from a local application store."
+   "description": "Accessing the Apple Notes database (group.com.apple.notes, NoteStore.sqlite) pulls potentially sensitive personal/business notes \u2014 data collection from a local application store.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-mailbox",
@@ -1811,7 +1953,9 @@
      "value": "\\b(cp|rsync|tar|mv|zip|ditto)\\b[^\\n]*/Library/Mail\\b"
     }
    ],
-   "description": "Copying or manipulating ~/Library/Mail (cp/rsync/tar/ditto) targets locally-stored email for collection or tampering \u2014 mailbox data theft/manipulation without touching the mail server."
+   "description": "Copying or manipulating ~/Library/Mail (cp/rsync/tar/ditto) targets locally-stored email for collection or tampering \u2014 mailbox data theft/manipulation without touching the mail server.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-clipboard-exec",
@@ -1834,7 +1978,9 @@
      "value": "\\bpbpaste\\b[^\\n]*\\|\\s*(ba|z)?sh\\b"
     }
    ],
-   "description": "Executing the clipboard's contents (`$(pbpaste)` or `pbpaste | sh`) runs whatever text the user copied \u2014 the mechanism behind ClipboardEvent/paste-and-run attacks and clipboard-based collection."
+   "description": "Executing the clipboard's contents (`$(pbpaste)` or `pbpaste | sh`) runs whatever text the user copied \u2014 the mechanism behind ClipboardEvent/paste-and-run attacks and clipboard-based collection.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-split-exfil",
@@ -1852,7 +1998,9 @@
      "value": "\\bsplit\\b\\s+-b\\b"
     }
    ],
-   "description": "`split -b` chops a file into fixed-size chunks \u2014 used to stay under size limits/DLP thresholds when exfiltrating, or to reassemble later. Low severity on its own; strong when paired with an upload."
+   "description": "`split -b` chops a file into fixed-size chunks \u2014 used to stay under size limits/DLP thresholds when exfiltrating, or to reassemble later. Low severity on its own; strong when paired with an upload.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-dns-exfil",
@@ -1870,7 +2018,9 @@
      "value": "(?i)\\b(dig|nslookup|host)\\b[^\\n]*base64"
     }
    ],
-   "description": "A dig/nslookup/host query whose label contains base64-encoded data is DNS tunnelling \u2014 smuggling data out inside DNS lookups to bypass egress controls that allow DNS."
+   "description": "A dig/nslookup/host query whose label contains base64-encoded data is DNS tunnelling \u2014 smuggling data out inside DNS lookups to bypass egress controls that allow DNS.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-ssh-exfil",
@@ -1893,7 +2043,9 @@
      "value": "\\bssh\\b[^\\n]*\\btar\\s+-?[zc]"
     }
    ],
-   "description": "Piping a tar archive over ssh (`tar \u2026 | ssh` or `ssh host \"tar cz \u2026\"`) copies bulk data to a remote host over an encrypted alternative protocol \u2014 exfiltration that blends with legitimate SSH."
+   "description": "Piping a tar archive over ssh (`tar \u2026 | ssh` or `ssh host \"tar cz \u2026\"`) copies bulk data to a remote host over an encrypted alternative protocol \u2014 exfiltration that blends with legitimate SSH.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-webhook-exfil",
@@ -1911,7 +2063,9 @@
      "value": "(?i)\\b(curl|wget)\\b[^\\n]*(discord(app)?\\.com/api/webhooks|hooks\\.slack\\.com|api\\.telegram\\.org/bot|webhook\\.site)"
     }
    ],
-   "description": "POSTing data to a Discord/Slack/Telegram webhook (or webhook.site) exfiltrates over a trusted, TLS-protected web service that egress filters rarely block."
+   "description": "POSTing data to a Discord/Slack/Telegram webhook (or webhook.site) exfiltrates over a trusted, TLS-protected web service that egress filters rarely block.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-timestomp",
@@ -1939,7 +2093,9 @@
      "value": "\\bSetFile\\b[^\\n]*\\s-[dm]\\s"
     }
    ],
-   "description": "`touch -t`/`touch -r`/`SetFile -m` rewrites a file's timestamps to blend a dropped file in with its surroundings \u2014 anti-forensics that defeats timeline analysis. Low severity (build tooling also touches timestamps); weigh alongside the file involved."
+   "description": "`touch -t`/`touch -r`/`SetFile -m` rewrites a file's timestamps to blend a dropped file in with its surroundings \u2014 anti-forensics that defeats timeline analysis. Low severity (build tooling also touches timestamps); weigh alongside the file involved.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-log-clear",
@@ -1967,7 +2123,9 @@
      "value": "\\bunlink\\b[^\\n]*/var/log/"
     }
    ],
-   "description": "Deleting or truncating system logs via srm/shred/truncate/unlink or a `> /var/log/\u2026` redirect destroys forensic evidence (anti-forensics), complementing the `log erase` detection."
+   "description": "Deleting or truncating system logs via srm/shred/truncate/unlink or a `> /var/log/\u2026` redirect destroys forensic evidence (anti-forensics), complementing the `log erase` detection.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-data-destroy",
@@ -1990,7 +2148,9 @@
      "value": "\\bdd\\b[^\\n]*\\bof=\\S[^\\n]*\\bif=/dev/(zero|random|urandom)\\b"
     }
    ],
-   "description": "`dd if=/dev/zero|random of=<file>` overwrites a file's contents in place \u2014 data destruction (or secure wiping to prevent recovery). Review the target path to gauge blast radius."
+   "description": "`dd if=/dev/zero|random of=<file>` overwrites a file's contents in place \u2014 data destruction (or secure wiping to prevent recovery). Review the target path to gauge blast radius.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-shutdown",
@@ -2018,7 +2178,9 @@
      "value": "osascript\\b[^\\n]*\\b(shut down|restart)\\b"
     }
    ],
-   "description": "A scripted shutdown/reboot/halt (or an osascript 'shut down'/'restart') can be destructive-impact or used to force a reboot so a newly-planted persistence item takes effect. Low severity \u2014 legitimate admin action \u2014 surfaced for awareness."
+   "description": "A scripted shutdown/reboot/halt (or an osascript 'shut down'/'restart') can be destructive-impact or used to force a reboot so a newly-planted persistence item takes effect. Low severity \u2014 legitimate admin action \u2014 surfaced for awareness.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-lin-doc-shell",
@@ -2041,7 +2203,9 @@
      "value": "^(sh|bash|zsh|dash|ksh|python3?(\\.\\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$"
     }
    ],
-   "description": "A shell or interpreter whose ANCESTRY includes a browser, mail client, or document viewer. Those applications open untrusted content; they have no legitimate reason to spawn a shell, so this is the classic exploitation / malicious-macro / drive-by chain. Lineage-based, so it fires regardless of what the command line says \u2014 renaming the payload doesn't help."
+   "description": "A shell or interpreter whose ANCESTRY includes a browser, mail client, or document viewer. Those applications open untrusted content; they have no legitimate reason to spawn a shell, so this is the classic exploitation / malicious-macro / drive-by chain. Lineage-based, so it fires regardless of what the command line says \u2014 renaming the payload doesn't help.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-lin-server-shell",
@@ -2064,7 +2228,9 @@
      "value": "^(sh|bash|zsh|dash|ksh|python3?(\\.\\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$"
     }
    ],
-   "description": "A shell or interpreter spawned by an internet-facing service (web server, app server, database). This is the signature of a webshell or successful remote code execution against that service, and is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells."
+   "description": "A shell or interpreter spawned by an internet-facing service (web server, app server, database). This is the signature of a webshell or successful remote code execution against that service, and is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-rare-exec-drop",
@@ -2087,7 +2253,9 @@
      "value": "^/(private/)?(tmp|var/tmp|var/folders)/|^/Users/[^/]+/(Downloads|Library/Caches|Public)/|^/Volumes/"
     }
    ],
-   "description": "A binary NEVER SEEN on this host before, executing from a temp / cache / Downloads / removable-media path. Rarity is the signal an adversary cannot fake \u2014 they can rename the file and rewrite the command line, but the first execution is still the first. Pairing novelty with a drop location is what keeps it precise: new binaries in /usr/bin are software updates; new binaries in /tmp are droppers."
+   "description": "A binary NEVER SEEN on this host before, executing from a temp / cache / Downloads / removable-media path. Rarity is the signal an adversary cannot fake \u2014 they can rename the file and rewrite the command line, but the first execution is still the first. Pairing novelty with a drop location is what keeps it precise: new binaries in /usr/bin are software updates; new binaries in /tmp are droppers.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-c2-webservice",
@@ -2105,7 +2273,9 @@
      "value": "(discord(app)?\\.com/api/webhooks|api\\.telegram\\.org/bot|hooks\\.slack\\.com/services|pastebin\\.com/raw|gist\\.githubusercontent\\.com|raw\\.githubusercontent\\.com/[^ ]*\\.(sh|ps1|py)|transfer\\.sh|0x0\\.st|termbin\\.com|webhook\\.site)"
     }
    ],
-   "description": "Command-and-control riding a legitimate web service \u2014 a Discord/Slack webhook, a Telegram bot API, a paste site, a raw GitHub script, or a one-shot file host. Commodity and AI-generated malware favour these because the destination is a trusted domain that egress filtering and reputation feeds allow."
+   "description": "Command-and-control riding a legitimate web service \u2014 a Discord/Slack webhook, a Telegram bot API, a paste site, a raw GitHub script, or a one-shot file host. Commodity and AI-generated malware favour these because the destination is a trusted domain that egress filtering and reputation feeds allow.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-c2-doh",
@@ -2123,7 +2293,9 @@
      "value": "(dns\\.google/dns-query|cloudflare-dns\\.com/dns-query|doh\\.opendns\\.com|dns\\.quad9\\.net/dns-query|/dns-query\\?)"
     }
    ],
-   "description": "A DNS-over-HTTPS resolver endpoint used straight from a command line. DoH hides name resolution from local DNS monitoring, so a script reaching one directly is usually evading inspection rather than browsing."
+   "description": "A DNS-over-HTTPS resolver endpoint used straight from a command line. DoH hides name resolution from local DNS monitoring, so a script reaching one directly is usually evading inspection rather than browsing.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-ai-agent-risky",
@@ -2146,7 +2318,9 @@
      "value": "((curl|wget)[^|]*\\|\\s*(ba|z)?sh|base64\\s+(-{1,2}[dD]|--decode)[^|]*\\|\\s*(ba|z)?sh|/etc/(shadow|sudoers)|\\.ssh/id_|launchctl\\s+(load|bootstrap)|\\bsudo\\s+)"
     }
    ],
-   "description": "An AI coding agent (Claude Code, Codex, Cursor, aider, Cline, \u2026) whose child process performs a high-risk action \u2014 piping a download into a shell, reading /etc/shadow or SSH private keys, or escalating. These agents execute shell commands with the user's full privileges, so a prompt-injected or hijacked agent is remote code execution that otherwise looks exactly like normal developer activity. Scoped to dangerous actions so ordinary agent work (builds, installs, tests) stays quiet."
+   "description": "An AI coding agent (Claude Code, Codex, Cursor, aider, Cline, \u2026) whose child process performs a high-risk action \u2014 piping a download into a shell, reading /etc/shadow or SSH private keys, or escalating. These agents execute shell commands with the user's full privileges, so a prompt-injected or hijacked agent is remote code execution that otherwise looks exactly like normal developer activity. Scoped to dangerous actions so ordinary agent work (builds, installs, tests) stays quiet.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-ai-mcp-tamper",
@@ -2169,7 +2343,9 @@
      "value": "(>>?|\\btee\\b|\\bcp\\b|\\bmv\\b|sed\\s+-i|curl[^|]*-o\\b|\\bpython3?\\b)"
     }
    ],
-   "description": "An MCP server / AI tool configuration being WRITTEN from a command line. An MCP server runs locally with your privileges, so silently registering one is the AI-era equivalent of a malicious package or browser extension \u2014 persistent, privileged, and rarely reviewed. Reading these files does not alert."
+   "description": "An MCP server / AI tool configuration being WRITTEN from a command line. An MCP server runs locally with your privileges, so silently registering one is the AI-era equivalent of a malicious package or browser extension \u2014 persistent, privileged, and rarely reviewed. Reading these files does not alert.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-ai-key-theft",
@@ -2187,7 +2363,9 @@
      "value": "(ANTHROPIC_API_KEY|OPENAI_API_KEY|OPENAI_KEY|GEMINI_API_KEY|XAI_API_KEY|GROQ_API_KEY|MISTRAL_API_KEY|DEEPSEEK_API_KEY|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)"
     }
    ],
-   "description": "A command line referencing an AI provider API key variable. These keys are high value, usually sit in plaintext in .env files, shell profiles, and tool configs, and are rarely rotated \u2014 an attractive, low-friction credential-theft target that traditional credential rules miss entirely."
+   "description": "A command line referencing an AI provider API key variable. These keys are high value, usually sit in plaintext in .env files, shell profiles, and tool configs, and are rarely rotated \u2014 an attractive, low-friction credential-theft target that traditional credential rules miss entirely.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-ai-exfil",
@@ -2210,7 +2388,9 @@
      "value": "(-d\\s*@|--data-binary\\s*@|--upload-file|-F\\s+\\S*=@)"
     }
    ],
-   "description": "A file being UPLOADED to an AI provider API endpoint (curl -F file=@ / --data-binary @ / --upload-file). Model APIs are a new egress channel that looks benign to network monitoring: TLS to a reputable, allow-listed domain. Ordinary inline API calls do not match \u2014 only file uploads do."
+   "description": "A file being UPLOADED to an AI provider API endpoint (curl -F file=@ / --data-binary @ / --upload-file). Model APIs are a new egress channel that looks benign to network monitoring: TLS to a reputable, allow-listed domain. Ordinary inline API calls do not match \u2014 only file uploads do.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-ai-local-exposed",
@@ -2238,7 +2418,9 @@
      "value": "^(0\\.0\\.0\\.0|::|\\*)$"
     }
    ],
-   "description": "A local LLM runtime (Ollama and friends) listening on a wildcard interface instead of loopback. That exposes an unauthenticated model server \u2014 and often the host's files and tools \u2014 to anyone on the network. A misconfiguration far more than an attack, which is exactly why it goes unnoticed."
+   "description": "A local LLM runtime (Ollama and friends) listening on a wildcard interface instead of loopback. That exposes an unauthenticated model server \u2014 and often the host's files and tools \u2014 to anyone on the network. A misconfiguration far more than an attack, which is exactly why it goes unnoticed.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-lin-ssh-shell",
@@ -2261,7 +2443,9 @@
      "value": "^(sh|bash|zsh|dash|ksh|python3?(\\.\\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$"
     }
    ],
-   "description": "An interpreter or network tool running under an SSH session. On a workstation, remote hands-on-keyboard activity is itself notable. (Deliberately NOT shipped on Linux, where administrators drive servers over SSH constantly \u2014 there it is context, and the multi-stage SQL detections use it instead.)"
+   "description": "An interpreter or network tool running under an SSH session. On a workstation, remote hands-on-keyboard activity is itself notable. (Deliberately NOT shipped on Linux, where administrators drive servers over SSH constantly \u2014 there it is context, and the multi-stage SQL detections use it instead.)",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-tcc-input-monitor",
@@ -2287,7 +2471,9 @@
      "value": "1"
     }
    ],
-   "description": "Input monitoring (ListenEvent / PostEvent) \u2014 the permission that allows reading and synthesising keystrokes \u2014 held by a raw executable PATH rather than a registered application bundle. Real apps ship as signed bundles and request this through the normal prompt; a loose binary holding it is a keylogger."
+   "description": "Input monitoring (ListenEvent / PostEvent) \u2014 the permission that allows reading and synthesising keystrokes \u2014 held by a raw executable PATH rather than a registered application bundle. Real apps ship as signed bundles and request this through the normal prompt; a loose binary holding it is a keylogger.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-tcc-accessibility",
@@ -2313,7 +2499,9 @@
      "value": "1"
     }
    ],
-   "description": "Accessibility or Full Disk Access held by a raw executable path. These are the two most powerful grants on macOS \u2014 Accessibility can drive any application, Full Disk Access reads every protected file \u2014 and they are the standard objective of macOS malware's social-engineering prompts."
+   "description": "Accessibility or Full Disk Access held by a raw executable path. These are the two most powerful grants on macOS \u2014 Accessibility can drive any application, Full Disk Access reads every protected file \u2014 and they are the standard objective of macOS malware's social-engineering prompts.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-tcc-esf",
@@ -2336,7 +2524,9 @@
      "value": "1"
     }
    ],
-   "description": "The Endpoint Security client entitlement held by a non-bundled binary. That entitlement is how security tools observe the system; an unregistered binary holding it is either impersonating a security product or positioned to watch everything the real one would."
+   "description": "The Endpoint Security client entitlement held by a non-bundled binary. That entitlement is how security tools observe the system; an unregistered binary holding it is either impersonating a security product or positioned to watch everything the real one would.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-tcc-screen",
@@ -2359,7 +2549,9 @@
      "value": "1"
     }
    ],
-   "description": "Screen recording granted to a raw executable path \u2014 surveillance capability outside the usual bundled-application path. Complements the command-line screencapture rule with an independent, state-based route to the same technique."
+   "description": "Screen recording granted to a raw executable path \u2014 surveillance capability outside the usual bundled-application path. Complements the command-line screencapture rule with an independent, state-based route to the same technique.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-tcc-avcapture",
@@ -2385,7 +2577,9 @@
      "value": "1"
     }
    ],
-   "description": "Microphone or camera access held by a raw executable path rather than a registered app. Conferencing apps arrive as signed bundles; a loose binary with the microphone is surveillance."
+   "description": "Microphone or camera access held by a raw executable path rather than a registered app. Conferencing apps arrive as signed bundles; a loose binary with the microphone is surveillance.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-acct-hidden",
@@ -2403,7 +2597,9 @@
      "value": "True"
     }
    ],
-   "description": "A local account flagged hidden \u2014 excluded from the login window and from casual enumeration. Legitimate service accounts are created by installers with known identifiers; a hidden account appearing on a workstation is a classic persistence backdoor."
+   "description": "A local account flagged hidden \u2014 excluded from the login window and from casual enumeration. Legitimate service accounts are created by installers with known identifiers; a hidden account appearing on a workstation is a classic persistence backdoor.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-acct-uid0",
@@ -2426,7 +2622,9 @@
      "value": "root"
     }
    ],
-   "description": "An account other than root carrying uid 0. Unix authorises on the numeric uid, not the name, so this is a full root backdoor wearing an innocuous username. There is no benign reason for it."
+   "description": "An account other than root carrying uid 0. Unix authorises on the numeric uid, not the name, so this is a full root backdoor wearing an innocuous username. There is no benign reason for it.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-job-droppath",
@@ -2444,7 +2642,9 @@
      "value": "^/(private/)?(tmp|var/tmp|var/folders)/|/Users/[^/]+/(Downloads|Public|Library/Caches)/|/\\.[^/]+/|^/Volumes/"
     }
    ],
-   "description": "A scheduled job (launchd / cron / systemd) whose program lives in a temp, cache, Downloads, hidden or removable-media path. Persistence is only useful if it points at a payload, and legitimate software installs its payload somewhere durable \u2014 not /tmp."
+   "description": "A scheduled job (launchd / cron / systemd) whose program lives in a temp, cache, Downloads, hidden or removable-media path. Persistence is only useful if it points at a payload, and legitimate software installs its payload somewhere durable \u2014 not /tmp.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-job-download-exec",
@@ -2462,7 +2662,9 @@
      "value": "(curl|wget)[^|]*\\|\\s*(ba|z)?sh|base64\\s+(-{1,2}[dD]|--decode)[^|]*\\|\\s*(ba|z)?sh"
     }
    ],
-   "description": "A scheduled job whose command downloads and pipes straight into a shell, or decodes base64 into one. That is persistence and staging in a single line: every execution re-fetches whatever the operator is serving, so the payload can change without touching the host again."
+   "description": "A scheduled job whose command downloads and pipes straight into a shell, or decodes base64 into one. That is persistence and staging in a single line: every execution re-fetches whatever the operator is serving, so the payload can change without touching the host again.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-job-masquerade",
@@ -2485,7 +2687,9 @@
      "value": "^/(?!(System|usr|bin|sbin|Library/Apple)/)"
     }
    ],
-   "description": "A scheduled job named after a system component but whose program is NOT a system binary. Real platform jobs run platform binaries; borrowing the name while pointing elsewhere is deliberate blending, and the name/target mismatch is what gives it away."
+   "description": "A scheduled job named after a system component but whose program is NOT a system binary. Real platform jobs run platform binaries; borrowing the name while pointing elsewhere is deliberate blending, and the name/target mismatch is what gives it away.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-config-defence-off",
@@ -2513,7 +2717,9 @@
      "value": "disabled"
     }
    ],
-   "description": "A security control reported as disabled by the host-state collector. This is the state-based counterpart to the command-line rules that catch the act of disabling it \u2014 so the finding survives even if the tampering happened before Scouter was installed, or off-host."
+   "description": "A security control reported as disabled by the host-state collector. This is the state-based counterpart to the command-line rules that catch the act of disabling it \u2014 so the finding survives even if the tampering happened before Scouter was installed, or off-host.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-access-remote-on",
@@ -2536,7 +2742,9 @@
      "value": "True"
     }
    ],
-   "description": "An inbound remote-access service is enabled. Often deliberate, but it is an entry point that should be a known decision rather than a surprise \u2014 and attackers enable these to keep a hands-on channel."
+   "description": "An inbound remote-access service is enabled. Often deliberate, but it is an entry point that should be a known decision rather than a surprise \u2014 and attackers enable these to keep a hands-on channel.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-file-persist-write",
@@ -2563,7 +2771,9 @@
     }
    ],
    "depth_override": 3,
-   "description": "A persistence file (launch agent/daemon, cron entry, systemd unit, init script) created or replaced, seen by the REAL-TIME FILE SENSOR rather than by a command line. This is an independent route to the same techniques the command-line persistence rules cover: reword the command, use a different tool, or write the file from a compiled binary and this still fires, because it watches the OUTCOME rather than the phrasing."
+   "description": "A persistence file (launch agent/daemon, cron entry, systemd unit, init script) created or replaced, seen by the REAL-TIME FILE SENSOR rather than by a command line. This is an independent route to the same techniques the command-line persistence rules cover: reword the command, use a different tool, or write the file from a compiled binary and this still fires, because it watches the OUTCOME rather than the phrasing.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-file-shellrc-write",
@@ -2590,7 +2800,9 @@
     }
    ],
    "depth_override": 3,
-   "description": "A shell startup file created or replaced. Same independence argument as the persistence-file rule \u2014 the command-line rule catches `echo ... >> ~/.zshrc`, this catches the file changing no matter how it was done."
+   "description": "A shell startup file created or replaced. Same independence argument as the persistence-file rule \u2014 the command-line rule catches `echo ... >> ~/.zshrc`, this catches the file changing no matter how it was done.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-file-authkeys-write",
@@ -2617,7 +2829,9 @@
     }
    ],
    "depth_override": 3,
-   "description": "An SSH authorized_keys file created or replaced \u2014 the quietest durable backdoor there is, because it needs no malware and survives password changes."
+   "description": "An SSH authorized_keys file created or replaced \u2014 the quietest durable backdoor there is, because it needs no malware and survives password changes.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-file-log-delete",
@@ -2641,7 +2855,9 @@
     }
    ],
    "depth_override": 3,
-   "description": "A log, audit or shell-history file deleted. Logs are removed to destroy the record of what happened; catching the deletion itself is independent of whatever command performed it."
+   "description": "A log, audit or shell-history file deleted. Logs are removed to destroy the record of what happened; catching the deletion itself is independent of whatever command performed it.",
+   "confidence": 1,
+   "confidence_label": "weak"
   },
   {
    "id": "b-rmm-remote",
@@ -2664,7 +2880,9 @@
      "value": "(?i)(ScreenConnect|ConnectWise ?Control|AnyDesk|TeamViewer|RustDesk|Splashtop|AteraAgent|Syncro|MeshAgent)"
     }
    ],
-   "description": "A commercial remote-management tool (ScreenConnect, AnyDesk, TeamViewer, RustDesk, Splashtop and friends) starting on an endpoint. These are signed, notarised, legitimate products, so nothing else flags them \u2014 which is exactly why intrusion sets install them instead of a RAT: the SMOKE#SCREEN campaign pairs ScreenConnect with Cloudflare tunnels for persistent hands-on access. Benign where the customer's own IT uses one, so confirm which product is sanctioned per site and suppress that one rather than the whole rule."
+   "description": "A commercial remote-management tool (ScreenConnect, AnyDesk, TeamViewer, RustDesk, Splashtop and friends) starting on an endpoint. These are signed, notarised, legitimate products, so nothing else flags them \u2014 which is exactly why intrusion sets install them instead of a RAT: the SMOKE#SCREEN campaign pairs ScreenConnect with Cloudflare tunnels for persistent hands-on access. Benign where the customer's own IT uses one, so confirm which product is sanctioned per site and suppress that one rather than the whole rule.",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "b-btm-write",
@@ -2691,7 +2909,9 @@
     }
    ],
    "depth_override": 3,
-   "description": "A write to the Background Task Management store, which is where macOS records Login Items and SMAppService agents. Malware adds itself here to start at login without a LaunchAgent plist; the store is not a file users or installers edit by hand, so a change to it is worth reading."
+   "description": "A write to the Background Task Management store, which is where macOS records Login Items and SMAppService agents. Malware adds itself here to start at login without a LaunchAgent plist; the store is not a file users or installers edit by hand, so a change to it is worth reading.",
+   "confidence": 2,
+   "confidence_label": "probable"
   }
  ],
  "sql_count": 11,
@@ -2704,7 +2924,9 @@
    "severity": "critical",
    "mitre": "T1486",
    "description": "One process creating or renaming 60+ files inside five minutes. Encryption-for-impact does not look like a command line \u2014 it looks like a storm of file rewrites \u2014 so this watches the shape of the activity instead. The five-minute bucket and single-actor grouping are what separate a ransomware run from a compiler or a backup, which touch just as many files but spread out and from a known toolchain.",
-   "sql": "SELECT actor, COUNT(*) AS files_touched, COUNT(DISTINCT path) AS distinct_paths,\n MIN(path) AS example_path,\n datetime(MIN(ts),'unixepoch','localtime') AS started,\n datetime(MAX(ts),'unixepoch','localtime') AS ended\nFROM file_events\nWHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n AND event IN ('create','rename') AND actor IS NOT NULL AND actor != ''\nGROUP BY actor, ts / 300\nHAVING COUNT(*) >= 60 AND MAX(ts) - MIN(ts) <= 300\nORDER BY files_touched DESC LIMIT 25"
+   "sql": "SELECT actor, COUNT(*) AS files_touched, COUNT(DISTINCT path) AS distinct_paths,\n MIN(path) AS example_path,\n datetime(MIN(ts),'unixepoch','localtime') AS started,\n datetime(MAX(ts),'unixepoch','localtime') AS ended\nFROM file_events\nWHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n AND event IN ('create','rename') AND actor IS NOT NULL AND actor != ''\nGROUP BY actor, ts / 300\nHAVING COUNT(*) >= 60 AND MAX(ts) - MIN(ts) <= 300\nORDER BY files_touched DESC LIMIT 25",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "s-mass-file-delete",
@@ -2714,7 +2936,9 @@
    "severity": "critical",
    "mitre": "T1485",
    "description": "One process deleting 60+ files inside five minutes \u2014 destruction observed as an outcome rather than inferred from an `rm` command line, so it holds regardless of the tool used.",
-   "sql": "SELECT actor, COUNT(*) AS files_deleted, MIN(path) AS example_path,\n datetime(MIN(ts),'unixepoch','localtime') AS started,\n datetime(MAX(ts),'unixepoch','localtime') AS ended\nFROM file_events\nWHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n AND event = 'unlink' AND actor IS NOT NULL AND actor != ''\nGROUP BY actor, ts / 300\nHAVING COUNT(*) >= 60 AND MAX(ts) - MIN(ts) <= 300\nORDER BY files_deleted DESC LIMIT 25"
+   "sql": "SELECT actor, COUNT(*) AS files_deleted, MIN(path) AS example_path,\n datetime(MIN(ts),'unixepoch','localtime') AS started,\n datetime(MAX(ts),'unixepoch','localtime') AS ended\nFROM file_events\nWHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n AND event = 'unlink' AND actor IS NOT NULL AND actor != ''\nGROUP BY actor, ts / 300\nHAVING COUNT(*) >= 60 AND MAX(ts) - MIN(ts) <= 300\nORDER BY files_deleted DESC LIMIT 25",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "s-chain-bruteforce",
@@ -2724,7 +2948,9 @@
    "severity": "high",
    "mitre": "T1110",
    "description": "Counts failed authentications per user in a rolling window. A single failure is a typo; a burst is an attack, and no single event can express that \u2014 this is a question only correlation can answer, which is why it lives here rather than in a node rule. A success immediately following the burst is reported alongside, because that is the difference between a repelled attempt and a breach.",
-   "sql": "WITH fails AS (\n SELECT user, source, ts FROM auth_events\n WHERE success = 0 AND ts >= CAST(strftime('%s','now') AS INTEGER) - 86400)\nSELECT f.user, COUNT(*) AS failures,\n (SELECT GROUP_CONCAT(DISTINCT s2.source) FROM fails s2 WHERE s2.user = f.user) AS sources,\n datetime(MIN(f.ts),'unixepoch','localtime') AS first_failure,\n datetime(MAX(f.ts),'unixepoch','localtime') AS last_failure,\n (SELECT COUNT(*) FROM auth_events s WHERE s.success = 1 AND s.user = f.user\n    AND s.ts BETWEEN MIN(f.ts) AND MAX(f.ts) + 300) AS succeeded_after\nFROM fails f GROUP BY f.user\nHAVING COUNT(*) >= 8 AND MAX(f.ts) - MIN(f.ts) <= 3600\nORDER BY failures DESC LIMIT 25"
+   "sql": "WITH fails AS (\n SELECT user, source, ts FROM auth_events\n WHERE success = 0 AND ts >= CAST(strftime('%s','now') AS INTEGER) - 86400)\nSELECT f.user, COUNT(*) AS failures,\n (SELECT GROUP_CONCAT(DISTINCT s2.source) FROM fails s2 WHERE s2.user = f.user) AS sources,\n datetime(MIN(f.ts),'unixepoch','localtime') AS first_failure,\n datetime(MAX(f.ts),'unixepoch','localtime') AS last_failure,\n (SELECT COUNT(*) FROM auth_events s WHERE s.success = 1 AND s.user = f.user\n    AND s.ts BETWEEN MIN(f.ts) AND MAX(f.ts) + 300) AS succeeded_after\nFROM fails f GROUP BY f.user\nHAVING COUNT(*) >= 8 AND MAX(f.ts) - MIN(f.ts) <= 3600\nORDER BY failures DESC LIMIT 25",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "s-chain-new-remote-login",
@@ -2734,7 +2960,9 @@
    "severity": "high",
    "mitre": "T1078",
    "description": "A successful remote authentication from a source address this host has never accepted a login from before. Valid credentials used from a new place is what account compromise looks like from the endpoint \u2014 there is no malware to find, which is exactly why novelty is the only available signal.",
-   "sql": "WITH known AS (\n SELECT DISTINCT source FROM auth_events\n WHERE success = 1 AND ts < CAST(strftime('%s','now') AS INTEGER) - 86400)\nSELECT datetime(a.ts,'unixepoch','localtime') AS at, a.user, a.source, a.method, a.etype\nFROM auth_events a\nWHERE a.success = 1 AND a.ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n AND a.source IS NOT NULL AND a.source != '' AND a.source != 'console'\n AND a.source NOT IN (SELECT source FROM known)\nORDER BY a.ts DESC LIMIT 25"
+   "sql": "WITH known AS (\n SELECT DISTINCT source FROM auth_events\n WHERE success = 1 AND ts < CAST(strftime('%s','now') AS INTEGER) - 86400)\nSELECT datetime(a.ts,'unixepoch','localtime') AS at, a.user, a.source, a.method, a.etype\nFROM auth_events a\nWHERE a.success = 1 AND a.ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n AND a.source IS NOT NULL AND a.source != '' AND a.source != 'console'\n AND a.source NOT IN (SELECT source FROM known)\nORDER BY a.ts DESC LIMIT 25",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "s-beacon-cadence",
@@ -2744,7 +2972,9 @@
    "severity": "medium",
    "mitre": "T1071",
    "description": "Finds command-and-control by its RHYTHM rather than its content. Malware has to check in; that check-in is periodic, and periodicity is something an implant cannot hide by renaming itself or encrypting its traffic. Intervals come from the edge-triggered connection log (a connection is recorded when it APPEARS, so a beacon that reconnects on a timer leaves one row per beat), and regularity is scored as the squared coefficient of variation of those intervals \u2014 below 0.05 catches beacons jittered up to ~30%, which covers the usual C2 defaults. Three gates keep it quiet: the destination must be NEW to this host (first seen within 14 days), which removes the steady-state legitimate pollers that beacon perfectly (Slack, Dropbox, update checkers); it must be contacted by fewer than three distinct executables, which removes shared CDNs; and it needs at least 8 beats over at least 30 minutes. Thresholds are worth tuning to your environment \u2014 raise the jitter bound to catch sloppier beacons at the cost of noise.",
-   "sql": "WITH ev AS (\n SELECT exe, proc_name, raddr, rport, asorg, country, ts,\n        ts - LAG(ts) OVER (PARTITION BY exe, raddr ORDER BY ts) AS gap\n FROM conn_events WHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400),\nagg AS (\n SELECT exe, proc_name, raddr, rport, asorg, country,\n        COUNT(*) AS beats, AVG(gap) AS mean_gap, MIN(ts) AS t0, MAX(ts) AS t1,\n        (AVG(gap*gap) - AVG(gap)*AVG(gap)) AS var_gap\n FROM ev WHERE gap IS NOT NULL AND gap > 0 GROUP BY exe, raddr),\nnovel AS (\n SELECT raddr FROM connections WHERE public=1 AND raddr IS NOT NULL\n GROUP BY raddr HAVING MIN(first_seen) >= CAST(strftime('%s','now') AS INTEGER) - 1209600)\nSELECT a.proc_name, a.exe, a.raddr, a.rport, a.asorg, a.country,\n a.beats, CAST(a.mean_gap AS INTEGER) AS mean_gap_s,\n ROUND(CASE WHEN a.mean_gap > 0 THEN (a.var_gap / (a.mean_gap*a.mean_gap)) ELSE 9 END, 3) AS jitter,\n datetime(a.t0,'unixepoch','localtime') AS first_beat,\n datetime(a.t1,'unixepoch','localtime') AS last_beat\nFROM agg a JOIN novel n ON n.raddr = a.raddr\nWHERE a.beats >= 8 AND a.mean_gap >= 45 AND a.t1 - a.t0 >= 1800\n AND a.var_gap IS NOT NULL\n AND (a.var_gap / (a.mean_gap*a.mean_gap)) < 0.05\n AND a.raddr NOT IN (SELECT raddr FROM conn_events GROUP BY raddr HAVING COUNT(DISTINCT exe) >= 3)\nORDER BY jitter ASC, a.beats DESC LIMIT 25"
+   "sql": "WITH ev AS (\n SELECT exe, proc_name, raddr, rport, asorg, country, ts,\n        ts - LAG(ts) OVER (PARTITION BY exe, raddr ORDER BY ts) AS gap\n FROM conn_events WHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400),\nagg AS (\n SELECT exe, proc_name, raddr, rport, asorg, country,\n        COUNT(*) AS beats, AVG(gap) AS mean_gap, MIN(ts) AS t0, MAX(ts) AS t1,\n        (AVG(gap*gap) - AVG(gap)*AVG(gap)) AS var_gap\n FROM ev WHERE gap IS NOT NULL AND gap > 0 GROUP BY exe, raddr),\nnovel AS (\n SELECT raddr FROM connections WHERE public=1 AND raddr IS NOT NULL\n GROUP BY raddr HAVING MIN(first_seen) >= CAST(strftime('%s','now') AS INTEGER) - 1209600)\nSELECT a.proc_name, a.exe, a.raddr, a.rport, a.asorg, a.country,\n a.beats, CAST(a.mean_gap AS INTEGER) AS mean_gap_s,\n ROUND(CASE WHEN a.mean_gap > 0 THEN (a.var_gap / (a.mean_gap*a.mean_gap)) ELSE 9 END, 3) AS jitter,\n datetime(a.t0,'unixepoch','localtime') AS first_beat,\n datetime(a.t1,'unixepoch','localtime') AS last_beat\nFROM agg a JOIN novel n ON n.raddr = a.raddr\nWHERE a.beats >= 8 AND a.mean_gap >= 45 AND a.t1 - a.t0 >= 1800\n AND a.var_gap IS NOT NULL\n AND (a.var_gap / (a.mean_gap*a.mean_gap)) < 0.05\n AND a.raddr NOT IN (SELECT raddr FROM conn_events GROUP BY raddr HAVING COUNT(DISTINCT exe) >= 3)\nORDER BY jitter ASC, a.beats DESC LIMIT 25",
+   "confidence": 2,
+   "confidence_label": "probable"
   },
   {
    "id": "s-chain-dl-exec",
@@ -2754,7 +2984,9 @@
    "severity": "high",
    "mitre": "T1204.002",
    "description": "Correlates the downloads table against process executions: a file that arrived from the internet and then RAN within 24 hours. This is how ordinary people actually get compromised \u2014 the fake installer, the trojanised updater, the 'codec' from a search ad \u2014 and neither half looks alarming alone.",
-   "sql": "SELECT d.name AS downloaded, d.source_url, p.exe AS executed, p.cmdline,\n datetime(d.first_seen,'unixepoch','localtime') AS downloaded_at,\n datetime(p.first_seen,'unixepoch','localtime') AS executed_at\nFROM downloads d JOIN processes p ON (p.exe = d.path OR p.exe LIKE '%/' || d.name)\nWHERE p.first_seen >= d.first_seen AND p.first_seen - d.first_seen <= 86400\n AND d.first_seen >= CAST(strftime('%s','now') AS INTEGER) - 604800\nORDER BY p.first_seen DESC LIMIT 25"
+   "sql": "SELECT d.name AS downloaded, d.source_url, p.exe AS executed, p.cmdline,\n datetime(d.first_seen,'unixepoch','localtime') AS downloaded_at,\n datetime(p.first_seen,'unixepoch','localtime') AS executed_at\nFROM downloads d JOIN processes p ON (p.exe = d.path OR p.exe LIKE '%/' || d.name)\nWHERE p.first_seen >= d.first_seen AND p.first_seen - d.first_seen <= 86400\n AND d.first_seen >= CAST(strftime('%s','now') AS INTEGER) - 604800\nORDER BY p.first_seen DESC LIMIT 25",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "s-chain-drop-beacon",
@@ -2764,7 +2996,9 @@
    "severity": "high",
    "mitre": "T1071",
    "description": "A binary first seen within the last day, living in a temp / cache / Downloads / removable path, that opened an outbound internet connection within ten minutes of first running. Dropper lands, dropper phones home. The location filter is what keeps it precise \u2014 legitimate software updates land in /usr and /Applications.",
-   "sql": "SELECT p.name, p.exe, c.raddr, c.rport, c.country, c.asorg,\n datetime(p.first_seen,'unixepoch','localtime') AS first_run,\n datetime(c.first_seen,'unixepoch','localtime') AS first_contact\nFROM processes p JOIN connections c ON c.exe = p.exe\nWHERE c.direction='outbound' AND c.public=1\n AND c.first_seen >= p.first_seen AND c.first_seen - p.first_seen <= 600\n AND p.first_seen >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (p.exe LIKE '/tmp/%' OR p.exe LIKE '/private/tmp/%' OR p.exe LIKE '/var/tmp/%' OR p.exe LIKE '/dev/shm/%' OR p.exe LIKE '%/Downloads/%' OR p.exe LIKE '%/.cache/%' OR p.exe LIKE '/Volumes/%' OR p.exe LIKE '/run/user/%')\nORDER BY p.first_seen DESC LIMIT 25"
+   "sql": "SELECT p.name, p.exe, c.raddr, c.rport, c.country, c.asorg,\n datetime(p.first_seen,'unixepoch','localtime') AS first_run,\n datetime(c.first_seen,'unixepoch','localtime') AS first_contact\nFROM processes p JOIN connections c ON c.exe = p.exe\nWHERE c.direction='outbound' AND c.public=1\n AND c.first_seen >= p.first_seen AND c.first_seen - p.first_seen <= 600\n AND p.first_seen >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (p.exe LIKE '/tmp/%' OR p.exe LIKE '/private/tmp/%' OR p.exe LIKE '/var/tmp/%' OR p.exe LIKE '/dev/shm/%' OR p.exe LIKE '%/Downloads/%' OR p.exe LIKE '%/.cache/%' OR p.exe LIKE '/Volumes/%' OR p.exe LIKE '/run/user/%')\nORDER BY p.first_seen DESC LIMIT 25",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "s-chain-recon-creds",
@@ -2774,7 +3008,9 @@
    "severity": "high",
    "mitre": "T1552",
    "description": "Three or more discovery commands (whoami / uname / netstat / ps / passwd enumeration) inside ten minutes, followed by a credential-access command. Each command is individually unremarkable \u2014 admins run all of them \u2014 but the SEQUENCE is the signature of hands-on-keyboard reconnaissance turning into theft.",
-   "sql": "WITH disco AS (SELECT ts FROM exec_events WHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (cmdline LIKE '%whoami%' OR cmdline LIKE '%uname -a%' OR cmdline LIKE '%netstat%' OR cmdline LIKE '%ifconfig%' OR cmdline LIKE '%ps aux%' OR cmdline LIKE '%/etc/passwd%' OR cmdline LIKE '%getent%' OR cmdline LIKE '%arp -a%' OR cmdline LIKE '%lsof %'))\nSELECT datetime(e.ts,'unixepoch','localtime') AS at, e.exe, e.cmdline,\n (SELECT COUNT(*) FROM disco d WHERE d.ts BETWEEN e.ts - 600 AND e.ts) AS discovery_cmds_before\nFROM exec_events e\nWHERE e.ts >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (e.cmdline LIKE '%/etc/shadow%' OR e.cmdline LIKE '%.ssh/id_%' OR e.cmdline LIKE '%keychain%' OR e.cmdline LIKE '%find-generic-password%' OR e.cmdline LIKE '%.aws/credentials%' OR e.cmdline LIKE '%API_KEY%' OR e.cmdline LIKE '%bash_history%')\n AND (SELECT COUNT(*) FROM disco d WHERE d.ts BETWEEN e.ts - 600 AND e.ts) >= 3\nORDER BY e.ts DESC LIMIT 25"
+   "sql": "WITH disco AS (SELECT ts FROM exec_events WHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (cmdline LIKE '%whoami%' OR cmdline LIKE '%uname -a%' OR cmdline LIKE '%netstat%' OR cmdline LIKE '%ifconfig%' OR cmdline LIKE '%ps aux%' OR cmdline LIKE '%/etc/passwd%' OR cmdline LIKE '%getent%' OR cmdline LIKE '%arp -a%' OR cmdline LIKE '%lsof %'))\nSELECT datetime(e.ts,'unixepoch','localtime') AS at, e.exe, e.cmdline,\n (SELECT COUNT(*) FROM disco d WHERE d.ts BETWEEN e.ts - 600 AND e.ts) AS discovery_cmds_before\nFROM exec_events e\nWHERE e.ts >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (e.cmdline LIKE '%/etc/shadow%' OR e.cmdline LIKE '%.ssh/id_%' OR e.cmdline LIKE '%keychain%' OR e.cmdline LIKE '%find-generic-password%' OR e.cmdline LIKE '%.aws/credentials%' OR e.cmdline LIKE '%API_KEY%' OR e.cmdline LIKE '%bash_history%')\n AND (SELECT COUNT(*) FROM disco d WHERE d.ts BETWEEN e.ts - 600 AND e.ts) >= 3\nORDER BY e.ts DESC LIMIT 25",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "s-chain-creds-egress",
@@ -2784,7 +3020,9 @@
    "severity": "critical",
    "mitre": "T1041",
    "description": "A credential-access command followed within fifteen minutes by an outbound connection to the public internet. Steal, then send. The highest-severity chain here because it captures the moment an intrusion becomes a breach.",
-   "sql": "WITH cred AS (SELECT e.ts, e.exe, e.cmdline FROM exec_events e WHERE e.ts >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (e.cmdline LIKE '%/etc/shadow%' OR e.cmdline LIKE '%.ssh/id_%' OR e.cmdline LIKE '%keychain%' OR e.cmdline LIKE '%find-generic-password%' OR e.cmdline LIKE '%.aws/credentials%' OR e.cmdline LIKE '%API_KEY%' OR e.cmdline LIKE '%bash_history%'))\nSELECT datetime(cr.ts,'unixepoch','localtime') AS credential_access_at, cr.cmdline AS credential_cmd,\n c.proc_name AS egress_proc, c.raddr, c.rport, c.asorg,\n datetime(c.first_seen,'unixepoch','localtime') AS egress_at\nFROM cred cr JOIN connections c\n ON c.direction='outbound' AND c.public=1 AND c.first_seen BETWEEN cr.ts AND cr.ts + 900\nORDER BY cr.ts DESC LIMIT 25"
+   "sql": "WITH cred AS (SELECT e.ts, e.exe, e.cmdline FROM exec_events e WHERE e.ts >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND (e.cmdline LIKE '%/etc/shadow%' OR e.cmdline LIKE '%.ssh/id_%' OR e.cmdline LIKE '%keychain%' OR e.cmdline LIKE '%find-generic-password%' OR e.cmdline LIKE '%.aws/credentials%' OR e.cmdline LIKE '%API_KEY%' OR e.cmdline LIKE '%bash_history%'))\nSELECT datetime(cr.ts,'unixepoch','localtime') AS credential_access_at, cr.cmdline AS credential_cmd,\n c.proc_name AS egress_proc, c.raddr, c.rport, c.asorg,\n datetime(c.first_seen,'unixepoch','localtime') AS egress_at\nFROM cred cr JOIN connections c\n ON c.direction='outbound' AND c.public=1 AND c.first_seen BETWEEN cr.ts AND cr.ts + 900\nORDER BY cr.ts DESC LIMIT 25",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "s-chain-exec-persist",
@@ -2794,7 +3032,9 @@
    "severity": "high",
    "mitre": "T1543",
    "description": "A persistence mechanism (launchd / cron / systemd job) created within fifteen minutes of a high or critical severity process running. Attackers establish persistence immediately after gaining execution; this ties the foothold to the payload that created it.",
-   "sql": "SELECT j.kind, j.label, j.program, datetime(j.first_seen,'unixepoch','localtime') AS persisted_at,\n p.name AS preceding_process, p.severity AS process_severity, p.cmdline\nFROM jobs j JOIN processes p ON p.first_seen BETWEEN j.first_seen - 900 AND j.first_seen\nWHERE j.first_seen >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND p.severity IN ('high','critical')\nORDER BY j.first_seen DESC LIMIT 25"
+   "sql": "SELECT j.kind, j.label, j.program, datetime(j.first_seen,'unixepoch','localtime') AS persisted_at,\n p.name AS preceding_process, p.severity AS process_severity, p.cmdline\nFROM jobs j JOIN processes p ON p.first_seen BETWEEN j.first_seen - 900 AND j.first_seen\nWHERE j.first_seen >= CAST(strftime('%s','now') AS INTEGER) - 86400 AND p.severity IN ('high','critical')\nORDER BY j.first_seen DESC LIMIT 25",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "s-chain-ssh-handson",
@@ -2804,7 +3044,9 @@
    "severity": "high",
    "mitre": "T1021.004",
    "description": "A successful remote login followed inside thirty minutes by three or more suspicious commands (credential paths, downloads, chmod +x, base64). Remote administration is normal; remote administration that immediately starts pulling tooling and reading secrets is not \u2014 this is the server-side counterpart to the workstation SSH rule.",
-   "sql": "WITH logins AS (SELECT ts, user, source FROM auth_events\n WHERE success=1 AND ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n  AND (etype LIKE '%ssh%' OR method LIKE '%ssh%' OR message LIKE '%sshd%'))\nSELECT datetime(l.ts,'unixepoch','localtime') AS login_at, l.user, l.source,\n COUNT(e.id) AS suspicious_cmds\nFROM logins l JOIN exec_events e ON e.ts BETWEEN l.ts AND l.ts + 1800\nWHERE (e.cmdline LIKE '%/etc/shadow%' OR e.cmdline LIKE '%.ssh/id_%' OR e.cmdline LIKE '%wget %'\n OR e.cmdline LIKE '%curl %' OR e.cmdline LIKE '%base64 %' OR e.cmdline LIKE '%chmod +x%')\nGROUP BY l.ts, l.user, l.source HAVING COUNT(e.id) >= 3\nORDER BY l.ts DESC LIMIT 25"
+   "sql": "WITH logins AS (SELECT ts, user, source FROM auth_events\n WHERE success=1 AND ts >= CAST(strftime('%s','now') AS INTEGER) - 86400\n  AND (etype LIKE '%ssh%' OR method LIKE '%ssh%' OR message LIKE '%sshd%'))\nSELECT datetime(l.ts,'unixepoch','localtime') AS login_at, l.user, l.source,\n COUNT(e.id) AS suspicious_cmds\nFROM logins l JOIN exec_events e ON e.ts BETWEEN l.ts AND l.ts + 1800\nWHERE (e.cmdline LIKE '%/etc/shadow%' OR e.cmdline LIKE '%.ssh/id_%' OR e.cmdline LIKE '%wget %'\n OR e.cmdline LIKE '%curl %' OR e.cmdline LIKE '%base64 %' OR e.cmdline LIKE '%chmod +x%')\nGROUP BY l.ts, l.user, l.source HAVING COUNT(e.id) >= 3\nORDER BY l.ts DESC LIMIT 25",
+   "confidence": 3,
+   "confidence_label": "strong"
   }
  ]
 }

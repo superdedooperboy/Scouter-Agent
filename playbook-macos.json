@@ -133,7 +133,9 @@
    ],
    "backend": "native",
    "reversible": true,
-   "destructive": false
+   "destructive": false,
+   "min_confidence": 3,
+   "min_confidence_label": "strong"
   },
   {
    "id": "block_ip",
@@ -145,7 +147,9 @@
    ],
    "backend": "native",
    "reversible": true,
-   "destructive": false
+   "destructive": false,
+   "min_confidence": 3,
+   "min_confidence_label": "strong"
   },
   {
    "id": "disable_job",
@@ -157,7 +161,9 @@
    ],
    "backend": "native",
    "reversible": true,
-   "destructive": false
+   "destructive": false,
+   "min_confidence": 3,
+   "min_confidence_label": "strong"
   },
   {
    "id": "quarantine",
@@ -170,7 +176,9 @@
    ],
    "backend": "native",
    "reversible": true,
-   "destructive": false
+   "destructive": false,
+   "min_confidence": 3,
+   "min_confidence_label": "strong"
   },
   {
    "id": "vr_forensics",
@@ -182,7 +190,9 @@
    ],
    "backend": "velociraptor",
    "reversible": false,
-   "destructive": false
+   "destructive": false,
+   "min_confidence": 2,
+   "min_confidence_label": "probable"
   },
   {
    "id": "kill",
@@ -194,7 +204,9 @@
    ],
    "backend": "native",
    "reversible": false,
-   "destructive": true
+   "destructive": true,
+   "min_confidence": 4,
+   "min_confidence_label": "certain"
   },
   {
    "id": "delete_file",
@@ -207,7 +219,9 @@
    ],
    "backend": "native",
    "reversible": false,
-   "destructive": true
+   "destructive": true,
+   "min_confidence": 4,
+   "min_confidence_label": "certain"
   }
  ]
 }

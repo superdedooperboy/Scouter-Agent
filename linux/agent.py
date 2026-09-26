@@ -860,11 +860,16 @@ RULE_CONFIDENCE = {
 
 def rule_confidence(r):
     """1-4: how likely a hit on this rule is to be genuine malice rather than legitimate activity.
-    Derived from severity unless the curated table (or the rule itself) says otherwise, so a rule
-    added tomorrow is rated automatically instead of arriving unrated."""
-    ov = r.get("confidence_override") or RULE_CONFIDENCE.get(r.get("id"))
-    if ov in (1, 2, 3, 4):
-        return int(ov)
+
+    Precedence is the same shape as the rest of the rule library: an explicit value on the rule
+    wins, then our curated table, then the severity seed — so a rule added tomorrow is rated
+    automatically instead of arriving unrated. The explicit value is how a Mesh-managed rating
+    reaches this agent: the Mesh is the authority for an enrolled host, and a rating it retuned
+    travels on the synced rule like any other field. A host that has never synced keeps using the
+    table, which holds the same values the Mesh was seeded from."""
+    for ov in (r.get("confidence_override"), r.get("confidence"), RULE_CONFIDENCE.get(r.get("id"))):
+        if ov in (1, 2, 3, 4):
+            return int(ov)
     return _SEV_CONFIDENCE.get(r.get("severity") or "medium", 2)
 
 
@@ -5844,6 +5849,17 @@ class DetectionRules:
         if r.get("severity") not in RULE_SEVERITY_FLOOR:
             r["severity"] = "medium"
         r["name"] = (r.get("name") or "").strip() or "unnamed rule"
+        # A confidence the Mesh set travels with the rule and outranks our table (the Mesh is the
+        # authority). Anything outside 1-4 is dropped rather than clamped: a rating we cannot read
+        # should fall back to the curated one, not silently become the nearest legal value.
+        try:
+            c = int(r.get("confidence"))
+        except (TypeError, ValueError):
+            c = None
+        if c in (1, 2, 3, 4):
+            r["confidence"] = c
+        else:
+            r.pop("confidence", None)
         if not sql:
             r["node_type"] = r.get("node_type") or "any"
             r["match"] = "any" if r.get("match") == "any" else "all"

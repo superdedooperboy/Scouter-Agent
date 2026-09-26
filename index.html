@@ -3753,7 +3753,7 @@ function renderRuleDetail(r, source, idx){
 function detRespOverrideHTML(detId){
   if(!detId) return '';
   const ov = pbData && pbData.overrides && pbData.overrides[detId];
-  let h='<h2>Response workflow</h2>';
+  let h='<h2>Response Workflow</h2>'+detConfHTML(detId);
   if(ov && ov.length){
     h+='<div class="hint" style="margin-bottom:4px">Custom override — runs instead of the ATT&CK tactic workflow whenever this detection fires (mode-gated; reversible steps auto-run when armed + live):</div><div class="pbrow" style="margin-bottom:6px">';
     h+=ov.map(aid=>{ const a=pbAction(aid); return a?`<span class="pbchip" style="border-color:${pbActColor(a)}">${a.icon} ${esc(a.label)}</span>`:''; }).join('');
@@ -5734,7 +5734,7 @@ function respRender(s){
   // Auto-response — Off / Dry-run (logs only) / Live (acts, reversible-only)
   const am=s.auto_mode||'off', locked=s.locked, canLive=s.auto_can_live;
   h+='<h2 style="margin-top:12px">Auto-response</h2>';
-  h+=`<div class="hint" style="margin-bottom:6px">Runs an alert's response plan automatically once you've armed <b>Defensive</b> or <b>Counter-Offensive</b>. Only <b>reversible, high-confidence</b> steps ever auto-run \u2014 destructive/irreversible steps (kill, delete) and one-shot forensics always stay <b>manual + confirmed</b>. <b>Off</b>: nothing runs automatically (run plan steps by hand). <b>Dry-run</b>: logs the actions it <i>would</i> take, without doing them. <b>Live</b>: performs them, then notifies you and lets you Undo. A circuit breaker trips Live back to Dry-run if too many fire in a short window.</div>`;
+  h+=`<div class="hint" style="margin-bottom:6px">Runs an alert's response plan automatically once you've armed <b>Defensive</b> or <b>Counter-Offensive</b>. Only <b>reversible</b> steps that clear the posture's <b>confidence floor</b> ever auto-run \u2014 <b>Defensive</b> spends only on a <b>certain</b> detection, <b>Counter-Offensive</b> also accepts a <b>strong</b> one. Destructive/irreversible steps (kill, delete) and one-shot forensics always stay <b>manual + confirmed</b>. <b>Off</b>: nothing runs automatically (run plan steps by hand). <b>Dry-run</b>: logs the actions it <i>would</i> take, without doing them. <b>Live</b>: performs them, then notifies you and lets you Undo. A circuit breaker trips Live back to Dry-run if too many fire in a short window.</div>`;
   if(locked){
     h+='<div class="hint" style="color:var(--sev-medium)">🔒 disabled — relaunch without <code>--no-response</code></div>';
   } else {
@@ -5746,7 +5746,7 @@ function respRender(s){
       `<span class="hint" style="align-self:center">${am==='live'?'ACTING automatically':(am==='dry-run'?'observing…':'not running')}</span></div>`;
     if(am==='live'){
       const b=s.auto_breaker||{};
-      h+=`<div class="hint" style="margin-bottom:6px;color:var(--sev-high)">⚡ Live auto-response is ACTING on high-confidence threats (reversible-only). Circuit breaker: ${b.recent||0}/${b.max||5} in ${(b.window_s||600)/60} min — trips to dry-run if exceeded.</div>`;
+      h+=`<div class="hint" style="margin-bottom:6px;color:var(--sev-high)">⚡ Live auto-response is ACTING on detections at or above this posture's confidence floor (reversible-only). Circuit breaker: ${b.recent||0}/${b.max||5} in ${(b.window_s||600)/60} min — trips to dry-run if exceeded.</div>`;
     }
     const dlog=(s.auto_log||[]).filter(e=>!e.ai);   // deterministic stage only (AI has its own feed)
     if(am==='dry-run'||am==='live'){
@@ -5759,7 +5759,7 @@ function respRender(s){
             return `<div class="astrow"><span class="astbadge" style="color:${col}">${badge}</span>`+
               `<span class="astval" title="${esc(e.label||'')}">${esc(e.label||e.node_id||'')}</span>`+
               `<span class="hint" style="font-size:9.5px">${esc(e.iso||'')}</span></div>`; }).join('')
-        : '<div class="hint">Nothing yet — entries appear as high-confidence flagged artifacts arrive.</div>';
+        : '<div class="hint">Nothing yet — entries appear as flagged artifacts clear the posture\u2019s confidence floor.</div>';
     }
   }
   // ---- AI in-the-loop (second stage) — autonomous review that can add or undo reversible actions
@@ -5964,7 +5964,7 @@ function suppressToggle(id,on){ fetch('/api/suppressions',{method:'POST',headers
 function suppressDelete(id){ if(!confirm('Delete this suppression? Matching alerts will fire again.')) return; fetch('/api/suppressions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:'delete',id})}).then(r=>r.json()).then(()=>{ refreshNow(); suppressLoad(); }).catch(()=>{}); }
 function respSetAuto(mode){
   if(mode==='live'){
-    const typed=prompt('Enable LIVE auto-response.\n\nMac Scouter will AUTOMATICALLY perform reversible containment (suspend / block-IP / quarantine / disable) on high-confidence threats — then notify you, with Undo. A circuit breaker stops runaway action.\n\nType LIVE to confirm:');
+    const typed=prompt('Enable LIVE auto-response.\n\nMac Scouter will AUTOMATICALLY perform reversible containment (suspend / block-IP / quarantine / disable) on detections that clear the confidence floor for this posture — then notify you, with Undo. A circuit breaker stops runaway action.\n\nType LIVE to confirm:');
     if((typed||'').trim().toUpperCase()!=='LIVE') return;
   }
   fetch('/api/respond',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:'set-auto',mode})})
@@ -6128,6 +6128,12 @@ function openResponsePlaybook(){
     .catch(()=>{ document.getElementById('response').innerHTML='<div class="empty-big">Could not load the response playbook.</div>'; });
 }
 function pbAction(id){ return ((pbData&&pbData.actions)||[]).find(a=>a.id===id); }
+function pbDetConfTag(id){
+  const d=((pbData&&pbData.detections)||[]).find(x=>x.id===id);
+  return d&&d.confidence_label
+    ? ` <span class="pbsrc" style="border-color:${confColor(d.confidence_label)};color:${confColor(d.confidence_label)}">${esc(d.confidence_label)}</span>`
+    : '';
+}
 function pbDetName(id){ const d=((pbData&&pbData.detections)||[]).find(x=>x.id===id); return d?d.name:id; }
 function pbActColor(a){ return a.destructive?'var(--sev-critical)':(a.reversible?'var(--good)':'var(--accent)'); }
 function pbCurList(kind,key){
@@ -6172,23 +6178,24 @@ function pbClearOverride(id){
 function renderPlaybook(){
   const host=document.getElementById('response');
   if(!pbData||!pbData.enabled){ host.innerHTML='<div class="empty-big">Response engine unavailable (started with --no-response?).</div>'; return; }
-  let h='<div class="hint" style="margin:2px 0 10px">Each alert’s deterministic response is resolved by precedence: <b>per-detection override</b> → <b>ATT&CK tactic workflow</b> → built-in default. Only actions that apply to the alert’s artifact fire. <b>Nothing runs in Scouting</b>; arm Defensive/Counter + set auto-response to <b>live</b> and the <b>reversible</b> steps auto-run (destructive stay manual + confirmed).</div>';
+  let h='<div class="hint" style="margin:2px 0 10px">Each alert’s deterministic response is resolved by precedence: <b>per-detection override</b> → <b>ATT&CK tactic workflow</b> → built-in default. Two things then narrow it: an action only appears if it <b>applies to the alert’s artifact</b>, and if the firing detection’s <b>confidence</b> reaches that action’s floor — which is why no rule needs an override just to respond proportionately. <b>Nothing runs in Scouting</b>; arm Defensive/Counter + set auto-response to <b>live</b> and the <b>reversible</b> steps auto-run (destructive stay manual + confirmed).</div>';
   if(pbData.mesh_managed) h+='<div class="hint" style="margin:2px 0 10px;border-left:3px solid var(--accent);padding:6px 9px;background:var(--panel2)">\ud83d\udef0 <b>Managed by Scouter Mesh</b> (playbook v'+pbData.mesh_version+'). Read-only here \u2014 edit it in the Mesh console; this host reconciles automatically.</div>';
-  h+='<div class="drsec"><h3>Per-detection overrides</h3>';
+  h+='<div class="drsec"><h3>Per-Detection Overrides</h3>';
   const ovIds=Object.keys(pbData.overrides||{});
   if(!ovIds.length) h+='<div class="hint">No overrides yet — every alert uses its ATT&CK tactic workflow below.</div>';
   ovIds.forEach(id=>{
     h+=`<div class="pbcard"><div class="pbhd"><b>${esc(pbDetName(id))}</b> <span class="dmeta">${esc(id)}</span>`+
+       pbDetConfTag(id)+
        `<span style="flex:1"></span>${pbData.mesh_managed?'':`<button class="btn" onclick="pbClearOverride('${esc(id)}')">✕ Remove Override</button>`}</div>`+
        pbListEditor('override',id,pbData.overrides[id])+`</div>`;
   });
   const haveOv=new Set(ovIds);
   const dets=(pbData.detections||[]).filter(d=>d.id&&!haveOv.has(d.id));
   if(!pbData.mesh_managed) h+=`<div style="margin-top:8px"><select id="pbNewOverride" style="max-width:340px"><option value="">Add an Override for a Detection…</option>`+
-     dets.map(d=>`<option value="${esc(d.id)}">${d.builtin?'● built-in':'○ custom'} · ${esc(d.name)}${d.mitre?' ['+esc(d.mitre)+']':''}</option>`).join('')+
+     dets.map(d=>`<option value="${esc(d.id)}">${d.builtin?'● built-in':'○ custom'} · ${esc(d.name)}${d.mitre?' ['+esc(d.mitre)+']':''}${d.confidence_label?' · '+esc(d.confidence_label):''}</option>`).join('')+
      `</select> <button class="btn pri" onclick="pbAddOverride()">+ Override</button></div>`;
   h+='</div>';
-  h+='<div class="drsec"><h3>ATT&CK tactic workflows</h3>'+
+  h+='<div class="drsec"><h3>ATT&CK Tactic Workflows</h3>'+
      '<div class="hint" style="margin:-4px 0 8px">Deterministic workflow applied to any alert whose technique maps to that tactic.</div>';
   (pbData.tactics||[]).forEach(t=>{
     h+=`<div class="pbcard"><div class="pbhd"><b>${esc(t.name)}</b> <span class="dmeta">${esc(t.id)}</span></div>`+
@@ -6210,7 +6217,10 @@ function respPlanHTML(plan){
     : plan.source==='tactic'?`<span class="pbsrc" style="border-color:var(--sev-medium);color:var(--sev-medium)">ATT&CK · ${esc(plan.tactic_name||plan.tactic)}</span>`
     : `<span class="pbsrc" style="border-color:var(--muted);color:var(--muted)">default</span>`;
   const scouting=((respState&&respState.mode)||'scouting')==='scouting';
-  let h=`<h2>Response plan ${srcTag}</h2><div class="recbox">`;
+  const cTag = plan.confidence
+    ? ` <span class="pbsrc" style="border-color:${confColor(plan.confidence)};color:${confColor(plan.confidence)}">${esc(plan.confidence)} confidence</span>`
+    : '';
+  let h=`<h2>Response Plan ${srcTag}${cTag}</h2><div class="recbox">`;
   if(scouting) h+='<div class="hint" style="margin-bottom:6px">Scouting (read-only) — <span style="cursor:pointer;color:var(--accent);text-decoration:underline" onclick="respOpen()">arm a mode</span> to run these steps.</div>';
   plan.actions.forEach((s,i)=>{
     const col=s.destructive?'var(--sev-critical)':(s.reversible?'var(--good)':'var(--accent)');
@@ -6232,12 +6242,33 @@ function respCurrentRec(){
   const ln=R.get(selId);
   return (ln && ln.data && ln.data.rec) || null;
 }
+// Confidence is a detection-library rating (weak/probable/strong/certain), not a severity — it says
+// how likely the hit is to be real, which is what decides how far a response is allowed to go.
+function confColor(c){
+  return {certain:'var(--sev-critical)',strong:'var(--sev-high)',probable:'var(--sev-medium)',
+          weak:'var(--sev-low)',high:'var(--sev-high)',medium:'var(--sev-medium)',
+          low:'var(--sev-low)'}[c]||'var(--muted)';
+}
+// What a detection's confidence rating permits. The rating is the reason the same tactic workflow
+// contains one rule's artifact and merely collects evidence on another's, so it belongs next to
+// the workflow rather than buried in a settings page.
+function detConfHTML(detId){
+  const d=((pbData&&pbData.detections)||[]).find(x=>x.id===detId);
+  if(!d||!d.confidence) return '';
+  const ok=((pbData&&pbData.actions)||[]).filter(a=>(a.min_confidence||3)<=d.confidence)
+             .map(a=>a.icon+' '+a.label).join(' \u00b7 ');
+  return `<div class="hint" style="margin:-2px 0 7px">Confidence <b style="color:${confColor(d.confidence_label)}">`+
+    `${esc(d.confidence_label||'')}</b> \u2014 how likely a hit here is to be real, rated per detection rather than `+
+    `per tactic. At this rating its workflow may use: `+
+    (ok?`<b>${esc(ok)}</b>.`:`<b>nothing</b> \u2014 it still raises an alert and still correlates, it just proposes no action.`)+
+    `</div>`;
+}
 function respRecHTML(rec){
   if(!rec) return '';
   const cap=((respState&&respState.capabilities)||[]).find(c=>c.id===rec.action);
   const icon=cap?cap.icon:'•', label=cap?cap.label:rec.action;
-  const cc={high:'var(--sev-high)',medium:'var(--sev-medium)',low:'var(--sev-low)'}[rec.confidence]||'var(--muted)';
-  return `<h2>Recommended response</h2>
+  const cc=confColor(rec.confidence);
+  return `<h2>Recommended Response</h2>
     <div class="recbox">
       <div><b>${icon} ${esc(label)}</b> <span class="recconf" style="color:${cc}">${esc(rec.confidence)} confidence</span></div>
       <div class="hint" style="margin:3px 0 7px">${esc(rec.rationale)}</div>

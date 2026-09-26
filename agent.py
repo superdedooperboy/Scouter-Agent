@@ -87,7 +87,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "0.9.40"
+__version__ = "0.9.41"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -511,9 +511,15 @@ BUILTIN_RULES = [
     # the MECHANISM each family depends on, not just its current file names: a LaunchAgent that
     # masquerades as an Apple or Google updater, a login-password prompt loop, and the staging paths the
     # reports name. Renaming the binary does not evade these; abandoning the technique does.
+    # Both halves have to be anchored or this rule flags macOS itself. The path must be a
+    # NON-system LaunchAgents directory — /System/Library/LaunchAgents/ contains the substring
+    # "/Library/LaunchAgents/", so an unanchored match convicts every Apple agent on the disk. And
+    # "program is outside the system tree" is only meaningful for an absolute path: a bare program
+    # name like "trustevaluationagent" satisfies a negative lookahead trivially. b-job-masquerade
+    # below already had both anchors; this rule predates it.
     _b("b-la-apple-masq", "LaunchAgent masquerading as an Apple system component", "high", "T1036.005",
-       [_c("path", "regex", r"/Library/Launch(Agents|Daemons)/com\.apple\.[^/]*\.plist$"),
-        _c("program", "regex", r"^(?!/System/|/usr/libexec/|/usr/sbin/|/usr/bin/)")], match="all",
+       [_c("path", "regex", r"^(/Library/|/Users/[^/]+/Library/)Launch(Agents|Daemons)/com\.apple\.[^/]*\.plist$"),
+        _c("program", "regex", r"^/(?!(System|usr|bin|sbin|Library/Apple)/)")], match="all",
        nt="job", depth_override=3),
     _b("b-la-updater-masq", "LaunchAgent posing as a software updater runs from Application Support",
        "high", "T1543.001",
@@ -804,6 +810,122 @@ BUILTIN_RULES = [
         _c("path", "regex", r"/com\.apple\.backgroundtaskmanagementagent/|/backgrounditems\.btm$")],
        match="all", nt="file", depth_override=3),
 ]
+
+# ---- detection CONFIDENCE ---------------------------------------------------------------------
+# Severity answers "how bad is this if it's real". Confidence answers a different question — "how
+# likely is it to be real at all" — and the two are independent far more often than a single
+# severity field admits. `curl … | sh` is high severity and weak confidence, because rustup,
+# Homebrew and nvm all install exactly that way. A non-root account holding uid 0 is high on both.
+# Conflating them is what forces an operator to hand-write a per-detection override for every rule
+# that cries wolf; rating the curated library once removes the need for that override entirely.
+#   1 weak · 2 probable · 3 strong · 4 certain
+CONFIDENCE_NAME = {1: "weak", 2: "probable", 3: "strong", 4: "certain"}
+CONFIDENCE_RANK = {"weak": 1, "probable": 2, "strong": 3, "certain": 4,
+                   "low": 1, "medium": 2, "high": 4}      # older 3-level vocabulary, still accepted
+# Severity is the author's own statement of belief, so it is the seed. Only the rules whose
+# confidence DIVERGES from it are listed below — the divergence IS the curation, and keeping the
+# table to just those makes it reviewable in one screen instead of scattered across 110 call sites.
+_SEV_CONFIDENCE = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 1}
+RULE_CONFIDENCE = {
+    # -- no benign producer: the technique and the match are the same thing -----------------------
+    "b-revshell": 4,             # /dev/tcp or `nc -e`; nothing legitimate opens a shell this way
+    "b-b64pipe": 4,              # base64 -d piped straight to a shell
+    "b-lazagne": 4,              # a credential-harvesting tool, matched by name
+    "b-la-apple-masq": 4,        # a com.apple.* job label pointing outside the system directories
+    "b-dns-exfil": 3,            # DNS tunnelling has no benign form
+    "b-clipboard-exec": 3,       # pbpaste into a shell — the ClickFix paste-and-run pattern
+
+    # -- serious if real, but routine administration and developer tooling produce it -------------
+    "b-curlpipe": 2,             # rustup / Homebrew / nvm are all installed by curl | sh
+    "b-tunnel": 2,               # ngrok, cloudflared and ssh -R are developer staples
+    "b-rootca": 2,               # MDM, corporate TLS inspection, a developer's Burp/Charles CA
+    "b-gatekeeper-off": 2,       # spctl --master-disable is a well-worn developer shortcut
+    "b-apfs-snapshot-mount": 2,  # Time Machine mounts local snapshots as a matter of course
+    "b-vpn-inbound": 2,          # the operator's own admins connect over commercial VPNs
+    "b-rare-exec-drop": 2,       # installers, local dev builds and CI artifacts are all novel
+    "b-c2-webservice": 2,        # curl against api.github.com or a Slack webhook is everywhere
+    "b-tcc-db-read": 2,          # inventory and EDR agents read TCC.db by design
+    "b-tcc-input-monitor": 2,    # Karabiner, Alfred and text expanders hold input monitoring
+    "b-tcc-accessibility": 2,    # window managers and automation utilities hold accessibility
+    "b-tcc-esf": 2,              # a second endpoint-security product holds this entitlement
+    "b-rmm-remote": 2,           # an MSP installs remote management deliberately
+    "b-admin-add": 2,            # routine provisioning
+    "b-btm-write": 2,            # every app install touches Background Task Management
+    "b-file-persist-write": 2,   # every installer writes a LaunchAgent
+    "b-file-shellrc-write": 2,   # nvm, rbenv and Homebrew all append to .zshrc
+    "b-file-authkeys-write": 2,  # ssh-copy-id, run by an administrator
+    "b-ai-key-theft": 2,         # a developer's own tooling reads its own provider key
+    "b-config-defence-off": 2,   # an administrator turning the firewall off is a choice, not a breach
+    "b-la-updater-masq": 2,      # Google Keystone genuinely IS an updater in Application Support
+    "b-keychain-copy": 3,        # backup tooling copies the login keychain file
+
+    # -- correlation material: real signal, but alone it means almost nothing ---------------------
+    "b-cloud-creds": 1,          # the aws CLI reads ~/.aws/credentials on every invocation
+    "b-ssh-keys": 1,             # ssh reads its own private keys
+    "b-keychain-find": 1,        # applications query the keychain constantly
+    "b-fw-off": 1,
+    "b-tmutil-off": 1,
+    "b-quarantine-strip": 1,     # xattr -d com.apple.quarantine is a standard developer workaround
+    "b-setuid": 1,               # installers set the setuid bit
+    "b-proxy-config": 1,         # a corporate proxy
+    "b-user-create": 1,
+    "b-user-delete": 1,
+    "b-guest-enable": 1,
+    "b-access-remote-on": 1,     # an administrator enabling screen sharing
+    "b-notes-db": 1,             # Notes.app owns that database
+    "b-mailbox": 1,              # Mail.app owns those files
+    "b-archive-enc": 1,          # an encrypted zip is how people send files
+    "b-ssh-exfil": 1,            # tar piped over ssh is the classic backup idiom
+    "b-webhook-exfil": 1,        # CI posts to chat webhooks all day
+    "b-sniff": 1,                # tcpdump, run by an administrator
+    "b-vpn-provider": 1,         # the operator may simply use a commercial VPN
+    "b-data-destroy": 1,         # dd is how disks get imaged
+    "b-openssl-enc": 1,
+    "b-file-log-delete": 1,      # logrotate
+    "b-lin-ssh-shell": 1,        # every administrative session looks like this
+    "b-tcc-screen": 1,           # Zoom, Teams, OBS
+    "b-tcc-avcapture": 1,        # Zoom, Teams, Photo Booth
+    "b-ai-exfil": 1,             # the operator runs AI development tooling on purpose
+    "b-ai-mcp-tamper": 1,        # so its configuration changes legitimately
+    "b-ai-local-exposed": 1,     # binding Ollama to 0.0.0.0 is a configuration choice
+}
+
+
+def rule_confidence(r):
+    """1-4: how likely a hit on this rule is to be genuine malice rather than legitimate activity.
+    Derived from severity unless the curated table (or the rule itself) says otherwise, so a rule
+    added tomorrow is rated automatically instead of arriving unrated."""
+    ov = r.get("confidence_override") or RULE_CONFIDENCE.get(r.get("id"))
+    if ov in (1, 2, 3, 4):
+        return int(ov)
+    return _SEV_CONFIDENCE.get(r.get("severity") or "medium", 2)
+
+
+# Minimum confidence each response action requires before it may be OFFERED at all. This is what
+# replaces "every rule needs its own tactic override": the tactic workflow still says WHAT KIND of
+# response the activity calls for, and the detection's confidence decides HOW FAR the evidence
+# carries — so one curated rating narrows or widens every workflow the rule can ever land in,
+# without anybody configuring a thing.
+#   2 collect evidence · 3 contain the artifact or cut its traffic · 4 destroy it
+# Weak sits below every floor on purpose: a detection that routinely fires on the aws CLI reading
+# its own credentials should put a button in front of nobody. It still raises an alert and still
+# correlates — which is the entire job we keep those detections for.
+ACTION_MIN_CONFIDENCE = {
+    "vr_forensics": 2,
+    "suspend": 3, "disable_job": 3, "quarantine": 3, "block_ip": 3,
+    "kill": 4, "delete_file": 4,
+}
+DEFAULT_ACTION_MIN_CONFIDENCE = 3
+
+# Offering an action to an analyst and performing it unasked are different bars, so they get
+# different floors. This is the second one: how certain the machine must be to act on its own,
+# per armed posture. Defensive spends only on a detection that nothing benign produces;
+# Counter-Offensive accepts a strong one, which is what arming it means — notably, it is the
+# difference between block_ip needing to be certain and merely needing to be strong, and a
+# blackhole route is host-wide rather than scoped to the offending process. Scouting's floor is
+# deliberately unreachable (nothing rates above 4), so arming is the only thing that ever lets
+# the machine act by itself.
+AUTO_CONFIDENCE_FLOOR = {"scouting": 5, "defensive": 4, "counter": 3}
 
 # Analyst-facing explanation/methodology for each built-in rule — why it exists and
 # what it keys on — so reviewing it doesn't require reverse-engineering the conditions.
@@ -5821,6 +5943,7 @@ def apply_node_rules(node, rules):
         if r.get("id") not in seen_hits:
             rule_hits.append({"id": r.get("id"), "name": r.get("name"), "mitre": r.get("mitre"),
                               "severity": r.get("severity", "medium"),
+                              "confidence": rule_confidence(r),
                               "builtin": bool(r.get("builtin")), "explanation": r.get("description") or ""})
             seen_hits.add(r.get("id"))
     if hits:
@@ -8564,23 +8687,23 @@ DEFAULT_TACTIC_WORKFLOWS = {
 
 
 def recommend_response(n):
-    sev = n.get("severity")
-    if sev not in ("high", "medium"):
+    """The single best reversible action for an alert, used where no workflow applies — and the
+    ENTIRE response path on Linux, which never resolves a workflow, so routing the gate through
+    here is what gives both agents the same proportionality. Returning None is a real answer: the
+    alert still exists, still correlates, and can still be acted on by hand; the machine just
+    declines to propose containment it cannot justify."""
+    if n.get("severity") in (None, "info"):
         return None
+    conf = _plan_confidence(n)
     d = n.get("detail") or {}
     t = n.get("type")
-    ioc_hit = bool(d.get("ioc"))
-    vt = d.get("vt") or {}
-    vt_mal = (vt.get("status") == "done" and int(vt.get("malicious", 0) or 0) > 0)
-    strong = (sev == "high") or ioc_hit or vt_mal      # require a real signal to suggest acting
-    if not strong:
-        return None
-    signals = sum([sev == "high", ioc_hit, vt_mal])
-    confidence = "high" if signals >= 2 else "medium"
 
     def rec(action, target, rationale):
+        if conf < ACTION_MIN_CONFIDENCE.get(action, DEFAULT_ACTION_MIN_CONFIDENCE):
+            return None                    # the evidence doesn't carry this far
         return {"action": action, "target": target, "rationale": rationale,
-                "confidence": confidence, "reversible": True}
+                "confidence": CONFIDENCE_NAME.get(conf, "probable"), "confidence_rank": conf,
+                "reversible": True}
 
     if t == "process" and d.get("pid") is not None:
         return rec("suspend", {"pid": d["pid"]},
@@ -8627,20 +8750,42 @@ def _primary_hit(node):
 
 
 def _plan_confidence(node):
+    """How far the evidence on THIS alert carries (1-4): the best-rated detection that fired,
+    promoted one tier when something independent corroborates it — a threat-intel hit or a
+    VirusTotal conviction is a second opinion from outside our own rule library. An alert carrying
+    no rule hit falls back to its severity, because that is the only evidence there is."""
     d = node.get("detail") or {}
+    hits = d.get("rule_hits") or []
+    if hits:
+        base = max(int(h.get("confidence")
+                       or _SEV_CONFIDENCE.get(h.get("severity") or "medium", 2)) for h in hits)
+    else:
+        base = _SEV_CONFIDENCE.get(node.get("severity") or "medium", 2)
     vt = d.get("vt") or {}
     vt_mal = (vt.get("status") == "done" and int(vt.get("malicious", 0) or 0) > 0)
-    signals = sum([node.get("severity") in ("high", "critical"), bool(d.get("ioc")), vt_mal])
-    return "high" if signals >= 2 else "medium"
+    return min(4, base + 1) if (bool(d.get("ioc")) or vt_mal) else base
 
 
-def _build_steps(action_ids, node, registry, confidence):
-    """Turn an ordered list of action ids into resolved steps (only the applicable ones)."""
+def _build_steps(action_ids, node, registry, confidence, enforce_floor=True):
+    """Turn an ordered list of action ids into resolved steps — the ones that apply to this node
+    type AND that the detection's confidence actually reaches. A workflow may therefore list a
+    superset and still produce a proportionate plan: the same Credential Access workflow contains
+    the artifact outright on a keychain-dump hit, and only collects evidence on an ~/.aws read.
+
+    enforce_floor=False is for an operator's own per-detection override: they have made a human
+    judgment about this detection that outranks our library's rating of it, and silently dropping
+    the actions they configured would be the worst of both worlds. The rating still travels on the
+    step, so auto-execution keeps its own posture floor — the override decides what is OFFERED,
+    never what the machine does unasked."""
     steps, seen = [], set()
+    label = CONFIDENCE_NAME.get(confidence, "probable")
     for aid in action_ids:
         if aid in seen:
             continue
         seen.add(aid)
+        if enforce_floor and confidence < ACTION_MIN_CONFIDENCE.get(
+                aid, DEFAULT_ACTION_MIN_CONFIDENCE):
+            continue                       # the evidence doesn't carry this far
         target = derive_action_target(aid, node, registry)
         if target is None:
             continue
@@ -8648,16 +8793,19 @@ def _build_steps(action_ids, node, registry, confidence):
         steps.append({"action": aid, "target": target, "label": spec.get("label", aid),
                       "icon": spec.get("icon", "•"), "reversible": bool(spec.get("reversible")),
                       "destructive": bool(spec.get("destructive")), "mode": spec.get("mode"),
-                      "confidence": confidence})
+                      "confidence": label, "confidence_rank": confidence})
     return steps
 
 
 def _plan_rationale(plan):
     src = plan.get("source")
+    conf = plan.get("confidence")
     if src == "override":
         return f"Custom response workflow for detection “{plan.get('detection') or 'this alert'}”."
     if src == "tactic":
-        return f"ATT&CK {plan.get('tactic_name') or plan.get('tactic')} workflow (reversible-first)."
+        det = plan.get("detection")
+        scope = f"scoped to {conf} confidence in “{det}”" if (det and conf) else "reversible-first"
+        return f"ATT&CK {plan.get('tactic_name') or plan.get('tactic')} workflow ({scope})."
     return "Reversible containment (preserves evidence)."
 
 
@@ -8679,10 +8827,11 @@ def resolve_response_plan(node, playbook, registry):
         for h in hits:
             ov = playbook.override_for(h.get("id"))
             if ov is not None:
-                steps = _build_steps(ov, node, registry, conf)
+                steps = _build_steps(ov, node, registry, conf, enforce_floor=False)
                 if steps:
                     return {"source": "override", "detection": h.get("name"),
                             "detection_id": h.get("id"), "tactic": None, "tactic_name": None,
+                            "confidence": CONFIDENCE_NAME.get(conf), "confidence_rank": conf,
                             "actions": steps}
 
     # 2) tactic workflow — from the primary technique (detection first, else node reasons)
@@ -8699,6 +8848,7 @@ def resolve_response_plan(node, playbook, registry):
         if steps:
             return {"source": "tactic", "tactic": tactic, "tactic_name": TACTIC_NAME.get(tactic),
                     "detection": (hit or {}).get("name"), "detection_id": (hit or {}).get("id"),
+                    "confidence": CONFIDENCE_NAME.get(conf), "confidence_rank": conf,
                     "actions": steps}
 
     # 3) default per-type recommendation
@@ -8707,11 +8857,14 @@ def resolve_response_plan(node, playbook, registry):
         spec = registry.get(rec["action"], {})
         return {"source": "default", "tactic": tactic, "tactic_name": TACTIC_NAME.get(tactic),
                 "detection": (hit or {}).get("name"), "detection_id": (hit or {}).get("id"),
+                "confidence": CONFIDENCE_NAME.get(conf), "confidence_rank": conf,
                 "actions": [{"action": rec["action"], "target": rec["target"],
                              "label": spec.get("label", rec["action"]), "icon": spec.get("icon", "•"),
                              "reversible": bool(spec.get("reversible", rec.get("reversible"))),
                              "destructive": bool(spec.get("destructive")), "mode": spec.get("mode"),
-                             "confidence": rec.get("confidence", conf), "rationale": rec.get("rationale")}]}
+                             "confidence": rec.get("confidence") or CONFIDENCE_NAME.get(conf),
+                             "confidence_rank": rec.get("confidence_rank", conf),
+                             "rationale": rec.get("rationale")}]}
     return None
 
 
@@ -9969,7 +10122,8 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
             first = plan["actions"][0]                    # keep n['rec'] for back-compat (single action)
             n["rec"] = {"action": first["action"], "target": first["target"],
                         "rationale": first.get("rationale") or _plan_rationale(plan),
-                        "confidence": first.get("confidence", "medium"),
+                        "confidence": first.get("confidence", "probable"),
+                        "confidence_rank": first.get("confidence_rank", 2),
                         "reversible": first.get("reversible", True)}
         else:                                             # registry unavailable (no responder) → legacy
             r = recommend_response(n)
@@ -13594,7 +13748,8 @@ class Responder:
                 "remote_can": not self.locked,
                 "launch_policy": self.launch_policy,
                 "auto_mode": self.auto_mode,
-                "auto_policy": "high-confidence reversible only",
+                "auto_policy": "reversible only, at or above this posture's confidence floor",
+                "auto_confidence_floor": AUTO_CONFIDENCE_FLOOR.get(self.mode, 5),
                 "auto_can_live": (not self.locked) and self.mode != "scouting",
                 "ai_auto": self.ai_auto,
                 "ai_available": ai_ok,
@@ -13677,8 +13832,14 @@ class Responder:
             # Walk the deterministic plan's steps in order. AUTO only ever runs REVERSIBLE, high-
             # confidence steps; destructive steps (kill/delete) and one-shot forensics stay manual,
             # so a workflow can list them without them ever auto-firing.
+            floor = AUTO_CONFIDENCE_FLOOR.get(self.mode, 5)
             for step in plan.get("actions", []):
-                if not step.get("reversible") or step.get("confidence") != "high":
+                if not step.get("reversible"):
+                    continue
+                # Arming decides how much certainty the machine needs before it acts unasked:
+                # Defensive spends only on a detection nothing benign produces, Counter-Offensive
+                # accepts a strong one. Scouting's floor is unreachable, so it never acts.
+                if int(step.get("confidence_rank") or 0) < floor:
                     continue
                 sig = f"{nid}|{step['action']}"
                 with self.lock:
@@ -13686,7 +13847,7 @@ class Responder:
                         continue
                     self._auto_seen.add(sig)        # handle each (artifact, action) once
                 rec = {"action": step["action"], "target": step["target"],
-                       "confidence": step.get("confidence", "high"),
+                       "confidence": step.get("confidence", "certain"),
                        "rationale": _plan_rationale(plan)}
                 if self.auto_mode == "live" and not self._breaker_tripped():
                     reason = f"auto-response [{plan.get('source')}]: {rec['rationale']}"
@@ -14928,14 +15089,22 @@ def make_handler(cache):
                     tw, ov = r.playbook.snapshot()
                     actions = [{"id": aid, "label": s["label"], "icon": s["icon"], "mode": s["mode"],
                                 "reversible": bool(s.get("reversible")), "destructive": bool(s.get("destructive")),
-                                "applies": s.get("applies", []), "backend": s.get("backend")}
+                                "applies": s.get("applies", []), "backend": s.get("backend"),
+                                "min_confidence": ACTION_MIN_CONFIDENCE.get(aid, DEFAULT_ACTION_MIN_CONFIDENCE),
+                                "min_confidence_label": CONFIDENCE_NAME.get(
+                                    ACTION_MIN_CONFIDENCE.get(aid, DEFAULT_ACTION_MIN_CONFIDENCE))}
                                for aid, s in r.registry.items() if not s.get("hidden")]
-                    dets = [{"id": rr["id"], "name": rr["name"], "builtin": True, "mitre": rr.get("mitre")}
+                    dets = [{"id": rr["id"], "name": rr["name"], "builtin": True,
+                             "mitre": rr.get("mitre"), "severity": rr.get("severity"),
+                             "confidence": rule_confidence(rr),
+                             "confidence_label": CONFIDENCE_NAME.get(rule_confidence(rr))}
                             for rr in BUILTIN_RULES]
                     if cache.rules:
                         for rr in cache.rules.snapshot_node_rules() + cache.rules.snapshot_sql_rules():
                             dets.append({"id": rr.get("id"), "name": rr.get("name"), "builtin": False,
-                                         "mitre": rr.get("mitre")})
+                                         "mitre": rr.get("mitre"), "severity": rr.get("severity"),
+                                         "confidence": rule_confidence(rr),
+                                         "confidence_label": CONFIDENCE_NAME.get(rule_confidence(rr))})
                     self._send_json({"enabled": True, "locked": r.locked, "mode": r.mode,
                                      "tactics": [{"id": i, "name": n} for i, n in ENTERPRISE_TACTICS],
                                      "workflows": tw, "overrides": ov, "defaults": DEFAULT_TACTIC_WORKFLOWS,

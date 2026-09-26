@@ -673,6 +673,14 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   .inchead:hover{background:var(--panel2,rgba(255,255,255,.03))}
   .inchead .tdot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
   .inchead .incsel{margin:0;flex:0 0 auto;cursor:pointer}
+  .casebox{border:1px solid var(--line);border-radius:8px;padding:8px 9px;background:var(--panel2)}
+  .casestep{display:flex;align-items:center;gap:7px;padding:2px 0;font-size:12px;flex-wrap:wrap}
+  .casestep .csact{font-weight:600}
+  .casestep .csmem{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+  .casestep .csnote{font-size:10px;text-transform:uppercase;letter-spacing:.3px;color:var(--sev-medium);
+    border:1px solid var(--sev-medium);border-radius:8px;padding:0 5px}
+  .incesc{font-size:10px;letter-spacing:.3px;text-transform:uppercase;color:var(--sev-high);
+    border:1px solid var(--sev-high);border-radius:9px;padding:1px 6px;white-space:nowrap}
   .incstatus{margin-left:auto;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted)}
   .incstatus.investigating{color:var(--sev-medium)} .incstatus.closed{color:var(--good,#6bd08a)}
   .incbody{display:none;padding:4px 12px 12px;border-top:1px solid var(--line)}
@@ -4155,15 +4163,21 @@ function incidentCard(c){
   const notes=(c.notes||[]).slice().reverse().map(nn=>
     `<div class="casenote"><span class="audts">${esc(String(nn.iso||'').replace('T',' ').replace('Z',''))}</span><div>${esc(nn.text)}</div></div>`).join('')
     || '<div class="hint">No notes yet.</div>';
-  const TAG={created:'CREATED',member_add:'ADD',member_remove:'REMOVE',status:'STATUS',note:'NOTE',title:'TITLE'};
+  const TAG={created:'CREATED',member_add:'ADD',member_remove:'REMOVE',status:'STATUS',note:'NOTE',title:'TITLE',severity:'ESCALATED',response:'RESPONSE'};
+  // An escalation is the one entry here that changed what the case DESERVES, not just what it
+  // contains, so it is the one entry that should not read like the rest of the list.
   const ev=(c.events||[]).slice().reverse().map(e=>
     `<div class="auditrow"><span class="audts">${esc(String(e.iso||'').replace('T',' ').replace('Z',''))}</span>`+
-    `<span class="audtag" style="color:var(--accent2)">${esc(TAG[e.kind]||e.kind)}</span><span class="auddet">${esc(e.detail||'')}</span></div>`).join('');
+    `<span class="audtag" style="color:${e.kind==='severity'?'var(--sev-high)':'var(--accent2)'}">${esc(TAG[e.kind]||e.kind)}</span><span class="auddet">${esc(e.detail||'')}</span></div>`).join('');
+  // …and it should be visible without opening the log, because a case that escalated while nobody
+  // was looking is exactly the case somebody needs to look at.
+  const lastUp=(c.events||[]).filter(e=>e.kind==='severity').slice(-1)[0];
   return `<div class="inccard${incOpenSet.has(c.id)?' open':''}${st!=='closed'?' openinv':''}" style="border-left:3px solid ${col}">
     <div class="inchead" onclick="incToggle('${esc(c.id)}',this)">
       <input type="checkbox" class="incsel" data-id="${esc(c.id)}" ${incSel.has(c.id)?'checked':''} title="Select for a bulk status change" onclick="event.stopPropagation()" onchange="incSelToggle(this.dataset.id,this.checked)">
       <span class="tdot" style="background:${col}"></span>
       <b>#${c.case_no||'?'}</b> ${titleTxt?`<b>${titleTxt}</b>`:''} <span class="hint">${c.size} alert${c.size===1?'':'s'}${types?' \u00b7 '+esc(types):''}</span>
+      ${lastUp?`<span class="incesc" title="${escAttr(lastUp.detail||'')}">▲ escalated</span>`:''}
       <span class="cdot" title="${st!=='closed'?'still open':'closed'}"></span><span class="incstatus ${esc(st)}">${esc(stlabel)}</span>
     </div>
     <div class="incbody">
@@ -4183,6 +4197,7 @@ function incidentCard(c){
           <button class="btn" onclick="event.stopPropagation();incAddNote('${esc(c.id)}')">Add Note</button>
         </div>
       </div></div>
+      ${st!=='closed'?`<div class="incrow"><span class="inck">respond</span><div style="flex:1" id="caseplan_${esc(c.id)}">${casePlanHTML(c.id)}</div></div>`:''}
       <div class="incrow"><span class="inck">activity</span><div style="flex:1"><details class="auditbox"><summary>Activity (${(c.events||[]).length})</summary><div class="auditlist">${ev}</div></details></div></div>
     </div>
   </div>`;
@@ -6054,6 +6069,64 @@ function respActionsHTML(type,target){
   h+='<div class="respact">';
   for(const c of caps) h+=respCapBtn(c);
   return h+'</div>';
+}
+// ---- case-wide response (the response to an INVESTIGATION, not to one alert) ----
+// Everything else on this page acts on a single artifact. This acts on the case, which is what an
+// analyst wants the moment one escalates — and it is deliberately operator-initiated: the automatic
+// path still works one artifact at a time, under its own posture floors.
+var CASEPLAN={};        // case id -> {loading|plan|err}
+function casePlanHTML(iid){
+  const st=CASEPLAN[iid];
+  if(!st) return `<button class="btn" onclick="caseLoadPlan('${esc(iid)}')">\u{1f6e1} Plan Case Response \u25b8</button>`;
+  if(st.loading) return '<span class="hint">resolving\u2026 <span class="hvspin">\u25cd</span></span>';
+  if(st.err) return `<span class="hint" style="color:var(--sev-high)">${esc(st.err)}</span> <span class="va" onclick="caseLoadPlan('${esc(iid)}')">retry</span>`;
+  const p=st.plan;
+  if(!p) return `<span class="hint">No case-wide response for this case \u2014 its severity\u2019s case workflow is empty, or no member artifact is still present.</span>`;
+  const scouting=((respState&&respState.mode)||'scouting')==='scouting';
+  const rows=p.steps.map(x=>
+    `<div class="casestep"><span class="csact">${x.icon||'\u2022'} ${esc(x.label||x.action)}</span>`+
+    `<span class="csmem">${esc(x.member_label||x.member)}</span>`+
+    (x.on_case_evidence?`<span class="csnote" title="this member rated ${esc(x.member_confidence||'')} on its own — it is being acted on because of the case">on case evidence</span>`:'')+
+    (x.reversible?'':'<span class="csnote" style="color:var(--muted)">manual only</span>')+
+    '</div>').join('');
+  const runnable=p.steps.filter(x=>x.reversible&&!x.destructive).length;
+  return `<div class="casebox"><div class="hint" style="margin-bottom:5px">${esc(p.rationale||'')}`+
+    (p.truncated?` <b>${p.truncated} further member(s) not included</b> \u2014 narrow the case first.`:'')+`</div>`+
+    rows+
+    `<div style="display:flex;gap:6px;align-items:center;margin-top:7px;flex-wrap:wrap">`+
+    (scouting
+      ? `<span class="hint">Scouting (read-only) \u2014 <span class="va" onclick="respOpen()">arm a mode</span> to run these.</span>`
+      : `<button class="btn pri" ${runnable?'':'disabled'} onclick="caseRun('${esc(iid)}')">Run ${runnable} Reversible Step${runnable===1?'':'s'}</button>`)+
+    `<span class="va" onclick="caseLoadPlan('${esc(iid)}')">\u21ba refresh</span></div></div>`;
+}
+function caseRedraw(iid){
+  const host=document.getElementById('caseplan_'+iid);
+  if(host) host.innerHTML=casePlanHTML(iid);
+}
+function caseLoadPlan(iid){
+  CASEPLAN[iid]={loading:true}; caseRedraw(iid);
+  fetch('/api/respond',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({op:'case-plan',case_id:iid})})
+    .then(r=>r.json()).then(res=>{
+      CASEPLAN[iid]= res&&res.ok ? {plan:res.plan} : {err:(res&&res.error)||'could not resolve'};
+      caseRedraw(iid);
+    }).catch(e=>{ CASEPLAN[iid]={err:''+e}; caseRedraw(iid); });
+}
+function caseRun(iid){
+  const st=CASEPLAN[iid]; if(!st||!st.plan) return;
+  const p=st.plan, n=p.steps.filter(x=>x.reversible&&!x.destructive).length;
+  if(!confirm('Run case-wide containment for case #'+(p.case_no||'?')+'?\n\n'+
+              n+' reversible action(s) across '+p.members+' member artifact(s). '+
+              'Each is undoable individually afterwards.')) return;
+  CASEPLAN[iid]={loading:true}; caseRedraw(iid);
+  fetch('/api/respond',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({op:'case-act',case_id:iid,confirm:true})})
+    .then(r=>r.json()).then(res=>{
+      const ran=((res&&res.ran)||[]).length, bad=((res&&res.errors)||[]).length;
+      toastShow('Case response', ran+' action(s) run'+(bad?', '+bad+' failed':''), bad?'high':'low', null);
+      caseLoadPlan(iid);
+      if(typeof refreshNow==='function') refreshNow();
+    }).catch(e=>{ CASEPLAN[iid]={err:''+e}; caseRedraw(iid); });
 }
 function respDo(action,target,nodeId){
   if(!target){ alert('No actionable target.'); return; }

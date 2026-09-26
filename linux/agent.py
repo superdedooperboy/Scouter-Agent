@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "0.9.38"
+__version__ = "0.9.39"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -1302,6 +1302,7 @@ ORDER BY l.ts DESC LIMIT 25"""},
 SEVERITY_ORDER = ["info", "low", "medium", "high", "critical"]
 
 
+
 def max_severity(a, b):
     """Return the stronger of two severity labels (by rank)."""
     return a if SEV_RANK.get(a, 0) >= SEV_RANK.get(b, 0) else b
@@ -1429,6 +1430,22 @@ def _session_preexec(tgt):
             pass
         os.setuid(uid)
     return _drop
+
+
+def notify_push(title, body, severity=None):
+    push = globals().get("_PUSH")
+    if push is not None:
+        try:
+            push.send(title, body, severity)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def notify_all(title, body, subtitle=None, severity=None):
+    """Desktop banner + wearable push (best-effort) — used by backend-initiated notifications.
+    Mirrors the macOS agent so anything raised from the snapshot path behaves the same on both."""
+    notify_desktop(title, body, subtitle)
+    notify_push(title, (subtitle + " \u2014 " + body) if subtitle else body, severity)
 
 
 def notify_desktop(title, body, subtitle=None, url=None):
@@ -7378,6 +7395,187 @@ def score_file(path, st):
 # Phase B (dry-run auto-response) will reuse the exact same function.
 # ---------------------------------------------------------------------------
 
+# Default CASE workflow per case severity — the response to an investigation, as distinct from the
+# response to one alert. Everything above binds to a single artifact: a tactic, a detection, a
+# confidence rating. None of it can express "this case is now critical, contain all six of its
+# members", which is the thing an analyst actually wants at the moment a case escalates.
+#
+# Keyed on the case's OWN severity, which is the worst of its members and therefore already the
+# summary of what the correlation found. Every default is reversible; destructive actions are never
+# seeded here, and CASE_WORKFLOW_MAX_MEMBERS bounds the blast radius of one click regardless.
+DEFAULT_CASE_WORKFLOWS = {
+    "critical": ["vr_forensics", "suspend", "disable_job", "quarantine", "block_ip"],
+    "high": ["vr_forensics", "suspend", "disable_job", "quarantine"],
+    "medium": ["vr_forensics"],          # collect across the case, contain nothing
+    "low": [],                           # a low case is correlation, not an incident
+    "info": [],
+}
+# A case is a correlation, and correlation can be wrong. One action per member is one click that
+# could touch an unbounded number of artifacts, so cap what a single case plan will ever propose —
+# past this the operator is asked to narrow the case first, which is the honest answer.
+CASE_WORKFLOW_MAX_MEMBERS = 25
+
+
+def case_confidence(incident, node_by_id):
+    """How much the CASE is worth acting on: the best-rated member, judged on its own evidence.
+
+    Deliberately without the case promotion each member would otherwise get from belonging here —
+    that promotion exists to let a case lend weight to its members, and letting it feed back into
+    the case's own rating would be the case lending weight to itself."""
+    best = 0
+    for mid in (incident.get("members") or []):
+        n = node_by_id.get(mid)
+        if n is not None:
+            best = max(best, _plan_confidence(n, with_case=False))
+    if not best:                          # members aged out of the graph — fall back to the record
+        best = _SEV_CONFIDENCE.get(incident.get("severity") or "medium", 2)
+    return best
+
+
+def _case_plan_for(cache, case_id):
+    """Resolve the current case plan for one investigation, off the live graph."""
+    if not (cache.incidents and cache.responder):
+        return {"ok": False, "error": "case response unavailable"}
+    inc = next((c for c in cache.incidents.list() if c.get("id") == case_id), None)
+    if inc is None:
+        return {"ok": False, "error": "no such case"}
+    data = cache.get() or {}
+    by_id = {n["id"]: n for n in (data.get("nodes") or [])}
+    plan = resolve_case_plan(inc, by_id, getattr(cache.responder, "playbook", None),
+                             getattr(cache.responder, "registry", {}))
+    return {"ok": True, "plan": plan, "case": {"id": inc.get("id"), "case_no": inc.get("case_no"),
+                                               "severity": inc.get("severity"),
+                                               "status": inc.get("status"), "size": inc.get("size")}}
+
+
+def _run_case_plan(cache, responder, case_id, confirm):
+    """Run a case plan's REVERSIBLE steps. Operator-initiated only: nothing here is reached by the
+    automatic path, which continues to act one artifact at a time under its own posture floors.
+
+    Irreversible and destructive steps are skipped rather than refused — the plan is allowed to
+    list them so the operator can see the whole shape of the response, and they stay a deliberate
+    single action taken per artifact with its own confirmation."""
+    got = _case_plan_for(cache, case_id)
+    if not got.get("ok"):
+        return got
+    plan = got.get("plan")
+    if not plan:
+        return {"ok": False, "error": "nothing to run for this case"}
+    if not confirm:
+        return {"ok": False, "needs_confirm": True, "plan": plan}
+    ran, skipped, errors = [], [], []
+    for st in plan["steps"]:
+        if not st.get("reversible") or st.get("destructive"):
+            skipped.append({"member": st["member"], "action": st["action"], "why": "not reversible"})
+            continue
+        res = responder.act(st["action"], st["target"], confirm=True, node_id=st["member"],
+                            reason="case #%s (%s): case-wide containment" % (plan.get("case_no"), plan["severity"]))
+        (ran if res.get("ok") else errors).append(
+            {"member": st["member"], "action": st["action"],
+             "result": res.get("result") or res.get("error")})
+    responder._audit("case-act", {"case": case_id, "case_no": plan.get("case_no"),
+                                  "severity": plan["severity"], "ran": len(ran),
+                                  "skipped": len(skipped), "errors": len(errors)},
+                     "ok" if ran and not errors else ("partial" if ran else "error"))
+    if cache.incidents and ran:
+        cache.incidents.log_event(case_id, "response",
+                                  "Case-wide containment: %d action(s) run%s"
+                                  % (len(ran), (", %d failed" % len(errors)) if errors else ""))
+    return {"ok": bool(ran) or not errors, "ran": ran, "skipped": skipped, "errors": errors,
+            "plan": plan}
+
+
+def _case_plan_for(cache, case_id):
+    """Resolve the current case plan for one investigation, off the live graph."""
+    if not (cache.incidents and cache.responder):
+        return {"ok": False, "error": "case response unavailable"}
+    inc = next((c for c in cache.incidents.list() if c.get("id") == case_id), None)
+    if inc is None:
+        return {"ok": False, "error": "no such case"}
+    data = cache.get() or {}
+    by_id = {n["id"]: n for n in (data.get("nodes") or [])}
+    plan = resolve_case_plan(inc, by_id, getattr(cache.responder, "playbook", None),
+                             getattr(cache.responder, "registry", {}))
+    return {"ok": True, "plan": plan, "case": {"id": inc.get("id"), "case_no": inc.get("case_no"),
+                                               "severity": inc.get("severity"),
+                                               "status": inc.get("status"), "size": inc.get("size")}}
+
+
+def _run_case_plan(cache, responder, case_id, confirm):
+    """Run a case plan's REVERSIBLE steps. Operator-initiated only: nothing here is reached by the
+    automatic path, which continues to act one artifact at a time under its own posture floors.
+
+    Irreversible and destructive steps are skipped rather than refused — the plan is allowed to
+    list them so the operator can see the whole shape of the response, and they stay a deliberate
+    single action taken per artifact with its own confirmation."""
+    got = _case_plan_for(cache, case_id)
+    if not got.get("ok"):
+        return got
+    plan = got.get("plan")
+    if not plan:
+        return {"ok": False, "error": "nothing to run for this case"}
+    if not confirm:
+        return {"ok": False, "needs_confirm": True, "plan": plan}
+    ran, skipped, errors = [], [], []
+    for st in plan["steps"]:
+        if not st.get("reversible") or st.get("destructive"):
+            skipped.append({"member": st["member"], "action": st["action"], "why": "not reversible"})
+            continue
+        res = responder.act(st["action"], st["target"], confirm=True, node_id=st["member"],
+                            reason="case #%s (%s): case-wide containment" % (plan.get("case_no"), plan["severity"]))
+        (ran if res.get("ok") else errors).append(
+            {"member": st["member"], "action": st["action"],
+             "result": res.get("result") or res.get("error")})
+    responder._audit("case-act", {"case": case_id, "case_no": plan.get("case_no"),
+                                  "severity": plan["severity"], "ran": len(ran),
+                                  "skipped": len(skipped), "errors": len(errors)},
+                     "ok" if ran and not errors else ("partial" if ran else "error"))
+    if cache.incidents and ran:
+        cache.incidents.log_event(case_id, "response",
+                                  "Case-wide containment: %d action(s) run%s"
+                                  % (len(ran), (", %d failed" % len(errors)) if errors else ""))
+    return {"ok": bool(ran) or not errors, "ran": ran, "skipped": skipped, "errors": errors,
+            "plan": plan}
+
+
+def resolve_case_plan(incident, node_by_id, playbook, registry):
+    """The deterministic response to a whole investigation: for each member artifact still present,
+    the applicable steps from the case workflow for this case's severity.
+
+    Returns {case_id, case_no, severity, confidence, steps:[…], truncated} or None. Closed cases
+    resolve to nothing — a case someone has already judged is not one the machine should re-open."""
+    if not registry or not incident:
+        return None
+    if (incident.get("status") or "open") == "closed":
+        return None
+    sev = incident.get("severity") or "info"
+    ids = playbook.case_workflow_for(sev) if playbook else list(DEFAULT_CASE_WORKFLOWS.get(sev, []))
+    if not ids:
+        return None
+    conf = case_confidence(incident, node_by_id)
+    members = [m for m in (incident.get("members") or []) if m in node_by_id]
+    truncated = max(0, len(members) - CASE_WORKFLOW_MAX_MEMBERS)
+    steps = []
+    for mid in members[:CASE_WORKFLOW_MAX_MEMBERS]:
+        own = _plan_confidence(node_by_id[mid], with_case=False)
+        for st in _build_steps(ids, node_by_id[mid], registry, conf):
+            # A case plan gates every step on the CASE's confidence, so a member can be contained on
+            # evidence that is not its own. That is the point — the case is the unit of judgment —
+            # but it must not be invisible, so each step carries what the member was worth alone.
+            st = dict(st, member=mid, member_label=node_by_id[mid].get("label") or mid,
+                      member_confidence=CONFIDENCE_NAME.get(own), member_confidence_rank=own,
+                      on_case_evidence=own < st.get("confidence_rank", conf))
+            steps.append(st)
+    if not steps:
+        return None
+    return {"case_id": incident.get("id"), "case_no": incident.get("case_no"),
+            "severity": sev, "confidence": CONFIDENCE_NAME.get(conf), "confidence_rank": conf,
+            "members": len(members), "truncated": truncated, "steps": steps,
+            "rationale": "Case-wide containment for a %s investigation (%d member artifact(s), "
+                         "%s confidence, reversible-first)." % (sev, len(members),
+                                                               CONFIDENCE_NAME.get(conf))}
+
+
 class ResponsePlaybook:
     """Deterministic response config: per-ATT&CK-tactic workflows + per-detection overrides.
     Persisted to response-playbook.json (hot-reloaded on change). Action ids are validated against
@@ -7388,13 +7586,16 @@ class ResponsePlaybook:
         self.valid_actions = set(valid_actions or [])
         self.lock = threading.Lock()
         self.tactic_workflows = {}
+        self.case_workflows = {}                    # case severity -> ordered action ids
         self.overrides = {}
         self.mesh_version = None                    # last-synced mesh playbook version (None = never synced)
         self.mesh_tactic_workflows = {}
+        self.mesh_case_workflows = {}
         self.mesh_overrides = {}
         self._mtime = 0
         if not os.path.exists(self.path):
             self.tactic_workflows = {k: list(v) for k, v in DEFAULT_TACTIC_WORKFLOWS.items()}
+            self.case_workflows = {k: list(v) for k, v in DEFAULT_CASE_WORKFLOWS.items()}
             self._write()
         else:
             self._load()
@@ -7414,6 +7615,9 @@ class ResponsePlaybook:
             with open(self.path) as f:
                 d = json.load(f)
             if isinstance(d, dict):
+                cw = d.get("case_workflows", {})
+                self.case_workflows = ({k: self._clean(v) for k, v in cw.items()
+                                        if k in SEVERITY_ORDER} if isinstance(cw, dict) else {})
                 tw = d.get("tactic_workflows", {})
                 ov = d.get("overrides", {})
                 self.tactic_workflows = {k: self._clean(v) for k, v in tw.items()
@@ -7427,6 +7631,8 @@ class ResponsePlaybook:
                     except (TypeError, ValueError):
                         self.mesh_version = None
                     self.mesh_tactic_workflows = {k: self._clean(v) for k, v in (mesh.get("tactic_workflows") or {}).items()}
+                    self.mesh_case_workflows = {k: self._clean(v) for k, v in (mesh.get("case_workflows") or {}).items()
+                                                if k in SEVERITY_ORDER}
                     self.mesh_overrides = {str(k): self._clean(v) for k, v in (mesh.get("overrides") or {}).items()}
             self._mtime = st.st_mtime
         except (OSError, ValueError):
@@ -7444,10 +7650,12 @@ class ResponsePlaybook:
         try:
             tmp = self.path + ".tmp"
             with open(tmp, "w") as f:
-                doc = {"tactic_workflows": self.tactic_workflows, "overrides": self.overrides}
+                doc = {"tactic_workflows": self.tactic_workflows, "overrides": self.overrides,
+                       "case_workflows": self.case_workflows}
                 if self.mesh_version is not None:
                     doc["mesh"] = {"version": self.mesh_version,
                                    "tactic_workflows": self.mesh_tactic_workflows,
+                                   "case_workflows": self.mesh_case_workflows,
                                    "overrides": self.mesh_overrides}
                 json.dump(doc, f, indent=1)
             os.replace(tmp, self.path)
@@ -7472,6 +7680,26 @@ class ResponsePlaybook:
             src = self.mesh_overrides if self.mesh_version is not None else self.overrides
             v = src.get(str(detection_id))
             return list(v) if v is not None else None
+
+    def case_workflow_for(self, severity):
+        """The case workflow for a case of this severity. Same authority order as everything else:
+        a mesh-synced playbook wins outright, then this host's own, then the shipped default."""
+        with self.lock:
+            if self.mesh_version is not None:
+                v = self.mesh_case_workflows.get(severity)
+                if v is not None:
+                    return list(v)
+            elif severity in self.case_workflows:
+                return list(self.case_workflows[severity])
+        return list(DEFAULT_CASE_WORKFLOWS.get(severity, []))
+
+    def set_case_workflow(self, severity, actions):
+        if severity not in SEVERITY_ORDER:
+            return {"ok": False, "error": "unknown severity"}
+        with self.lock:
+            self.case_workflows[severity] = self._clean(actions)
+            self._write()
+        return {"ok": True, "case_workflows": {k: list(v) for k, v in self.case_workflows.items()}}
 
     def set_tactic(self, tactic, actions):
         if tactic not in TACTIC_NAME:
@@ -7498,7 +7726,7 @@ class ResponsePlaybook:
             return ({k: list(v) for k, v in self.tactic_workflows.items()},
                     {k: list(v) for k, v in self.overrides.items()})
 
-    def set_mesh_playbook(self, version, tactic_workflows, overrides):
+    def set_mesh_playbook(self, version, tactic_workflows, overrides, case_workflows=None):
         """Adopt the mesh's authoritative response playbook for this platform (continuous reconcile)."""
         with self.lock:
             try:
@@ -7506,6 +7734,8 @@ class ResponsePlaybook:
             except (TypeError, ValueError):
                 self.mesh_version = 0
             self.mesh_tactic_workflows = {str(k): self._clean(v) for k, v in (tactic_workflows or {}).items()}
+            self.mesh_case_workflows = {str(k): self._clean(v) for k, v in (case_workflows or {}).items()
+                                        if str(k) in SEVERITY_ORDER}
             self.mesh_overrides = {str(k): self._clean(v) for k, v in (overrides or {}).items()}
             self._write()
         return {"ok": True, "version": self.mesh_version}
@@ -7516,6 +7746,7 @@ class ResponsePlaybook:
             had = self.mesh_version is not None
             self.mesh_version = None
             self.mesh_tactic_workflows = {}
+            self.mesh_case_workflows = {}
             self.mesh_overrides = {}
             if had:
                 self._write()
@@ -7878,6 +8109,7 @@ class IncidentStore:
         self.data = {}          # incident id -> record
         self._last_save = 0.0
         self._next_case = 1     # monotonic human case number (#1, #2, …)
+        self._upgrades = []     # severity upgrades since the last take_upgrades() (drained, not kept)
         self._load()
 
     def _load(self):
@@ -7998,7 +8230,24 @@ class IncidentStore:
                 sevs.append(md.get("severity") or "info")
                 techniques.update(md.get("techniques") or [])
         severity = max(sevs, key=lambda s: SEVERITY_ORDER.index(s) if s in SEVERITY_ORDER else 0)
+        # A case gets worse the moment a member worse than anything already in it correlates in, and
+        # that is the single most decision-relevant thing an investigation ever does. It used to
+        # happen entirely silently: the number changed between two glances at the console and
+        # nothing recorded it, nothing said so, and nothing reconsidered the response that was
+        # chosen back when the case looked milder. Record it, announce it, and re-open the decision.
+        #
+        # Only UPGRADES. A case drifts back down as members are triaged closed, which is ordinary
+        # housekeeping and not worth a line in the log, let alone a banner.
+        prior = rec.get("severity")
+        if prior and prior != severity and _sev_rank(severity) > _sev_rank(prior):
+            self._event(rec, "severity", "Raised %s \u2192 %s by %s"
+                        % (prior, severity, self._upgrade_cause(rec, eff, meta, labels, severity)))
+            rec["severity_raised_at"] = now
+            self._upgrades.append({"id": iid, "case_no": rec.get("case_no"),
+                                   "title": rec.get("title") or "", "from": prior, "to": severity,
+                                   "members": list(eff), "size": len(eff), "ts": now})
         rec.update({"members": eff, "last_seen": now, "severity": severity, "size": len(eff),
+ 
                     "techniques": sorted(techniques),
                     "indicators": base.get("indicators") or rec.get("indicators") or [],
                     "types": types, "member_labels": labels})
@@ -8007,6 +8256,37 @@ class IncidentStore:
         for m in eff:
             member_to_incident[m] = iid
         out.append(self._public(rec, iid))
+
+    def _upgrade_cause(self, rec, eff, meta, labels, severity):
+        """Which member pushed the case to this level. "Raised medium to high" is a fact; "raised by
+        Keychain dumped via security CLI" is the thing an analyst can act on, so name it — and name
+        the newest one, because on a tie that is the alert that just arrived."""
+        seen = set(rec.get("members") or [])
+        culprits = [m for m in eff
+                    if (meta.get(m, {}).get("severity") or "info") == severity]
+        fresh = [m for m in culprits if m not in seen] or culprits
+        if not fresh:
+            return "a new member alert"
+        m = fresh[-1]
+        return "\u201c%s\u201d" % (labels.get(m) or meta.get(m, {}).get("label") or m)
+
+    def log_event(self, iid, kind, detail):
+        """Append to one case's activity log from outside the store (a case-wide action, say), so
+        what was done to a case is recorded on the case rather than only in the response audit."""
+        with self.lock:
+            rec = self.data.get(iid)
+            if not rec:
+                return {"ok": False, "error": "no such case"}
+            self._event(rec, kind, detail)
+            self._save(force=True)
+        return {"ok": True}
+
+    def take_upgrades(self):
+        """Drain the severity upgrades seen since the last call. The store records them; deciding
+        what they mean — notify, re-evaluate, both — belongs to the snapshot that asked."""
+        with self.lock:
+            out, self._upgrades = list(self._upgrades), []
+        return out
 
     def reconcile(self, clusters):
         """Assign a stable id to each cluster (matching prior incidents by member overlap), merge any
@@ -8703,7 +8983,7 @@ def _primary_hit(node):
     return max(hits, key=lambda h: SEV_RANK.get(h.get("severity", "medium"), 0))
 
 
-def _plan_confidence(node):
+def _plan_confidence(node, with_case=True):
     """How far the evidence on THIS alert carries (1-4): the best-rated detection that fired,
     promoted one tier when something independent corroborates it — a threat-intel hit or a
     VirusTotal conviction is a second opinion from outside our own rule library. An alert carrying
@@ -8717,7 +8997,32 @@ def _plan_confidence(node):
         base = _SEV_CONFIDENCE.get(node.get("severity") or "medium", 2)
     vt = d.get("vt") or {}
     vt_mal = (vt.get("status") == "done" and int(vt.get("malicious", 0) or 0) > 0)
-    return min(4, base + 1) if (bool(d.get("ioc")) or vt_mal) else base
+    if bool(d.get("ioc")) or vt_mal:
+        base += 1
+    if with_case:
+        base += _case_promotion(node)
+    return max(1, min(4, base))
+
+
+def _case_promotion(node):
+    """How much an alert's membership in a case adds to its own rating.
+
+    Correlation is evidence. An alert that ties to several others is likelier to be real than the
+    same alert standing alone, and one sitting in a case that is WORSE than itself is being told
+    something it does not know on its own — that is the whole reason lower-severity activity is
+    kept and correlated rather than discarded. A closed case says the opposite and adds nothing.
+
+    Deliberately at most one tier, and never for a lone alert: a case is two or more by definition,
+    and stacking promotions would let a pile of weak signals manufacture certainty."""
+    if (node.get("incident_status") or "open") == "closed":
+        return 0
+    if int(node.get("incident_size") or 0) < 2:
+        return 0
+    case_sev = node.get("incident_severity")
+    if not case_sev:
+        return 0
+    return 1 if _sev_rank(case_sev) > _sev_rank(node.get("severity") or "info") else 0
+
 
 
 def _build_steps(action_ids, node, registry, confidence, enforce_floor=True):
@@ -9586,7 +9891,7 @@ class DecoyStore:
 def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downloads=None,
                 auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                 posture=None, shellhist=None, rules=None, sqldet=None, suppressions=None, incident_store=None,
-                realtime=None, history=None, decoys=None):
+                realtime=None, history=None, decoys=None, responder=None):
     t0 = time.time()
     procs = collect_processes()
     net = collect_network()
@@ -10006,10 +10311,18 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
             clusters = [c for c in correlate_incidents(alert_nodes, node_by_id, edges, proc_parent)
                         if c["size"] >= 2]
             inc_list, member_to_incident = incident_store.reconcile(clusters)
+            _inc_by_id = {c["id"]: c for c in inc_list}
             for n in nodes:
                 iid = member_to_incident.get(n["id"])
                 if iid:
                     n["incident"] = iid
+                    # …and with the CASE's own state. An alert is not only itself: the same command
+                    # standing alone and sitting inside a critical case are different amounts of
+                    # evidence, and response is the thing that should notice.
+                    _c = _inc_by_id.get(iid) or {}
+                    n["incident_severity"] = _c.get("severity")
+                    n["incident_size"] = _c.get("size")
+                    n["incident_status"] = (_c.get("status") or "open")
             # Resurface auto-closed low-signal alerts into any investigation opened on this host within
             # the window (pins + reopens to 'investigating'; shows as a member on the next reconcile).
             resurface_low_signal(nodes, triage, incident_store)
@@ -10019,6 +10332,16 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
                            for mid, r in (triage.as_map().items() if triage else [])
                            if r.get("status") == "closed"}
             incident_store.auto_close_resolved(lambda mid: node_close_sub.get(mid) or tmap_closed.get(mid))
+            # A case that just got worse is the one thing here worth interrupting someone for, and
+            # it is also the moment its members' response stops being settled. Announce, then re-open.
+            for _up in incident_store.take_upgrades():
+                _case = ("Case #%s" % _up["case_no"]) if _up.get("case_no") else "Investigation"
+                _what = (" \u2014 %s" % _up["title"]) if _up.get("title") else ""
+                notify_all("%s escalated to %s" % (_case, _up["to"].upper()),
+                           "%d correlated alert(s); was %s.%s" % (_up["size"], _up["from"], _what),
+                           subtitle="Investigation", severity=_up["to"])
+                if responder:
+                    responder.reopen_for_upgrade([_up])
             inc_sev = {sv: 0 for sv in SEVERITY_ORDER}
             for c in inc_list:
                 inc_sev[c["severity"]] = inc_sev.get(c["severity"], 0) + 1
@@ -10581,7 +10904,7 @@ class SnapshotCache:
                                posture=self.posture, shellhist=self.shellhist,
                                rules=self.rules, sqldet=self.sqldet, suppressions=self.suppressions,
                                incident_store=self.incidents, realtime=self.realtime,
-                               history=self.history, decoys=self.decoys)
+                               history=self.history, decoys=self.decoys, responder=self.responder)
             if self.history:
                 data["meta"]["history"] = self.history.stats()
             if self.decoys:
@@ -11777,6 +12100,31 @@ class Responder:
                 "severity": n.get("severity"), "action": rec["action"], "target": rec["target"],
                 "confidence": rec["confidence"], "rationale": rec.get("rationale", ""),
                 "executed": executed, "result": result})
+
+    def reopen_for_upgrade(self, upgrades):
+        """A case got worse, so the response chosen for its members while it looked milder is no
+        longer the response it would get now. Forget that those members were already handled and let
+        the next snapshot decide again at the new level.
+
+        Dedup is per (artifact, action), so this only re-opens the question — it never re-runs an
+        action that is still the right answer, because the same action on the same artifact will
+        simply be skipped once re-taken. What it unblocks is the action that was previously BELOW
+        the bar: the alert that merited watching alone and merits containing as part of a critical
+        case."""
+        if not upgrades:
+            return 0
+        members = {m for u in upgrades for m in (u.get("members") or [])}
+        if not members:
+            return 0
+        with self.lock:
+            stale = {sig for sig in self._auto_seen if sig.split("|", 1)[0] in members}
+            self._auto_seen -= stale
+            self._ai_seen -= members
+        if stale:
+            self._audit("case-upgrade-reopen",
+                        {"cases": [u.get("case_no") or u.get("id") for u in upgrades],
+                         "members": len(members), "reopened": len(stale)}, "re-evaluate")
+        return len(stale)
 
     # ---- circuit breaker (live auto) ----
     def _breaker_tripped(self):
@@ -13593,6 +13941,11 @@ def make_handler(cache):
                     res = r.act((payload.get("action") or "").strip(),
                                 payload.get("target") or {}, bool(payload.get("confirm")),
                                 node_id=(payload.get("node_id") or None))   # manual action on an alert
+                elif op == "case-plan":
+                    res = _case_plan_for(cache, (payload.get("case_id") or "").strip())
+                elif op == "case-act":
+                    res = _run_case_plan(cache, r, (payload.get("case_id") or "").strip(),
+                                         bool(payload.get("confirm")))
                 elif op == "undo":
                     res = r.undo((payload.get("token") or "").strip())
                 else:
@@ -14008,7 +14361,10 @@ BREAKGLASS_PATHS = {"/api/triage", "/api/triage-bulk", "/api/incidents", "/api/i
                     # changes no policy, touches no mesh link, and root can kill the process anyway.
                     "/api/restart"}
 # /api/respond carries both actions and posture config; only the actions are in scope.
-BREAKGLASS_RESPOND_OPS = {"act", "isolate", "unisolate", "undo"}
+# Break-glass covers acting on what is happening, not changing how the machine behaves
+# afterwards. Case-wide containment is squarely the former — the same reversible actions,
+# chosen by the case rather than one at a time — so it belongs here.
+BREAKGLASS_RESPOND_OPS = {"act", "isolate", "unisolate", "undo", "case-plan", "case-act"}
 
 
 def breakglass_write(minutes, reason=""):
@@ -14880,7 +15236,8 @@ class MeshReporter:
             return
         if not d.get("ok"):
             return
-        pb.set_mesh_playbook(d.get("version"), d.get("tactic_workflows") or {}, d.get("overrides") or {})
+        pb.set_mesh_playbook(d.get("version"), d.get("tactic_workflows") or {}, d.get("overrides") or {},
+                             d.get("case_workflows") or {})
         self.counts["playbook_sync"] = self.counts.get("playbook_sync", 0) + 1
         try:
             self.cache.invalidate()                  # recompute response plans on the next snapshot

@@ -122,6 +122,27 @@
    "quarantine"
   ]
  },
+ "case_workflows": {
+  "critical": [
+   "vr_forensics",
+   "suspend",
+   "disable_job",
+   "quarantine",
+   "block_ip"
+  ],
+  "high": [
+   "vr_forensics",
+   "suspend",
+   "disable_job",
+   "quarantine"
+  ],
+  "medium": [
+   "vr_forensics"
+  ],
+  "low": [],
+  "info": []
+ },
+ "case_max_members": 25,
  "actions": [
   {
    "id": "suspend",

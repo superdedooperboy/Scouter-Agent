@@ -275,5 +275,53 @@ class TestCasePlan(unittest.TestCase):
         self.assertEqual(self.pb.case_workflow_for("critical"), ["vr_forensics"])
 
 
+# --------------------------------------------------------------------------------------------
+class TestWhatTravelsToTheMesh(unittest.TestCase):
+    """The periodic report carries no `detail` at all — deliberately, it is a roster, not a graph.
+    That left the mesh unable to see two hosts hitting the same thing, so a bounded identity block
+    rides along instead. What it must NOT carry matters more than what it does: this is the only
+    place a host's indicators become a fleet-wide correlation key."""
+
+    def ind(self, **detail):
+        return agent.MeshReporter._report_indicators({"detail": detail})
+
+    def test_a_dropped_binarys_hash_travels(self):
+        self.assertEqual(self.ind(exe="/tmp/stage", hashes={"sha256": "a" * 64})["hash"], "a" * 64)
+
+    def test_an_os_binarys_hash_does_not(self):
+        """Every host has /bin/zsh. Correlating on it would join the fleet, not an intrusion —
+        the agent's own correlation tests caught exactly this merge once already."""
+        self.assertIsNone(self.ind(exe="/bin/zsh", hashes={"sha256": "b" * 64},
+                                   signature={"trusted": True, "category": "apple"}))
+
+    def test_but_a_tampered_one_does(self):
+        got = self.ind(exe="/bin/zsh", hashes={"sha256": "c" * 64},
+                       signature={"trusted": False, "category": "invalid"})
+        self.assertEqual(got["hash"], "c" * 64)
+
+    def test_an_unknown_signature_at_a_system_path_stays_generic(self):
+        """Absence of a signature check is not evidence of tampering, and the cost of a wrong
+        'specific' here is a case joining hosts that share nothing but macOS."""
+        self.assertIsNone(self.ind(exe="/usr/bin/curl", hashes={"sha256": "d" * 64}))
+
+    def test_a_private_peer_does_not_travel(self):
+        self.assertIsNone(self.ind(raddr="10.0.0.5", public=True))
+
+    def test_a_public_peer_does(self):
+        self.assertEqual(self.ind(raddr="93.184.216.34", public=True)["ip"], "93.184.216.34")
+
+    def test_paths_and_pids_never_travel(self):
+        """A path is a location and a pid is nothing off-host; neither identifies a thing."""
+        got = self.ind(path="/tmp/update", pid=4242, cmdline="/tmp/update --now")
+        self.assertIsNone(got)
+
+    def test_urls_travel_but_are_capped(self):
+        got = self.ind(cmdline="curl https://a.example/1 https://b.example/2 https://c.example/3")
+        self.assertEqual(len(got["urls"]), 2)
+
+    def test_an_alert_with_no_identity_sends_nothing(self):
+        self.assertIsNone(self.ind(pid=1, label="bash"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

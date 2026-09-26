@@ -87,7 +87,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "0.9.42"
+__version__ = "0.9.43"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -12968,6 +12968,9 @@ class MeshReporter:
                 "reason": ((n.get("reasons") or [{}])[0] or {}).get("text", ""),
                 "status": (n.get("triage") or {}).get("status") or "open",
             }
+            ind = self._report_indicators(n)
+            if ind:
+                a["indicators"] = ind      # so the mesh can see two hosts hitting the same thing
             # Attach the one reversible containment appropriate to this alert (+ its target), so the
             # mesh console can offer a targeted "Contain" action that round-trips back here to execute.
             if resp:
@@ -13332,6 +13335,38 @@ class MeshReporter:
         rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
         out.sort(key=lambda a: (rank.get(a.get("severity"), 9), -(a.get("last_seen") or 0)))
         return out
+
+    @staticmethod
+    def _report_indicators(node):
+        """The host-INDEPENDENT identity an alert carries, bounded to a few short strings.
+
+        The periodic report is deliberately small — it drops `detail` entirely — which is right for
+        a roster but leaves the mesh unable to see that two hosts hit the same thing. Only what
+        survives leaving a machine goes here: a file hash, a public peer, a fetched URL. A path is a
+        location, a pid is nothing off-host, and a command line is too big to ship for every alert.
+
+        The hash of an OS-shipped, validly signed binary is omitted: every host has /bin/zsh, and
+        correlating on it would join the fleet rather than an intrusion."""
+        d = node.get("detail") or {}
+        out = {}
+        exe = str(d.get("exe") or d.get("path") or d.get("program") or "")
+        if not (_is_os_path(exe) and not _sig_says_tampered(d)):
+            h = d.get("hashes") or {}
+            sha = h.get("sha256") or h.get("md5")
+            if sha:
+                out["hash"] = str(sha)[:64]
+        ra = d.get("raddr")
+        if ra and d.get("public") and not is_private_ip(str(ra)):
+            out["ip"] = str(ra)[:45]
+        urls = []
+        for u in _RE_URL.findall(str(d.get("cmdline") or ""))[:2]:
+            urls.append(u.rstrip(".,'\"")[:200])
+        for u in (d.get("source_urls") or [])[:2]:
+            if u:
+                urls.append(str(u)[:200])
+        if urls:
+            out["urls"] = urls[:2]
+        return out or None
 
     @staticmethod
     def _slim_alert(a):

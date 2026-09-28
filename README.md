@@ -4,7 +4,7 @@
 
 <h1 align="center">Scouter</h1>
 
-<p align="center"><em>Size Up Your Threats — one host, or a whole fleet</em></p>
+<p align="center"><em>Size Up Your Threats — one host at a time</em></p>
 
 <p align="center">
   <img alt="Platforms: macOS and Linux" src="https://img.shields.io/badge/platform-macOS_%7C_Linux-2b2f3a?style=flat-square">
@@ -16,37 +16,28 @@
 Assess threats to your machine like a true Saiyan. How else will you know when you're facing a power level that's OVER 9000?!
 
 Scouter is a lightweight, dependency-free (pure Python 3 standard library) EDR/XDR toolkit for
-**macOS and Linux** — a native agent per OS (see [Platforms](#platforms)), one graph UI, one mesh.
-This repository is the **agent**: the part that runs on every host you're watching. It also speaks to
-on one (or more) dedicated host(s):
+**macOS and Linux** — a native agent per OS (see [Platforms](#platforms)), one graph UI. It runs on
+the host you're watching: a local, read-only sensor that snapshots your live system, scores findings
+with heuristics tagged to MITRE ATT&CK techniques, and draws everything as an interactive, real-time
+relationship graph: processes and their parent/child tree, the network connections they open, and the
+cron / LaunchAgent / LaunchDaemon jobs (plus the other autostart surfaces) that persist them. It also
+streams real-time Endpoint Security (ESF) events, watches files / auth / accounts / security posture,
+enriches with threat-intel + geo/ASN, keeps a triage-able alert queue with optional AI-assisted
+analysis and hunting, and can take opt-in reversible containment.
 
-- The endpoint agent (`agent.py`) — a local, read-only sensor that snapshots your live
-  system, scores findings with heuristics tagged to MITRE ATT&CK techniques, and draws
-  everything as an interactive, real-time relationship graph: processes and their
-  parent/child tree, the network connections they open, and the cron / LaunchAgent /
-  LaunchDaemon jobs (plus the other autostart surfaces) that persist them. It also streams
-  real-time Endpoint Security (ESF) events, watches files / auth / accounts / security
-  posture, enriches with threat-intel + geo/ASN, keeps a triage-able alert queue with
-  optional AI-assisted analysis and hunting, and can take opt-in reversible containment.
-- [Scouter Mesh](#reporting-to-a-scouter-mesh-optional) — a separate multi-host console this agent can report to
-  console that rolls those agents into one fleet view. Telemetry stays on the endpoints;
-  the mesh is a control plane, not a SIEM.
-
-Think of the agent as a magnifying glass for "what is running on this host right now, what is it
-talking to, and what looks out of place?" — and Scouter Mesh as that same question asked across
-your whole fleet.
+Think of it as a magnifying glass for "what is running on this host right now, what is it talking to,
+and what looks out of place?"
 
 ## Platforms
 
-Scouter is cross-platform, with a **separate, platform-native agent per OS** — same graph UI, same
-[Scouter Mesh](#reporting-to-a-scouter-mesh-optional), OS-specific collectors (not a shared core):
+Scouter is cross-platform, with a **separate, platform-native agent per OS** — same graph UI,
+OS-specific collectors (not a shared core):
 
 - **macOS** — this directory (the repo root). `agent.py` + `index.html`; everything below documents it.
 - **Linux** (Debian/Ubuntu family) — [`linux/`](linux/). A port with the same interactive graph and
   feature set, rebuilt on Linux primitives (`/proc`, systemd, dpkg, journald/`wtmp`) in place of the
   macOS ones. See [`linux/README.md`](linux/README.md) for its collectors and options.
 
-Both agents report into the same Scouter Mesh, so one console can roll up a mixed macOS + Linux fleet.
 The rest of this README covers the macOS agent.
 
 ## Quick start
@@ -58,10 +49,6 @@ python3 agent.py
 
 Your browser opens to `http://127.0.0.1:8787/`. Nothing to install — it uses only
 Python 3 (already on macOS) and your browser.
-
-> Running a fleet? Point each agent at a Scouter Mesh console with `--mesh-url` and
-> point each agent at it with `--mesh-url` / `--mesh-token`. See
-> [Scouter Mesh — multi-host view](#reporting-to-a-scouter-mesh-optional).
 
 For full system visibility (all users' processes, every socket owner, and system
 LaunchDaemons), run it with `sudo`:
@@ -97,7 +84,7 @@ ever stops. There is no terminal to keep open.
 
 ```bash
 ./install.command                          # asks, then installs the service
-sudo python3 agent.py --install-service    # or directly; add --port / --mesh-url to bake them in
+sudo python3 agent.py --install-service    # or directly; add --port to bake it in
 ```
 
 Then open `http://127.0.0.1:8787/`, or type `scouter` — with the service installed it opens the
@@ -108,12 +95,10 @@ What the installer does, and why:
 - **Runs a root-owned copy**, at `/Library/Application Support/Scouter/agent`, never your checkout.
   A root service executing code you can edit without a password would be a privilege escalation.
   Only committed code is installed; reinstalling upgrades the service, and never rolls back a
-  service that is already newer (for example after an update pushed from the Mesh).
-- **Carries over your state and secrets** — baselines, rules, history, Mesh enrollment, quarantine,
-  and every stored API key — so nothing re-alerts as new and the Mesh keeps hearing from the host.
-  The service reads secrets from a root-only file rather than a keychain, because a login keychain
-  is locked at boot. A `--mesh-token` given to the installer goes into that store, never into the
-  service definition, which any user can read.
+  service that is already newer.
+- **Carries over your state and secrets** — baselines, rules, history, quarantine, and every stored
+  API key — so nothing re-alerts as new. The service reads secrets from a root-only file rather than
+  a keychain, because a login keychain is locked at boot.
 - **Hands over** from an agent you started by hand, after asking.
 - **Checks that every sensor actually has access** before calling the install done.
 
@@ -135,7 +120,7 @@ ever runs `agent.py` from its own install (its arguments are passed to the agent
 takes the interpreter from a root-owned file, and refuses to start if its install, the agent, or any
 directory above them could be modified by anyone other than root.
 
-For a fleet, the installer also writes an MDM profile that grants Full Disk Access with nobody
+The installer can also write an MDM profile that grants Full Disk Access with nobody
 clicking anything:
 `/Library/Application Support/Scouter/Scouter-FullDiskAccess.mobileconfig`. It only takes effect
 when delivered through MDM — double-clicking the file does nothing.
@@ -173,17 +158,15 @@ You don't have to `cd` into this folder every time:
   its own folder and elevates to root for you, or, if the background service is installed, simply
   opens it. Copy it to your Desktop or drag it
   into the Dock if you like.
-- Add `scouter` and `scouter-mesh` commands to your PATH so you can launch the
-  agent and the [multi-host aggregator](#reporting-to-a-scouter-mesh-optional) from any
+- Add a `scouter` command to your PATH so you can launch the agent from any
   terminal. Run the optional installer once (double-click it, or `./install.command`);
   it asks before changing anything and falls back to a per-user location if
   `/usr/local/bin` isn't writable:
 
   ```bash
-  ./install.command            # adds "scouter" + "scouter-mesh" to your PATH
+  ./install.command            # adds "scouter" to your PATH
   scouter                      # launch the agent from anywhere (prompts for sudo)
-  scouter-mesh --port 8788     # …and the Scouter Mesh aggregator, from anywhere
-  ./install.command --uninstall   # remove both again
+  ./install.command --uninstall   # remove it again
   ```
 
   The startup banner also prints this tip until `scouter` is on your PATH. The
@@ -700,9 +683,8 @@ own bait username — because the code is public and a fixed layout would be tri
 Two things raise alerts:
 
 - **A bait credential is used** — critical. The login logs Scouter already reads are matched against the
-  bait names; a failed SSH attempt for a user that does not exist is exactly the signal. Connected to a
-  Mesh, each agent also recognises bait planted on *other* hosts, so the alert reads "taken on web-01,
-  used here" (T1078, T1110, T1021).
+  bait names; a failed SSH attempt for a user that does not exist is exactly the signal
+  (T1078, T1110, T1021).
 - **A decoy is deleted or edited** — medium. Nothing legitimate touches these files, though a user
   tidying up can cause it (T1070.004).
 
@@ -711,9 +693,8 @@ synced folder (iCloud, Dropbox, OneDrive, Google Drive), owned by the user whose
 mode `0600`, with backdated timestamps. Scouter hides its own decoys from the graph, and the registry
 that maps them lives in a root-only `decoys.json`.
 
-**On by default.** Turn them off for a host with `--no-decoys`, from the **Decoys** panel in the left
-pane, or across a scope from the Mesh's Config tab. Turning them off removes what was planted, and
-`--uninstall-service` removes them too.
+**On by default.** Turn them off for a host with `--no-decoys` or from the **Decoys** panel in the left
+pane. Turning them off removes what was planted, and `--uninstall-service` removes them too.
 
 ## Detection engineering
 
@@ -908,7 +889,7 @@ context, noisy as a queue. Scouter auto-triages them:
 - A **low-signal** alert — low or medium severity with **no detection rule behind it** — is
   automatically closed as `Auto-closed`. It's still recorded and still searchable; it just doesn't
   sit in the open queue. Flip **Show closed** to see them.
-- Anything a rule fired on is **never** auto-closed — built-in *and* custom/Mesh-authored detections
+- Anything a rule fired on is **never** auto-closed — built-in *and* custom detections
   always stay in the open queue, as does anything high or critical.
 - It only ever touches alerts you have never triaged, so it can't override your decisions, and the
   closure is non-silencing: the same thing recurring later is evaluated fresh (unlike a Benign /
@@ -920,11 +901,7 @@ of the investigation's creation is added to it as a member and reopened to *Inve
 quiet stuff stays quiet until there's a reason to care — and then it's already attached to the case,
 which is exactly when that context is worth reading.
 
-This works for investigations created on the host **and** from the Mesh. Multi-host investigations
-live on the mesh, so the mesh runs the cross-host half itself: for an open multi-host investigation it
-sweeps every member host for qualifying auto-closed alerts, pins them to the case, and (on hosts that
-accept management) reopens them on the host too — so one case gathers the low-signal context from
-*every* host involved.
+This works for investigations created on the host.
 
 ### Suppressing alerts
 
@@ -969,8 +946,7 @@ detection with its own reason: *"Decoded base64 payload matches: Download piped 
 wrapping is reported as what it is, e.g. `base64 → base64`, because that nesting is itself a signal.
 
 The alert detail shows a **Decoded payload** panel: each layer, where it came from, how big it was,
-and any detection that matched inside it. The Mesh console shows the same panel, because that is where
-an analyst reads the alert.
+and any detection that matched inside it.
 
 **Decoded content alone never raises severity.** A base64 config value, a bearer token or a
 percent-encoded URL is decoded, shown, and left exactly as it was. Only a detection matching *inside*
@@ -1089,11 +1065,6 @@ read the `LICENSE` in the exact release you ship and Rapid7's current Velocirapt
 Scouter is read-only by default, but can optionally take containment and remediation actions.
 There are three postures, shown by the animated mode pill in the header (each with its own
 emblem); switch with a click:
-
-When the host is enrolled in [Scouter Mesh](#reporting-to-a-scouter-mesh-optional), these same reversible
-actions can also be triggered remotely from the fleet console — a mesh-connected host treats the
-mesh it reports to as its authority (gated by the mesh's admin token). Irreversible eradication
-(kill/delete) is never accepted remotely; it stays a local, at-the-console action.
 
 | Mode | Emblem | Posture | Actions |
 |------|--------|---------|---------|
@@ -1309,8 +1280,7 @@ possible future step.)
 
 **Light or dark, or whatever your system is set to.** Scouter follows your OS appearance by
 default — a Mac set to Light opens light, one set to Dark opens dark, with nothing to configure.
-To pin one regardless, use **Appearance → Theme** in the left rail (the Mesh console has the same
-control under **Display**). The choice is remembered in that browser and applied before the page
+To pin one regardless, use **Appearance → Theme** in the left rail. The choice is remembered in that browser and applied before the page
 paints, so there is no flash of the wrong theme.
 
 
@@ -1546,50 +1516,12 @@ to `export-settings.json` (the auth value is Keychain-only, never in the file); 
 emitted / delivered / failed / queued. Webhook traffic is the one place alert content leaves the host —
 the JSONL file keeps it local.
 
-## Reporting to a Scouter Mesh (optional)
+## Chat alerts (Slack, Teams, Discord, Google Chat, Mattermost)
 
-One Scouter watches one machine. If you run several, they can report to **Scouter Mesh** — a separate
-console giving a live roster, a combined alert feed, federated hunting and fleet-wide response. The
-agent's side of that is in this repository and works with any server that speaks the protocol; the
-console itself is not part of this project.
-
-```
-python3 agent.py --mesh-url http://<mesh-host>:8788 --mesh-token <enrollment-token>
-```
-
-…or configure it from the **Scouter Mesh** panel in the sidebar. Nothing is offered unprompted: a
-fresh agent is a single-host tool and stays one until you point it somewhere.
-
-What travels is a compact snapshot — host identity, privilege, response posture, alert severity
-counts and the open alert queue — every `--mesh-interval` seconds. Detailed history never leaves the
-machine; a console asks for it on demand over the connection the agent already opened outbound, so
-nothing has to connect *to* the host.
-
-**A mesh a host reports to becomes that host's authority.** The local console stays fully readable but
-its writes are refused: the service making the changes is the one that answers for them.
-`--local-control` opts out entirely, and break-glass (below) gives a root user a time-boxed, audited
-override for when the console cannot be reached.
-
-The wire contract is versioned (`AGENT_PROTOCOL`), so an agent and a console of different vintages
-either interoperate or say plainly that they cannot.
-
-## Chat alerts from a standalone agent (Slack, Teams, Discord, Google Chat, Mattermost)
-
-The Mesh has posted fleet alerts to chat, ticketing and SIEM for a while (16 channels: Slack, Teams,
-Google Chat, Discord, Mattermost, generic webhook, PagerDuty, email, Jira, ServiceNow, ConnectWise,
-Autotask, Halo, Splunk, Sentinel, syslog). An agent with **no** Mesh had only ntfy push and a raw-JSON
-webhook — and a raw JSON POST to a Slack webhook is simply rejected, so there was no way to get a
-readable alert into a channel.
-
-A standalone Scouter can now post to **Slack, Microsoft Teams, Discord, Google Chat and Mattermost**,
-in each one's native format: Slack blocks, a Teams MessageCard, a Discord embed, plain text for Chat
-and Mattermost. Configure it under **Notifications** in the sidebar.
-
-**A mesh-managed host does not do this, on purpose.** The panel says so and offers nothing to
-configure. The Mesh already sees every alert and holds the webhook credential in one place; putting a
-Slack webhook URL on every endpoint spreads a credential across machines an intruder may already own,
-and pages twice for the same alert. This exists for the install nobody is managing — one laptop, a
-small team, no console — where the alternative is that nobody hears anything.
+Scouter can post alerts to **Slack, Microsoft Teams, Discord, Google Chat and Mattermost**, in each
+one's native format: Slack blocks, a Teams MessageCard, a Discord embed, plain text for Chat and
+Mattermost. Configure it under **Notifications** in the sidebar. (A raw JSON POST to a Slack webhook is
+simply rejected, so the native formatting is what gets a readable alert into a channel at all.)
 
 The discipline matters more than the formatting, because a channel people mute is worse than no
 channel (it looks like coverage):
@@ -1632,52 +1564,6 @@ become 3,000 queries.
 path. Not a process name, not a port: hunting those returns the whole machine and buries the two rows
 that mattered. Values are charset-checked before use (a malformed hash is dropped, not queried) and
 quoted values are escaped, because indicators come from attacker-influenced telemetry.
-
-The fleet half — hosts proposing these hunts to a console, and an alert when a validated indicator
-turns up on another machine — lives in Scouter Mesh, not in this repository.
-
-
-## Break-glass — acting locally when the mesh cannot be reached
-
-Mesh authority makes a managed machine's own console read-only. That is right almost always, and wrong
-in exactly one situation: the mesh is unreachable, alerts are firing on the machine in front of you,
-and nobody can act. Break-glass is a bounded, audited window for that.
-
-```
-sudo python3 agent.py --break-glass 60 --reason "mesh down, containing a beaconing process"
-sudo python3 agent.py --break-glass 0     # end it early
-```
-
-**The gate is local root, and that is deliberate.** Root can already stop the agent or reinstall it
-with `--local-control`, so this grants no capability that was not already there — it replaces "kill
-the agent and lose all telemetry" with a window that expires by itself and writes down what was done
-inside it. The grant is a root-owned `0600` file; the agent refuses any grant that is not owned by
-root or that anyone else can write, because being able to write such a file *is* the authentication.
-
-**What a window covers:** triage, investigations, reversible containment (suspend, block IP,
-quarantine, isolate, and their undos), and **restarting the agent** — which is how a managed host
-picks up a new version when the mesh cannot push one.
-
-**What it never covers:** the mesh link, the enrollment token, collection, sensors, detection rules,
-suppression authoring, or response configuration (posture, auto-response, launch policy). A
-break-glass that could turn off monitoring would be a documented way to go dark, and the audit trail
-it creates would be the first thing an intruder used it to erase.
-
-**It is loud.** Every window and every action inside it goes to `break-glass-audit.log` (`0600`,
-append-only) and rides every mesh report, so a window opened during an outage is waiting in the
-console the moment the host can reach it again: a **⚠ break-glass** badge on the host card with the
-time remaining, and a panel in the drill-in naming who opened it, why, for how long, and what has
-been done under it in the last fortnight. A host that used break-glass in the past keeps a quieter
-"break-glass used" badge.
-
-It does **not** require the mesh to be unreachable. Anyone who can open a window can also cut the
-network, so the precondition would add no security while blocking legitimate use on a flaky link —
-instead the mesh shows what happened and when, and a window opened while the mesh was perfectly
-reachable is the case worth asking about.
-
-Windows are capped at four hours (`--break-glass 300` is clamped); longer than that means the answer
-is to fix the mesh, not to stay in override.
-
 
 ## ATT&CK coverage matrix
 
@@ -1817,7 +1703,7 @@ The agent finds the newest release matching its own prefix, compares it to `__ve
 | `attack-data.json` | Bundled MITRE ATT&CK dataset (techniques, tactics, threat groups) for the ATT&CK tab. Ships with the tool. |
 | `mtv-history.db` | *(generated)* SQLite history for threat hunting. Delete it to reset; `--no-db` to disable. |
 | `triage.json` | *(generated)* Persisted alert triage state (investigating / closed + sub-status). |
-| `ai-analyses.json` | *(generated)* Persisted per-alert AI analyses, reused at closure (locally and by the mesh). Delete to reset. |
+| `ai-analyses.json` | *(generated)* Persisted per-alert AI analyses, reused at closure. Delete to reset. |
 | `incidents.json` | *(generated)* Persisted correlated-incident cases (stable id + case triage). Delete to reset. |
 | `vt-cache.json` | *(generated)* Cached VirusTotal verdicts so they survive restarts. Delete to force re-lookups. |
 | `vt-usage.json` | *(generated)* Per-day VirusTotal API-call counts (for the daily-cap tracking). |
@@ -1832,8 +1718,6 @@ The agent finds the newest release matching its own prefix, compares it to `__ve
 | `rules.json` | *(generated)* Your custom detection rules (Detections tab). Copy it to carry your detections to another Mac. |
 | `export-settings.json` | *(generated)* Alert-export config (webhook URL, JSONL path, threshold). The auth value is Keychain-only, never here. |
 | `alerts.jsonl` | *(generated)* Newline-delimited JSON alert stream, when the JSONL sink is enabled. Tail it with a log shipper. |
-| `mesh-*.json` | *(generated, mesh host only)* Scouter Mesh state — admin token, tenant sites, AI settings, fleet config, asset groups (`mesh-groups.json`), and the AI-responder switch (`mesh-ai-responder.json`). Secrets live in the Keychain (`0600` file fallback); all gitignored. |
-| `mesh-*-audit.log` | *(generated, mesh host only)* Append-only audit trails — every mesh AI prompt/response (`mesh-ai-audit.log`) and every autonomous mesh-AI decision + action (`mesh-ai-responder-audit.log`, `0600`). Gitignored. |
 
 ## Portability — moving to another Mac
 
@@ -1842,13 +1726,13 @@ build step. To set it up on another Mac, copy those two files (and `README.md` i
 run `python3 agent.py` (Python 3 ships with macOS / the Xcode Command Line Tools). Set
 `VT_API_KEY` there for VirusTotal.
 
-To join a host to a fleet, point it at your aggregator when you launch it:
+Scouter can also report to a compatible aggregator you run, if you have one:
 
 ```bash
-sudo python3 agent.py --mesh-url http://<mesh-host>:8788 --mesh-token <enrollment-token>
+sudo python3 agent.py --mesh-url http://<host>:8788 --mesh-token <enrollment-token>
 ```
 
-The Mesh console is a separate program on its own host; nothing about it lives on an endpoint.
+Nothing about the aggregator lives on the endpoint.
 
 Don't copy the generated files (`mtv-history.db`, `triage.json`, `vt-cache.json`,
 `vt-usage.json`, `ioc-feeds.json`, `ioc-cache.json`, `ioc-secrets.json`, `persist-baseline.json`, `tcc-baseline.json`, `access-baseline.json`, `account-baseline.json`, `shell-baseline.json`) — they're machine-specific runtime state,
@@ -1873,11 +1757,10 @@ by design, never in a copyable file) — just re-enter them in the sidebar on th
   never serves your telemetry off the machine. The history database and triage state are
   plain local files (`mtv-history.db`, `triage.json`) next to `agent.py`. (Note:
   `codesign`/`spctl` may trigger macOS's *own* Apple signature checks — use `--no-sig` to
-  avoid even that.) Enrolling a host in a [Scouter Mesh](#reporting-to-a-scouter-mesh-optional)
-  (`--mesh-url`) is opt-in and does not ship your raw telemetry: the agent sends only a
-  compact snapshot (counts + top alerts + posture) periodically, and answers on-demand
-  read-only relay queries; hunts run locally and return only matching rows. The mesh is a
-  control plane, not a SIEM — the authoritative data never leaves the endpoint.
+  avoid even that.) Reporting to an aggregator (`--mesh-url`) is opt-in and does not ship your
+  raw telemetry: the agent sends only a compact snapshot (counts + top alerts + posture)
+  periodically, and answers on-demand read-only relay queries; hunts run locally and return only
+  matching rows — the authoritative data never leaves the endpoint.
 - The control plane is guarded against your own browser. Binding to `127.0.0.1` keeps
   *remote* machines out, but a web page you visit in the same browser could otherwise POST to
   the agent cross-origin (CSRF) or reach it via DNS rebinding — a real risk for a tool that
@@ -1889,7 +1772,7 @@ by design, never in a copyable file) — just re-enter them in the sidebar on th
   written to disk) and re-armed on restart; the UI reloads automatically to pick up a new one.
 - Every external call is opt-in and off by default — VirusTotal, other threat-intel
   feeds, geo/ASN (ipinfo), AI models, alert export (your SIEM/webhook), and reporting to a
-  Scouter Mesh. The most common is VirusTotal enrichment: when `VT_API_KEY` is
+  compatible aggregator. The most common is VirusTotal enrichment: when `VT_API_KEY` is
   set, the agent sends the SHA-256 of newly-seen binaries and newly-seen public
   IPs to VirusTotal (a third party) to fetch reputation. It's off unless you provide a
   key, it queries only new items, and it never uploads file *contents* — just hashes.

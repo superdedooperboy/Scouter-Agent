@@ -73,23 +73,52 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
       }
     }).catch(function(){});
   }
-  function bgPoll(){
-    _f('/api/break-glass').then(function(r){ return r.json(); }).then(function(d){
-      var was = window.__SCOUTER_BG__;
-      window.__SCOUTER_BG__ = !!(d && d.active);
-      var bar = document.getElementById('managedBar');
-      if(bar){
-        if(window.__SCOUTER_BG__){
-          bar.innerHTML = '\u26a0 <b>Break-glass open</b> \u2014 ' + Math.round((d.remaining||0)/60) +
-            ' min left, opened by ' + (d.by||'?') + '. Triage and containment are yours for now; ' +
-            'this is recorded and reported to your provider.';
-        } else if(was){
-          bar.innerHTML = 'This machine is managed by your security provider \u2014 the console here is read-only.';
-        }
-      }
-    }).catch(function(){});
+  // A break-glass window is a root-armed, expiring override, and the one state where you are acting
+  // directly on a machine your provider normally owns — so it gets its own banner, deliberately
+  // louder than the quiet managed bar, polled on EVERY host (an armed window is worth seeing even
+  // where it grants nothing beyond what you already have). A local 1s ticker keeps the countdown
+  // live between the 30s re-syncs with the agent.
+  var bgRemaining = 0, bgBy = '', bgReason = '', bgTick = null;
+  function bgEsc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+  function bgRenderBanner(){
+    var el = document.getElementById('bgBanner'); if(!el) return;
+    var m = Math.floor(bgRemaining / 60), s = bgRemaining % 60;
+    el.innerHTML = '\uD83D\uDD13 <b>Break-glass active</b> \u2014 <span class="bgclock">' + m + 'm ' +
+      (s < 10 ? '0' : '') + s + 's</span> left' + (bgBy ? (' \u00b7 opened by ' + bgEsc(bgBy)) : '') +
+      (bgReason ? (' \u00b7 ' + bgEsc(bgReason)) : '') +
+      '. Triage, investigation and reversible containment are enabled directly on this machine \u2014 ' +
+      'every action is recorded and reported to your provider.';
   }
-  if(window.__SCOUTER_MANAGED__){ bgPoll(); setInterval(bgPoll, 30000); }
+  function bgStartTick(){
+    if(bgTick) return;
+    bgTick = setInterval(function(){
+      if(!window.__SCOUTER_BG__){ clearInterval(bgTick); bgTick = null; return; }
+      bgRemaining = Math.max(0, bgRemaining - 1);
+      bgRenderBanner();
+      if(bgRemaining <= 0){ clearInterval(bgTick); bgTick = null; bgPoll(); }   // expired — confirm with the agent
+    }, 1000);
+  }
+  function bgApply(d){
+    var active = !!(d && d.active);
+    window.__SCOUTER_BG__ = active;
+    var banner = document.getElementById('bgBanner');
+    var mbar = document.getElementById('managedBar');
+    if(active){
+      bgRemaining = Math.max(0, Math.round(d.remaining || 0));
+      bgBy = d.by || ''; bgReason = d.reason || '';
+      if(banner){ banner.style.display = ''; bgRenderBanner(); }
+      if(mbar) mbar.style.display = 'none';        // the loud banner supersedes the quiet managed bar
+      bgStartTick();
+    } else {
+      if(banner) banner.style.display = 'none';
+      if(mbar && window.__SCOUTER_MANAGED__) mbar.style.display = '';
+    }
+  }
+  function bgPoll(){
+    _f('/api/break-glass').then(function(r){ return r.json(); }).then(bgApply).catch(function(){});
+  }
+  setInterval(bgPoll, 30000);
   window.fetch = function(input, init){
     if(!window.__SCOUTER_MANAGED__ || window.__SCOUTER_BG__) return _f(input, init);
     init = init || {};
@@ -114,8 +143,8 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
     managedToast._t = setTimeout(function(){ t.style.display='none'; }, 4200);
   }
   document.addEventListener('DOMContentLoaded', function(){
-    if(!window.__SCOUTER_MANAGED__) return;
-    var b = document.getElementById('managedBar'); if(b) b.style.display='';
+    if(window.__SCOUTER_MANAGED__){ var b = document.getElementById('managedBar'); if(b) b.style.display=''; }
+    bgPoll();   // render the break-glass banner right away if a window is already open (any host)
   });
 })();
 </script>
@@ -748,6 +777,13 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
 #managedBar{background:var(--chip);border-bottom:1px solid var(--edge);color:var(--txt);
   padding:7px 14px;font-size:12.5px;line-height:1.45}
 #managedBar b{font-weight:650}
+/* Break-glass is the loud exception to the quiet managed bar: an amber banner you cannot miss,
+   because it means normal authority is suspended and you are acting directly on the machine. */
+#bgBanner{background:color-mix(in srgb,var(--sev-medium) 16%,var(--panel));
+  border-bottom:2px solid var(--sev-medium);color:var(--txt);
+  padding:9px 14px;font-size:13px;line-height:1.45;font-weight:500}
+#bgBanner b{font-weight:750;color:var(--sev-medium)}
+#bgBanner .bgclock{font-variant-numeric:tabular-nums;font-weight:700}
 /* Quiet on purpose: break-glass is for the rare day the provider cannot be reached, so it sits
    in the managed banner (the only place it is ever relevant) as a link, not a button. */
 #managedBar .bglink{margin-left:8px;font-size:11px;color:var(--muted);text-decoration:underline;
@@ -775,6 +811,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
 </style>
 </head>
 <body>
+<div id="bgBanner" style="display:none"></div>
 <div id="managedBar" style="display:none">🔒 <b>Managed by your security provider.</b> This console is read-only:
   Everything is visible, and changes are made by the team that monitors this machine. Ask them for any change.
   <span class="bglink" onclick="bgPanelToggle()" title="If you have root on this machine and cannot reach your provider">break-glass</span></div>
@@ -782,8 +819,9 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
   <div><b>Break-glass</b> — a time-boxed override of your provider’s authority, for when they cannot be reached.</div>
   <div class="bgcmd"><code id="bgCmd"></code><button class="btn" onclick="bgCopy()">Copy</button></div>
   <div class="hint">Run it in a terminal. It must be root — that is the check — so it cannot be armed from this page.
-    It covers triage, reversible containment and restarting the agent; never the mesh link, collection or response
-    settings. It expires by itself, and every window is recorded and reported to your provider.</div>
+    It covers triage, investigation — including live Velociraptor forensics — reversible containment and restarting
+    the agent; never the mesh link, monitoring or response settings. It expires by itself, and every window is
+    recorded and reported to your provider.</div>
   <div class="hint" id="bgState"></div>
 </div>
 
@@ -1059,14 +1097,8 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <label class="switch"><input type="checkbox" class="ftype" value="decoy" checked onchange="applyFilters()"> 🪤 Decoys (Bait)</label>
     </div>
 
-    <h2 style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"
-        title="Show / hide Scouter Mesh multi-host reporting" onclick="toggleSection('meshBody','meshCaret');meshLoad()">
-      <span id="meshCaret" style="display:inline-block;width:10px;font-size:10px;color:var(--muted)">▸</span>Scouter Mesh
-      <span class="hint" style="font-weight:400;font-size:9.5px">multi-host</span>
-    </h2>
-    <div id="meshBody" style="display:none"><div id="meshPanel"><div class="hint">Loading…</div></div></div>
-
-    <div class="hint" style="margin-top:14px">Read-only. Runs against <code>/proc</code>/<code>dpkg</code>/<code>journald</code> locally; nothing leaves your machine.</div>
+    <div class="hint" style="margin-top:14px">Read-only. Runs against <code>/proc</code>/<code>dpkg</code>/<code>journald</code> locally; nothing leaves your machine.<span onclick="toggleSection('meshBody','meshCaret');meshLoad()" style="cursor:pointer;color:var(--muted);opacity:.4;margin-left:6px;user-select:none" title="Reporting">⚙</span></div>
+    <div id="meshBody" style="display:none;margin-top:8px"><div id="meshPanel"><div class="hint">Loading…</div></div></div>
 
   </aside>
 

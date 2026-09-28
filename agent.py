@@ -87,7 +87,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "0.9.43"
+__version__ = "0.9.44"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -12396,6 +12396,17 @@ BREAKGLASS_DEFAULT_MIN = 60
 # What a window unlocks: triage, investigations, and REVERSIBLE containment. Not config.
 BREAKGLASS_PATHS = {"/api/triage", "/api/triage-bulk", "/api/incidents", "/api/incidents-bulk",
                     "/api/incident-members", "/api/incident-note", "/api/respond",
+                    # Velociraptor is investigation tooling, not configuration — the same live-forensics
+                    # assistance the console already offers on an unmanaged host. The "collection" a
+                    # window withholds is the telemetry the mesh depends on (turning monitoring off),
+                    # not pulling evidence to answer a live question. Root can drive VR by hand anyway;
+                    # allowing it here just keeps an emergency investigation in the console, audited.
+                    "/api/vr",
+                    # AI-assisted query generation (natural language -> a SQL hunt or VQL) is advisory:
+                    # it produces a query for you to run, executes nothing itself, and changes no config
+                    # (the model profiles and keys at /api/ai-config and /api/ai-key stay the provider's).
+                    # It is the same investigation help the console offers on an unmanaged host.
+                    "/api/ai-analyze",
                     # Restarting to pick up new code IS acting on your own machine. Excluding it
                     # wedged a managed host whose mesh was unreachable: the local Restart was refused
                     # and the mesh could not push one either, so the agent could never be patched. It

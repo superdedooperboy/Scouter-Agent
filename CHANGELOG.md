@@ -12,6 +12,42 @@ console toward XDR — pluggable connectors for non-endpoint telemetry (firewall
 cloud), cross-source entity correlation, and cross-source response, with a bounded,
 retention-light central store._
 
+## macOS agent 0.9.44 / Linux agent 0.9.41 — 2026-09-28
+
+### Added
+
+**Investigation assistance works during a break-glass window.** On a managed host every write path
+is refused unless it is on the break-glass allow-list, and two things an analyst reaches for
+mid-investigation were not on it: live Velociraptor forensics (`/api/vr` — start / download / query
+/ stop) and AI-assisted query generation (`/api/ai-analyze` — natural language to a SQL hunt or VQL).
+So an open window could triage and contain but could neither pull evidence nor ask the model to draft
+the query to find it. Both are now allowed. Neither is configuration: VR is the same live-forensics
+tooling the console offers on an unmanaged host, and query generation is advisory — it produces a
+query for you to run, executes nothing itself, and leaves the model profiles and keys
+(`/api/ai-config`, `/api/ai-key`) with the provider. The scope is otherwise unchanged: a window still
+never reaches the mesh link, the monitoring the mesh depends on, or response settings.
+
+**A break-glass window is now impossible to miss.** The old indicator only rendered on a managed
+host and reused the muted grey managed bar, so on an unmanaged machine an open window showed nothing
+at all. It is now a distinct amber banner with a live countdown, who opened it and why, shown on any
+host whenever a window is open and superseding the quiet managed bar while active. The console's
+break-glass help now names investigation, including live Velociraptor forensics, among what a window
+covers.
+
+### Changed
+
+**Scouter Mesh is no longer described in the agent's README, nor foregrounded in its sidebar.** The
+agent is a host-only tool by default; the multi-host console it can report to is a separate product,
+and documenting it here invited questions and implied every user would have it. The README now covers
+the agent alone — two whole sections and the scattered "the Mesh does X" asides are gone, the
+standalone features that leaned on Mesh framing (chat alerts, auto-hunt) are kept but reworded, and a
+single terse `--mesh-url` mention remains for pointing at a compatible aggregator you run. In the
+sidebar, the prominent **Scouter Mesh** panel header is demoted to a small, unobtrusive control.
+Nothing about reporting behaviour changed — it still works exactly as before when configured.
+
+_(The intervening agent releases 0.9.37–0.9.43 are documented in the Mesh changelog, which has been
+carrying the combined agent + Mesh history; this repository's changelog resumes here.)_
+
 ## macOS agent 0.9.36 / Linux agent 0.9.33 — 2026-09-23
 
 ### Added

@@ -5681,7 +5681,7 @@ function vrLogRender(s){
   if(rt) rt.style.display = s.running ? 'none' : '';
 }
 async function vrLogRetry(){ vrLogClose(); await vrLaunch(); }
-// ---- Active response (Scouting / Defensive / Counter-Offensive) ----
+// ---- Automatic response (Scouting / Defensive / Counter-Offensive) ----
 let respState=null;
 const RESP_LABEL={scouting:'Scouting',defensive:'Defensive',counter:'Counter-Offensive'};
 const RESP_COLOR={scouting:'var(--muted)',defensive:'var(--accent)',counter:'var(--tint-hot-txt)'};

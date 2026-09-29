@@ -703,9 +703,9 @@ own custom rules (this section), and the threat-intel feeds.
 
 ### Built-in ATT&CK detections (always on)
 
-The agent ships ~37 built-in behavioral detections mapped to MITRE ATT&CK, covering the macOS
-techniques exercised by Red Canary's Atomic Red Team — the *technique*, not any one test's
-literal command. They're evaluated against every process / listener / connection each snapshot (same
+The agent ships a continuously curated library of 100+ built-in behavioral detections mapped to
+MITRE ATT&CK. They match the *technique* — the command-line / process behavior, lineage and rarity —
+rather than any one tool's byte-for-byte command line. They're evaluated against every process / listener / connection each snapshot (same
 engine as custom rules), flag the node with a `Detection: <name>` reason + ATT&CK tag, and have
 read-only logic (code-maintained, can't be edited away) — though you can change any built-in's
 severity (or reset it) from its detail pane in the Built-in detections · ATT&CK list.
@@ -983,10 +983,30 @@ the next step after reading an alert is almost always pasting it somewhere.
 
 ## Deep DFIR — Velociraptor
 
-When the scouter spots something worth a deeper look, Scouter can spin up a local, standalone
-instance of [Velociraptor](https://docs.velociraptor.app/) — the open-source DFIR platform — and
-hand you straight into its web GUI — no manual install required. It lives in the Hunt tab, as a
-chip at the end of the canned-query row — a natural "go deeper" extension of in-platform hunting.
+When the scouter spots something worth a deeper look, Scouter reaches for
+[Velociraptor](https://docs.velociraptor.app/) — the open-source DFIR platform — two ways, both from
+the Hunt tab and neither needing a manual install: run a single VQL query **inside Scouter's own UI**
+and read the rows right here, or spin up the full standalone Velociraptor GUI for a deeper session.
+
+### VQL from the Hunt tab (no GUI needed)
+
+Flip the Hunt tab from **History · SQL** to **🦖 Velociraptor · VQL** and you get a VQL console
+without leaving Scouter: a row of canned queries, a query box, and **▶ Run VQL on This Mac**. The
+query runs *headlessly* — `velociraptor query`, no server and no separate GUI — on the machine in
+front of you, and the rows come back inline in Scouter's own results table, the same place a SQL hunt
+lands.
+
+**Ask in plain English.** The **🤖 Generate VQL** button turns a natural-language question ("list
+processes with a connection to a public IP", "recently modified launch agents") into a VQL query
+using your configured AI model. It only *drafts* the query into the box — AI-written VQL is never run
+for you; you read it and click Run. Because VQL can execute programs, this path is disabled on a
+`--no-response` (locked) agent, and every query it runs is written to the response audit log.
+
+### The full Velociraptor GUI
+
+For a deeper session, Scouter can also spin up a local, standalone Velociraptor instance and hand you
+straight into its own web GUI. It lives in the same Hunt tab, as a chip at the end of the canned-query
+row.
 
 Zero-setup path: if no `velociraptor` binary is found, the Hunt-tab chip reads ⬇ Get
 Velociraptor. Click it (you'll get a confirm), and Scouter downloads the official binary for your
@@ -1060,7 +1080,7 @@ Velociraptor, which is mere aggregation. The obligations only kick in if you red
 Not legal advice — but follow the list and a personal-use bundle is well within bounds. When in doubt,
 read the `LICENSE` in the exact release you ship and Rapid7's current Velociraptor licensing notes.
 
-## Active response (containment / remediation)
+## Automatic response (containment / remediation)
 
 Scouter is read-only by default, but can optionally take containment and remediation actions.
 There are three postures, shown by the animated mode pill in the header (each with its own
@@ -1750,9 +1770,9 @@ by design, never in a copyable file) — just re-enter them in the sidebar on th
   `disabled*.plist` files, SSH `authorized_keys`, shell-history files, enumerates local
   accounts/groups via `dscl`, and queries defense state
   (`socketfilterfw`/`csrutil`/`spctl`/`fdesetup`, all read-only). It installs nothing, kills nothing,
-  and changes nothing. Active response is strictly opt-in — write actions never run until you
+  and changes nothing. Automatic response is strictly opt-in — write actions never run until you
   deliberately arm Defensive or Counter-Offensive mode in the UI (the default is read-only
-  Scouting; `--no-response` hard-locks it). See [Active response](#active-response-containment--remediation).
+  Scouting; `--no-response` hard-locks it). See [Automatic response](#automatic-response-containment--remediation).
 - Localhost UI; raw telemetry stays on the host. The server binds to `127.0.0.1` and
   never serves your telemetry off the machine. The history database and triage state are
   plain local files (`mtv-history.db`, `triage.json`) next to `agent.py`. (Note:

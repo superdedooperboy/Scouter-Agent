@@ -38,7 +38,7 @@ against Linux primitives (`/proc`, `systemd`, `dpkg`, `journald`, `/etc`).
 | Downloads (Mark-of-the-Web) | `com.apple.quarantine` xattr | `user.xdg.origin.url` xattr | ✅ ported |
 | Shell history collector | bash/zsh | bash/zsh (portable) | ✅ ported |
 | Behavioral detection rules | macOS TTPs | Linux TTPs | ✅ ported |
-| Active response / AI / Velociraptor | native | nftables/systemctl/signals | 🅿️ phase 2 |
+| Automatic response / AI / Velociraptor | native | nftables/systemctl/signals | 🅿️ phase 2 |
 
 Frontend (`index.html`) is functionally compatible — signature badges render the new
 `packaged`/`unpackaged`/`modified` categories generically. Some macOS-flavored UI copy

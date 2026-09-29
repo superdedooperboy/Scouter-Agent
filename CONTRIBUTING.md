@@ -114,4 +114,4 @@ Employer IP clauses commonly cover side projects, and sorting that out up front 
 as much as the project.
 
 By contributing, you agree that your contributions are licensed under the project's
-[MIT License](LICENSE).
+[Apache License 2.0](LICENSE).

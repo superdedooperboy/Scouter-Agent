@@ -10,7 +10,7 @@
   <img alt="Platforms: macOS and Linux" src="https://img.shields.io/badge/platform-macOS_%7C_Linux-2b2f3a?style=flat-square">
   <img alt="Python 3, standard library only" src="https://img.shields.io/badge/python-3_stdlib_only-3776ab?style=flat-square">
   <img alt="Read-only sensor" src="https://img.shields.io/badge/sensor-read--only-3fb950?style=flat-square">
-  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-ff3b3b?style=flat-square">
+  <img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache_2.0-ff3b3b?style=flat-square">
 </p>
 
 Assess threats to your machine like a true Saiyan. How else will you know when you're facing a power level that's OVER 9000?!

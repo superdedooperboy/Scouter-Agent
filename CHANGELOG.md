@@ -12,6 +12,18 @@ console toward XDR — pluggable connectors for non-endpoint telemetry (firewall
 cloud), cross-source entity correlation, and cross-source response, with a bounded,
 retention-light central store._
 
+## macOS agent 1.0.0 / Linux agent 1.0.0 — 2026-09-28
+
+### Public launch
+
+First public open-source release. Both agents move to **1.0.0**, the version this project reserved for
+the launch. No behavioural change from 0.9.44 / 0.9.41 — this release makes the repository the one the
+world sees.
+
+- The built-in update check now queries this repository's releases
+  (`superdedooperboy/Scouter-Agent`) instead of a private one, so a public install can actually find a
+  newer version. The issue template's "report a vulnerability" link points here too.
+
 ## macOS agent 0.9.44 / Linux agent 0.9.41 — 2026-09-28
 
 ### Added
@@ -1173,17 +1185,3 @@ macOS and Linux — a native agent per OS, one graph UI, one mesh.
   push (set each feature's settings and account once, distribute over the encrypted relay).
 
 <!-- mesh-only:end -->
-
-[Unreleased]: https://github.com/superdedooperboy/Scouter/compare/mesh-v0.9.4...HEAD
-[0.9.4]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.9.4
-[0.9.3]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.9.3
-[0.9.2]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.9.2
-[0.9.1]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.9.1
-[0.9.0]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.9.0
-[0.8.0]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.8.0
-[0.7.0]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.7.0
-[0.6.0]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.6.0
-[0.5.0]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.5.0
-[0.4.1]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.4.1
-[0.4.0]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.4.0
-[0.3.0]: https://github.com/superdedooperboy/Scouter/releases/tag/mesh-v0.3.0

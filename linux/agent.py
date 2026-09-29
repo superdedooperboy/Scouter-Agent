@@ -89,12 +89,12 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "0.9.41"
+__version__ = "1.0.0"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
 USER_AGENT = f"LinuxScouter/{__version__}"          # sent on every outbound HTTP request
-REPO_SLUG = "superdedooperboy/Scouter"    # GitHub repo the update-check queries
+REPO_SLUG = "superdedooperboy/Scouter-Agent"    # GitHub repo the update-check queries
 RELEASE_TAG_PREFIX = "linux-v"                 # per-platform release tags in the shared repo
 UPDATE_CHECK_FILE = os.path.join(HERE, "update-check.json")
 

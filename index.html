@@ -3587,6 +3587,7 @@ let detSel=null;    // {source:'node'|'sql'|'builtin', idx} — rule whose logic
 let aiDetQ='';                                    // natural-language detection prompt (survives re-renders)
 let aiDetState={msg:'',col:'var(--muted)'};       // status line under the AI-detection bar
 let detBuiltinOpen=false;   // built-in ATT&CK rule list collapsed by default
+let detMeshBuiltinOpen=false;   // Mesh-managed built-in live rules: collapsed by default
 // rule name -> {explanation, mitre, builtin}; lets alert detail show a rule's methodology
 // even for older alerts that predate rule-hit persistence (looked up by name from reasons).
 let ruleExpl={};
@@ -3693,7 +3694,11 @@ function renderDetections(){
   const mn=detData.mesh_node_rules||[], ms=detData.mesh_sql_rules||[];
   if(detData.mesh_managed && (mn.length||ms.length)){
     h+='<div class="drsec"><h3>\ud83d\udef0 Mesh-managed rules ('+(mn.length+ms.length)+') <span style="text-transform:none;font-weight:400">\u2014 pushed from the Mesh, read-only</span></h3>'+
-       mn.map((r,i)=>detMeshCard(r,i,'meshnode')).join('')+ms.map((r,i)=>detMeshCard(r,i,'meshsql')).join('')+'</div>';
+       (()=>{const bi=[],cu=[];mn.forEach((r,i)=>{(r.builtin?bi:cu).push([r,i]);});
+         let out=cu.map(([r,i])=>detMeshCard(r,i,'meshnode')).join('')+ms.map((r,i)=>detMeshCard(r,i,'meshsql')).join('');
+         if(bi.length){out+='<div style="cursor:pointer;user-select:none;margin:10px 0 4px;font-weight:600;font-size:12px;color:var(--muted)" onclick="detMeshBuiltinOpen=!detMeshBuiltinOpen;renderDetections()">'+(detMeshBuiltinOpen?'▾':'▸')+' Live rules · ATT&amp;CK ('+bi.length+') — curated library, read-only</div>';
+           if(detMeshBuiltinOpen)out+=bi.map(([r,i])=>detMeshCard(r,i,'meshnode')).join('');}
+         return out;})()+'</div>';
   }
   const br=detData.builtin_rules||[];
   if(br.length){

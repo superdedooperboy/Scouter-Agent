@@ -6,6 +6,10 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+### Fixed
+
+**On a Mesh-managed host, the Detections page now shows every rule the Mesh pushes.** The built-in live-rule library (100+ node rules) was filtered out of the "Mesh-managed rules" list while the built-in SQL detections were shown, so the live rules looked missing. All Mesh-pushed rules now appear together under "Mesh-managed rules", with the large built-in library collapsed by default and expandable — the SQL detections and any Mesh-authored customs stay visible.
+
 ## macOS agent 1.0.0 / Linux agent 1.0.0 — 2026-09-28
 
 The first public, open-source release of Scouter — a dependency-free (pure Python 3 standard

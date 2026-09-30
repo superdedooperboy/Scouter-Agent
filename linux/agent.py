@@ -13216,9 +13216,13 @@ def make_handler(cache):
                     mesh_n = [dict(r) for r in cache.rules.mesh_node_rules]
                     self._send_json({"enabled": True, "mesh_managed": True,
                                      "mesh_version": cache.rules.mesh_version,
-                                     "builtin_rules": [dict(r, default_severity=r.get("severity"))
-                                                       for r in mesh_n if r.get("builtin")],
-                                     "mesh_node_rules": [r for r in mesh_n if not r.get("builtin")],
+                                     # All Mesh-pushed rules (the built-in library + any Mesh customs)
+                                     # show together under "Mesh-managed rules"; the big built-in library
+                                     # collapses by default in the UI. Splitting the built-in NODE rules
+                                     # off here is what made the 110 live rules look missing on a managed
+                                     # host, while the built-in SQL detections stayed visible.
+                                     "builtin_rules": [],
+                                     "mesh_node_rules": mesh_n,
                                      "mesh_sql_rules": [dict(r) for r in cache.rules.mesh_sql_rules],
                                      "node_rules": cache.rules.snapshot_node_rules(),
                                      "sql_rules": cache.rules.snapshot_sql_rules(),

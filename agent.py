@@ -7372,13 +7372,36 @@ class AlertLifecycle:
         if not nid:
             return
         sev = node.get("severity")
+        # Confidence seed for the metrics flow (Sankey): how far THIS alert's own evidence carries,
+        # independent of any case it may later join (with_case=False — case promotion is volatile and
+        # not what we want to bucket a historical alert by). Tracked at peak, same as severity.
+        try:
+            conf_rank = _plan_confidence(node, with_case=False)
+        except Exception:
+            conf_rank = _SEV_CONFIDENCE.get(sev or "info", 2)
+        tech = self._primary_technique(node)
+        source = self._detection_source(node)
         with self.lock:
             rec = self.data.get(nid)
             if rec:
+                changed = False
                 if self._SEV_RANK.get(sev, 0) > self._SEV_RANK.get(rec.get("severity") or "info", 0):
                     prev = rec.get("severity")
                     rec["severity"] = sev
                     rec["events"].append(self._ev("escalate", f"Severity escalated {prev} → {sev}"))
+                    changed = True
+                if conf_rank > (rec.get("confidence_rank") or 0):
+                    rec["confidence_rank"] = conf_rank
+                    changed = True
+                if tech and not rec.get("technique"):
+                    rec["technique"] = tech
+                    changed = True
+                # intel can resolve after the first alert (a hash lands, then VT convicts it); let the
+                # source upgrade to that stronger signal, but never downgrade it.
+                if source == "threat-intel" and rec.get("source") != "threat-intel":
+                    rec["source"] = "threat-intel"
+                    changed = True
+                if changed:
                     self._save()
                 return
             gen = now_ms()
@@ -7389,7 +7412,8 @@ class AlertLifecycle:
             # mis-flagged as pre-existing.
             pre_existing = landing is not None and landing < (self.start_ms - 2000)
             rec = {"type": node.get("type"), "label": node.get("label"),
-                   "severity": node.get("severity"), "landing_ms": landing,
+                   "severity": node.get("severity"), "confidence_rank": conf_rank,
+                   "technique": tech, "source": source, "landing_ms": landing,
                    "generated_ms": gen, "first_status_ms": None, "first_action_ms": None,
                    "closed_ms": None, "status": "open", "pre_existing": pre_existing, "events": []}
             rec["events"].append(self._ev("alert", f"Alert generated (severity {node.get('severity')})"
@@ -7406,6 +7430,8 @@ class AlertLifecycle:
             if status == "closed" and rec.get("closed_ms") is None:
                 rec["closed_ms"] = t
             rec["status"] = status
+            if substatus:
+                rec["substatus"] = substatus   # final disposition, for the metrics flow (Sankey)
             label = f"Status → {status}" + (f" ({substatus})" if substatus else "")
             rec["events"].append(self._ev("status", label, reason or note, auto))
             self.data[nid] = rec
@@ -7462,7 +7488,204 @@ class AlertLifecycle:
         rec = self.data.get(nid)
         return self._metrics(rec) if rec else {}
 
-    def aggregate(self, since_ms=None, until_ms=None):
+    # -- Metrics flows (Sankey) ---------------------------------------------------------------------
+    # Five flows over the alerts in the window, each three stacked columns whose band widths are alert
+    # counts. The frontend owns column titles, labels and colors (keyed by the machine keys below);
+    # keys are canonical so the Mesh can merge host flows without renaming. Within a single flow every
+    # key is unique across its three columns (the lifecycle stage column is namespaced 'lc-*' so it
+    # does not collide with the disposition column that reuses 'auto-closed'/'open').
+    _FLOW_SEV = ("critical", "high", "medium", "low", "info")
+    _FLOW_CONF = ("certain", "strong", "probable", "weak")
+    _FLOW_DISP = ("malicious", "security-testing", "benign", "false-positive",
+                  "auto-closed", "open", "closed-unknown")
+    _FLOW_HANDLING = ("automatic", "manual", "untouched")
+    _FLOW_OUTCOME = ("contained", "reversed", "closed", "open")
+    _FLOW_LCSTAGE = ("lc-autoclosed", "lc-investigated", "lc-untouched")
+    _FLOW_SOURCE = ("threat-intel", "sql", "live-rule", "custom", "heuristic")
+    _FLOW_CORR = ("correlated", "standalone")
+    _FLOW_CASESEV = ("critical", "high", "medium", "low", "info", "none")
+    _DISP_FROM_SUB = {"Malicious": "malicious", "Security Testing": "security-testing",
+                      "Benign": "benign", "False Positive": "false-positive",
+                      "Auto-closed": "auto-closed", "Unknown": "closed-unknown"}
+    _UNDO_RE = re.compile(r"^(undo|unisolate|un-isolate|restore|re-enable|unquarantine|release)", re.I)
+
+    # -- per-alert attributes the flows bucket on -----------------------------
+    @staticmethod
+    def _primary_technique(node):
+        """The ATT&CK technique id that best represents this alert: the highest-confidence rule hit
+        carrying a technique, else the first reason that names one. None if the alert has no mapping."""
+        d = node.get("detail") or {}
+        best, bestc = None, -1
+        for h in (d.get("rule_hits") or []):
+            if h.get("mitre") and int(h.get("confidence") or 0) > bestc:
+                best, bestc = h.get("mitre"), int(h.get("confidence") or 0)
+        if best:
+            return best
+        for rr in (node.get("reasons") or []):
+            if rr.get("mitre"):
+                return rr.get("mitre")
+        return None
+
+    @staticmethod
+    def _detection_source(node):
+        """Which detection family surfaced this alert. Threat-intel (an IOC feed or a VirusTotal
+        conviction) is the most decisive independent signal, so it wins; then the SQL engine, then the
+        curated live-rule library, then an operator's own rule, and finally pure score heuristics."""
+        d = node.get("detail") or {}
+        vt = d.get("vt") or {}
+        vt_mal = vt.get("status") == "done" and int(vt.get("malicious", 0) or 0) > 0
+        if d.get("ioc") or vt_mal:
+            return "threat-intel"
+        if d.get("category") == "sql":
+            return "sql"
+        hits = d.get("rule_hits") or []
+        if any(h.get("builtin") for h in hits):
+            return "live-rule"
+        if hits:
+            return "custom"
+        return "heuristic"
+
+    @classmethod
+    def _disposition(cls, rec):
+        """Where this alert ended up. Anything not closed is 'open' (open + investigating collapse —
+        it has not resolved yet). A closed alert is bucketed by its substatus; records written before
+        substatus was tracked fall back to parsing the last status event, then to closed-unknown."""
+        if (rec.get("status") or "open") != "closed":
+            return "open"
+        sub = rec.get("substatus")
+        if sub in cls._DISP_FROM_SUB:
+            return cls._DISP_FROM_SUB[sub]
+        for ev in reversed(rec.get("events") or []):
+            if ev.get("kind") == "status":
+                m = re.search(r"\(([^)]+)\)", ev.get("detail") or "")
+                if m and m.group(1) in cls._DISP_FROM_SUB:
+                    return cls._DISP_FROM_SUB[m.group(1)]
+                break
+        return "closed-unknown"
+
+    @classmethod
+    def _confidence_key(cls, rec):
+        rank = rec.get("confidence_rank")
+        if rank in CONFIDENCE_NAME:
+            return CONFIDENCE_NAME[rank]
+        # pre-confidence records: seed from severity so they still land in a sensible band
+        return CONFIDENCE_NAME.get(_SEV_CONFIDENCE.get(rec.get("severity") or "info", 2), "probable")
+
+    @staticmethod
+    def _handling(rec):
+        """Who moved this alert: the machine (any auto status/action), an operator (a manual status
+        change or action), or nobody yet."""
+        evs = rec.get("events") or []
+        if any(e.get("auto") for e in evs if e.get("kind") in ("status", "action", "auto-action")):
+            return "automatic"
+        if rec.get("first_status_ms") or rec.get("first_action_ms"):
+            return "manual"
+        return "untouched"
+
+    @classmethod
+    def _outcome(cls, rec):
+        """What became of the response: a containment that was later undone, a containment that stuck,
+        a close with no action, or still open with no action."""
+        evs = rec.get("events") or []
+        if any(cls._UNDO_RE.match(e.get("detail") or "")
+               for e in evs if e.get("kind") in ("action", "auto-action")):
+            return "reversed"
+        if rec.get("first_action_ms"):
+            return "contained"
+        if (rec.get("status") or "open") == "closed":
+            return "closed"
+        return "open"
+
+    @classmethod
+    def _lifecycle_stage(cls, rec):
+        if cls._disposition(rec) == "auto-closed":
+            return "lc-autoclosed"
+        if rec.get("first_status_ms") or rec.get("first_action_ms"):
+            return "lc-investigated"
+        return "lc-untouched"
+
+    # -- generic builder + the five flow definitions --------------------------
+    @staticmethod
+    def _build_flow(fid, items, keyfn, orders, dynamic=(), cap=None):
+        """One 3-column flow. `items` is a list of (nid, rec); `keyfn(nid, rec)` returns a (k0,k1,k2)
+        triple or None to drop the alert from this flow. `orders[i]` is the canonical key order for
+        column i; a column index listed in `dynamic` is ordered by descending count instead, and when
+        `cap` is set its long tail past `cap` entries is folded into a single '__other__' node so a
+        high-cardinality column (techniques) stays readable without losing any alerts."""
+        triples = [ks for ks in (keyfn(nid, rec) for nid, rec in items) if ks]
+        total = len(triples)
+        remap = {}
+        for i in dynamic:
+            if not cap:
+                continue
+            counts = {}
+            for ks in triples:
+                counts[ks[i]] = counts.get(ks[i], 0) + 1
+            tail = sorted(counts, key=lambda k: (-counts[k], str(k)))[cap - 1:]
+            if len(counts) > cap:
+                for k in tail:
+                    remap[(i, k)] = "__other__"
+        ab, bc = {}, {}
+        tots = ({}, {}, {})
+        for ks in triples:
+            k0, k1, k2 = (remap.get((0, ks[0]), ks[0]), remap.get((1, ks[1]), ks[1]),
+                          remap.get((2, ks[2]), ks[2]))
+            ab[(k0, k1)] = ab.get((k0, k1), 0) + 1
+            bc[(k1, k2)] = bc.get((k1, k2), 0) + 1
+            for i, k in enumerate((k0, k1, k2)):
+                tots[i][k] = tots[i].get(k, 0) + 1
+
+        def col(i):
+            if i in dynamic:    # by count desc, '__other__' always last
+                return [[k, v] for k, v in sorted(tots[i].items(),
+                                                   key=lambda kv: (kv[0] == "__other__", -kv[1], str(kv[0])))]
+            return [[k, tots[i][k]] for k in orders[i] if tots[i].get(k)]
+        columns = [col(0), col(1), col(2)]
+        order_index = {k: i for i, k in enumerate(k for c in columns for k, _ in c)}
+        links = [[a, b, n] for (a, b), n in ab.items()] + [[a, b, n] for (a, b), n in bc.items()]
+        links.sort(key=lambda l: (order_index.get(l[0], 999), order_index.get(l[1], 999)))
+        return {"id": fid, "columns": columns, "links": links, "total": total}
+
+    def _flows(self, items, case_index=None):
+        case_index = case_index or {}
+
+        signal = self._build_flow("signal", items,
+                                  lambda nid, r: (r.get("severity") or "info",
+                                                  self._confidence_key(r), self._disposition(r)),
+                                  (self._FLOW_SEV, self._FLOW_CONF, self._FLOW_DISP))
+
+        tactic_order = tuple(t[0] for t in ENTERPRISE_TACTICS) + ("unmapped",)
+
+        def attack_key(nid, r):
+            tech = r.get("technique")
+            if not tech:
+                return None                       # an ATT&CK flow only charts alerts that map to one
+            return (technique_tactic(tech) or "unmapped", str(tech).upper(), self._disposition(r))
+        attack = self._build_flow("attack", items, attack_key,
+                                  (tactic_order, (), self._FLOW_DISP), dynamic=(1,), cap=10)
+        attack["meta"] = {t: {"color": (technique_tactic(t) or "unmapped")}
+                          for t, _ in attack["columns"][1] if t != "__other__"}
+
+        response = self._build_flow("response", items,
+                                    lambda nid, r: (self._confidence_key(r),
+                                                    self._handling(r), self._outcome(r)),
+                                    (self._FLOW_CONF, self._FLOW_HANDLING, self._FLOW_OUTCOME))
+
+        lifecycle = self._build_flow("lifecycle", items,
+                                     lambda nid, r: ("raised", self._lifecycle_stage(r),
+                                                     self._disposition(r)),
+                                     (("raised",), self._FLOW_LCSTAGE, self._FLOW_DISP))
+
+        def corr_key(nid, r):
+            src = r.get("source") or "heuristic"
+            sev = case_index.get(nid)
+            return (src, "correlated", sev) if sev else (src, "standalone", "none")
+        correlation = self._build_flow("correlation", items, corr_key,
+                                       (self._FLOW_SOURCE, self._FLOW_CORR, self._FLOW_CASESEV))
+
+        return [signal, attack, response, lifecycle, correlation]
+
+    def aggregate(self, since_ms=None, until_ms=None, case_index=None):
         """Lifecycle metrics, optionally over a window.
 
         An alert belongs to a period by WHEN IT WAS RAISED (generated_ms), not when it was closed:
@@ -7471,12 +7694,13 @@ class AlertLifecycle:
         keys = ("ttd_ms", "tti_ms", "ttr_ms", "ttc_ms")
         buckets = {k: [] for k in keys}
         ttd_excluded = 0
-        recs = list(self.data.values())
+        items = list(self.data.items())
         if since_ms is not None or until_ms is not None:
             lo = since_ms if since_ms is not None else float("-inf")
             hi = until_ms if until_ms is not None else float("inf")
-            recs = [r for r in recs
-                    if r.get("generated_ms") is not None and lo <= r["generated_ms"] <= hi]
+            items = [(nid, r) for nid, r in items
+                     if r.get("generated_ms") is not None and lo <= r["generated_ms"] <= hi]
+        recs = [r for _, r in items]
         total = len(recs)
         for rec in recs:
             m = self._metrics(rec)
@@ -7498,7 +7722,8 @@ class AlertLifecycle:
             return {"n": len(sv), "avg_ms": round(sum(sv) / len(sv)),
                     "median_ms": round(med), "min_ms": sv[0], "max_ms": sv[-1]}
         return {"alerts": total, "ttd_pre_existing_excluded": ttd_excluded,
-                "metrics": {k: summ(buckets[k]) for k in keys}}
+                "metrics": {k: summ(buckets[k]) for k in keys},
+                "flows": self._flows(items, case_index)}
 
 
 # ---------------------------------------------------------------------------
@@ -15347,7 +15572,17 @@ def make_handler(cache):
                         return None
                 since, until = _ms("from"), _ms("to")
                 if cache.lifecycle:
-                    agg = cache.lifecycle.aggregate(since_ms=since, until_ms=until)
+                    # node_id -> case severity, for the correlation flow. Built from current cases
+                    # (membership is a live, after-the-fact property, not something the alert record
+                    # can carry): only real correlations, i.e. cases of two or more members.
+                    case_index = {}
+                    if cache.incidents:
+                        for inc in cache.incidents.list():
+                            if inc.get("size", 0) >= 2 or len(inc.get("members") or []) >= 2:
+                                sev = inc.get("severity") or "info"
+                                for m in (inc.get("members") or []):
+                                    case_index[m] = sev
+                    agg = cache.lifecycle.aggregate(since_ms=since, until_ms=until, case_index=case_index)
                     agg["window"] = {"from": since, "to": until}
                     self._send_json(agg)
                 else:

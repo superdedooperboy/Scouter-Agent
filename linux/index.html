@@ -179,6 +179,10 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
     font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-text-size-adjust:100%;overflow:hidden}
   #app{display:grid;grid-template-columns:300px 1fr 360px;grid-template-rows:auto 1fr;height:100%}
+  /* Metrics is an analytical, full-width view — the node-inspector rail on the right has nothing to
+     show there, so reclaim it and let the content (metric cards + the detection-flow Sankey) breathe.
+     Above the mobile breakpoint only; under 900px the asides already overlay. */
+  @media(min-width:901px){ #app.nodetail{grid-template-columns:300px 1fr} #app.nodetail>aside.right{display:none} }
   header{grid-column:1/-1;display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;
     min-height:48px;padding:5px 14px;
     background:var(--hdr-bg);border-bottom:1px solid var(--line);z-index:30}
@@ -300,7 +304,8 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   #incidents{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:12px}
   #attack{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:10px 12px}
   #groups{position:absolute;inset:0;overflow:hidden;display:none;background:var(--bg)}
-  #metrics .mcard{display:inline-block;vertical-align:top;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 10px 10px 0;min-width:180px}
+  #metrics .mcardrow{text-align:left}
+  #metrics .mcard{display:inline-block;vertical-align:top;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 10px 10px 0;min-width:180px;text-align:left}
   #metrics .mcard h3{margin:0 0 2px;font-size:13px}
   #metrics .mcard .big{font-size:26px;font-weight:650;color:var(--accent);font-variant-numeric:tabular-nums}
   #metrics .mcard .sub{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.6}
@@ -2614,6 +2619,7 @@ function treeSelect(id){
 // ---- tabs / meta ----
 function showTab(t){
   currentTab=t;
+  document.getElementById('app').classList.toggle('nodetail', t==='metrics');  // reclaim the unused right rail
   for(const [tab,btn] of [['graph','tabGraph'],['tree','tabTree'],['hunt','tabHunt'],['timeline','tabTimeline'],['alerts','tabAlerts'],['detections','tabDetections'],['sensors','tabSensors'],['response','tabResponse'],['metrics','tabMetrics'],['incidents','tabIncidents'],['attack','tabAttack'],['groups','tabGroups']])
     document.getElementById(btn).classList.toggle('on',t===tab);
   document.getElementById('alerts').style.display=t==='alerts'?'block':'none';
@@ -3841,17 +3847,170 @@ function renderMetrics(){
     let h=`<h2 style="margin-top:0">Response metrics</h2><div class="hint" style="margin-bottom:12px">`+
       `Rolling baseline across <b>${d.alerts||0}</b> alert(s) with lifecycle data — it builds as alerts are generated, triaged, and acted on. Times are wall-clock; lower is better.`+
       (excl?`<br><span style="color:var(--sev-medium)">${excl} pre-existing alert(s) excluded from TTD</span> (artifacts that were already on the host when monitoring started).`:'')+`</div>`;
-    h+=defs.map(([k,name,sub])=>{
+    h+='<div class="mcardrow">'+defs.map(([k,name,sub])=>{
       const s=m[k]||{};
       return `<div class="mcard"><h3>${esc(name.split(' ').map(w=>w[0]).join(''))} · ${esc(name)}</h3>`+
         `<div class="big">${s.n?fmtDur(s.median_ms):'—'}</div>`+
         `<div class="sub">median${s.n?'':' — no data yet'}`+
         (s.n?`<br>avg ${fmtDur(s.avg_ms)} · min ${fmtDur(s.min_ms)} · max ${fmtDur(s.max_ms)}<br>n = ${s.n} · <span style="opacity:.7">${esc(sub)}</span>`:'')+
         `</div></div>`;
-    }).join('');
+    }).join('')+'</div>';
     if(!d.alerts) h+='<div class="hint" style="margin-top:8px">No alerts with lifecycle data yet. Metrics populate as alerts are generated, triaged, and acted on.</div>';
+    if(Array.isArray(d.flows)&&d.flows.length){
+      h+=`<h2 style="margin-top:22px">Detection flow</h2>`+
+         `<div id="metFlowCtl" style="margin-bottom:8px"></div>`+
+         `<div id="metFlowDesc" class="hint" style="margin-bottom:10px"></div>`+
+         `<div id="metFlow" style="width:100%"></div>`;
+    }
     box.innerHTML=h;
+    if(Array.isArray(d.flows)&&d.flows.length){ metFlows=d.flows; metFlowRender(); }
   }).catch(e=>{ box.innerHTML='<div class="empty-big">Error loading metrics: '+esc(''+e)+'</div>'; });
+}
+
+// Detection-flow Sankeys. Five three-column flows over the alerts in the window; the server sends
+// canonical machine keys + counts, the frontend owns titles, labels and colors (so it all tracks the
+// palette's light/dark). Hand-drawn SVG, no chart lib. Ribbons are tinted by their SOURCE node.
+let metFlows=[], metFlowSel=null;
+const FLOW_DEFS=[
+  {id:'signal',name:'Signal',axes:['severity','confidence','disposition'],
+   desc:'How alerts flow from <b>severity</b> → detection <b>confidence</b> → triage <b>disposition</b>. The noise paths (weak → auto-closed) and the signal spine (high → certain → malicious) read at a glance.',
+   empty:'No alerts with lifecycle data in this window yet.'},
+  {id:'attack',name:'ATT&CK',axes:['tactic','technique','disposition'],
+   desc:'Which ATT&amp;CK <b>tactics</b> and <b>techniques</b> fired, and how each resolved. Techniques are colored by their tactic; the long tail folds into “other”.',
+   empty:'No alerts in this window map to an ATT&CK technique.'},
+  {id:'response',name:'Response',axes:['confidence','handling','outcome'],
+   desc:'How detection <b>confidence</b> drove the <b>handling</b> (the machine vs an operator) and the <b>outcome</b> — contained, reversed, or closed with no action.',
+   empty:'No alerts with lifecycle data in this window yet.'},
+  {id:'lifecycle',name:'Lifecycle',axes:['raised','handling','disposition'],
+   desc:'The funnel from every alert <b>raised</b> → whether it was auto-closed, investigated, or left untouched → where it <b>ended up</b>.',
+   empty:'No alerts with lifecycle data in this window yet.'},
+  {id:'correlation',name:'Correlation',axes:['source','correlation','case severity'],
+   desc:'Which <b>detection source</b> surfaced each alert, whether it <b>correlated</b> into a case, and that case’s <b>severity</b>.',
+   empty:'No alerts with lifecycle data in this window yet.'}
+];
+const FLOW_LABEL={critical:'critical',high:'high',medium:'medium',low:'low',info:'info',
+  certain:'certain',strong:'strong',probable:'probable',weak:'weak',
+  malicious:'malicious','security-testing':'security testing',benign:'benign',
+  'false-positive':'false positive','auto-closed':'auto-closed',open:'open','closed-unknown':'unknown',
+  automatic:'automatic',manual:'manual',untouched:'untouched',
+  contained:'contained',reversed:'reversed',closed:'closed',
+  'lc-autoclosed':'auto-closed','lc-investigated':'investigated','lc-untouched':'untouched',
+  'threat-intel':'threat intel',sql:'SQL','live-rule':'live rule',custom:'custom',heuristic:'heuristic',
+  correlated:'in a case',standalone:'standalone',none:'not correlated',raised:'alerts raised',
+  __other__:'other techniques'};
+const FLOW_COLOR={critical:'var(--sev-critical)',high:'var(--sev-high)',medium:'var(--sev-medium)',
+  low:'var(--sev-low)',info:'var(--sev-info)',
+  certain:'var(--good)',strong:'var(--sev-low)',probable:'var(--sev-medium)',weak:'var(--muted)',
+  malicious:'var(--sev-critical)','security-testing':'var(--purple)',benign:'var(--good)',
+  'false-positive':'var(--sev-medium)','auto-closed':'var(--muted)',open:'var(--accent)',
+  'closed-unknown':'var(--sev-info)',
+  automatic:'var(--accent)',manual:'var(--sev-low)',untouched:'var(--muted)',
+  contained:'var(--good)',reversed:'var(--sev-high)',closed:'var(--muted)',
+  'lc-autoclosed':'var(--muted)','lc-investigated':'var(--accent)','lc-untouched':'var(--sev-info)',
+  'threat-intel':'var(--sev-critical)',sql:'var(--accent)','live-rule':'var(--good)',custom:'var(--purple)',heuristic:'var(--muted)',
+  correlated:'var(--accent)',standalone:'var(--muted)',none:'var(--sev-info)',raised:'var(--accent)',
+  __other__:'var(--muted)'};
+// ATT&CK tactic id → display name + a palette color (grouped loosely by kill-chain phase; the limited
+// palette repeats across phases, which is fine — the column labels disambiguate).
+const TACTIC_META={
+  TA0043:{l:'Reconnaissance',c:'var(--muted)'},TA0042:{l:'Resource Dev',c:'var(--muted)'},
+  TA0001:{l:'Initial Access',c:'var(--accent)'},TA0002:{l:'Execution',c:'var(--sev-high)'},
+  TA0003:{l:'Persistence',c:'var(--purple)'},TA0004:{l:'Privilege Escalation',c:'var(--purple)'},
+  TA0005:{l:'Defense Evasion',c:'var(--sev-medium)'},TA0006:{l:'Credential Access',c:'var(--hot)'},
+  TA0007:{l:'Discovery',c:'var(--sev-low)'},TA0008:{l:'Lateral Movement',c:'var(--good)'},
+  TA0009:{l:'Collection',c:'var(--sev-low)'},TA0011:{l:'Command & Control',c:'var(--sev-critical)'},
+  TA0010:{l:'Exfiltration',c:'var(--accent2)'},TA0040:{l:'Impact',c:'var(--sev-critical)'},
+  unmapped:{l:'unmapped',c:'var(--muted)'}};
+function flowLabel(k,meta){
+  if(meta&&meta[k]&&meta[k].label) return meta[k].label;
+  if(TACTIC_META[k]) return TACTIC_META[k].l;
+  if(FLOW_LABEL[k]!=null) return FLOW_LABEL[k];
+  return k;                                   // technique ids (T1059.004…) fall through as-is
+}
+function flowColor(k,meta){
+  if(meta&&meta[k]&&meta[k].color) return flowColor(meta[k].color,null);   // color is a colorKey (tactic id)
+  if(TACTIC_META[k]) return TACTIC_META[k].c;
+  if(FLOW_COLOR[k]) return FLOW_COLOR[k];
+  return 'var(--muted)';
+}
+function metFlowPlaceholder(title,msg){
+  return '<div style="border:1px dashed var(--line);border-radius:10px;padding:26px 20px;text-align:center;background:var(--panel2)">'+
+    '<div style="font-size:22px;color:var(--muted);opacity:.6;margin-bottom:6px">⤳</div>'+
+    '<div style="font-size:13px;color:var(--txt);margin-bottom:4px">'+esc(title)+'</div>'+
+    '<div style="font-size:12px;color:var(--muted);max-width:460px;margin:0 auto;line-height:1.5">'+esc(msg)+'</div></div>';
+}
+function metFlowPick(id){ metFlowSel=id; try{localStorage.setItem('metFlowSel',id);}catch(e){} metFlowRender(); }
+function metFlowRender(){
+  const ctl=document.getElementById('metFlowCtl'), desc=document.getElementById('metFlowDesc'),
+        host=document.getElementById('metFlow');
+  if(!host) return;
+  const byId={}; metFlows.forEach(f=>{byId[f.id]=f;});
+  const defs=FLOW_DEFS.filter(fd=>byId[fd.id]);
+  if(!metFlows.some(f=>f.total>0)){      // quiet / newly spun-up host: one friendly placeholder, no tabs
+    if(ctl) ctl.innerHTML=''; if(desc) desc.innerHTML='';
+    host.innerHTML=metFlowPlaceholder('This host is quiet',
+      'No alerts have been raised in this window yet. The detection-flow charts fill in as alerts are generated, triaged, and acted on.');
+    return;
+  }
+  let sel=byId[metFlowSel]?metFlowSel:null;
+  if(!sel){ try{ const s=localStorage.getItem('metFlowSel'); if(byId[s]) sel=s; }catch(e){} }
+  if(!sel){ sel=(metFlows.find(f=>f.total>0)||metFlows[0]).id; }
+  metFlowSel=sel; try{localStorage.setItem('metFlowSel',sel);}catch(e){}
+  if(ctl) ctl.innerHTML=defs.map(fd=>'<button class="btn'+(fd.id===sel?' pri':'')+
+    '" style="padding:2px 10px;font-size:11px;margin:0 5px 4px 0" onclick="metFlowPick(\''+fd.id+'\')">'+
+    esc(fd.name)+'</button>').join('');
+  const def=defs.find(fd=>fd.id===sel);
+  if(desc) desc.innerHTML=def.desc;
+  drawMetricFlow(byId[sel],def);
+}
+function drawMetricFlow(fl,def){
+  const host=document.getElementById('metFlow'); if(!host) return;
+  const cols=fl.columns||[], links=fl.links||[], total=fl.total||0, meta=fl.meta||null;
+  if(!total||!cols.length){ host.innerHTML=metFlowPlaceholder('Nothing to chart here',def.empty); return; }
+  const W=880,H=400,T=44,B=16,NW=14,GAP=9,plot=H-T-B;
+  const colX=[185,440,695];
+  let maxGaps=0; cols.forEach(c=>{maxGaps=Math.max(maxGaps,(c.length-1)*GAP);});
+  const scale=(plot-maxGaps)/total;
+  const pos={}, ord=[];
+  cols.forEach((nodes,ci)=>{
+    let tot=0; nodes.forEach(n=>{tot+=n[1]*scale;}); tot+=(nodes.length-1)*GAP;
+    let y=T+(plot-tot)/2;
+    nodes.forEach(n=>{ const hgt=n[1]*scale; pos[n[0]]={x:colX[ci],y:y,h:hgt,ci:ci,val:n[1]}; ord.push(n[0]); y+=hgt+GAP; });
+  });
+  const pct=v=>Math.round(v*1000/total)/10;
+  let s='<svg class="mfsvg" viewBox="0 0 '+W+' '+H+'" width="100%" preserveAspectRatio="xMidYMid meet" '+
+    'style="display:block;overflow:visible;max-width:820px" role="img" aria-label="'+esc(def.axes.join(' to '))+' flow">';
+  s+='<style>.mfr{transition:fill-opacity .12s}.mfsvg:hover .mfr{fill-opacity:.1}.mfsvg .mfr:hover{fill-opacity:.82}</style>';
+  def.axes.forEach((t,i)=>{
+    s+='<text x="'+(colX[i]+NW/2)+'" y="28" text-anchor="'+(i===0?'start':i===2?'end':'middle')+'" '+
+       'font-size="11" letter-spacing=".04em" fill="var(--muted)">'+esc(t)+'</text>';
+  });
+  cols.forEach(c=>c.forEach(n=>{pos[n[0]].outO=0;pos[n[0]].inO=0;}));
+  links.forEach(l=>{
+    const a=pos[l[0]],b=pos[l[1]]; if(!a||!b) return;
+    const w=l[2]*scale, x0=a.x+NW, x1=b.x, y0=a.y+a.outO, y1=b.y+b.inO; a.outO+=w; b.inO+=w;
+    const xm=(x0+x1)/2;
+    const d='M'+x0+','+y0+'C'+xm+','+y0+' '+xm+','+y1+' '+x1+','+y1+
+      'L'+x1+','+(y1+w)+'C'+xm+','+(y1+w)+' '+xm+','+(y0+w)+' '+x0+','+(y0+w)+'Z';
+    s+='<path class="mfr" d="'+d+'" fill="'+flowColor(l[0],meta)+'" fill-opacity="0.3">'+
+       '<title>'+esc(flowLabel(l[0],meta))+' → '+esc(flowLabel(l[1],meta))+': '+l[2]+' ('+pct(l[2])+'%)</title></path>';
+  });
+  ord.forEach(k=>{
+    const n=pos[k], cy=n.y+n.h/2, lbl=flowLabel(k,meta);
+    s+='<rect x="'+n.x+'" y="'+n.y+'" width="'+NW+'" height="'+Math.max(1,n.h)+'" rx="2" fill="'+flowColor(k,meta)+'">'+
+       '<title>'+esc(lbl)+': '+n.val+' ('+pct(n.val)+'%)</title></rect>';
+    if(n.ci===0){
+      s+='<text x="'+(n.x-7)+'" y="'+cy+'" text-anchor="end" dominant-baseline="middle" font-size="11.5" fill="var(--txt)">'+esc(lbl)+'</text>';
+      s+='<text x="'+(n.x-7)+'" y="'+(cy+12)+'" text-anchor="end" dominant-baseline="middle" font-size="10" fill="var(--muted)">'+n.val+'</text>';
+    } else if(n.ci===1){
+      s+='<text x="'+(n.x+NW/2)+'" y="'+(n.y-4)+'" text-anchor="middle" font-size="11" fill="var(--txt)">'+esc(lbl)+' · '+n.val+'</text>';
+    } else {
+      s+='<text x="'+(n.x+NW+7)+'" y="'+cy+'" text-anchor="start" dominant-baseline="middle" font-size="11.5" fill="var(--txt)">'+esc(lbl)+'</text>';
+      s+='<text x="'+(n.x+NW+7)+'" y="'+(cy+12)+'" text-anchor="start" dominant-baseline="middle" font-size="10" fill="var(--muted)">'+n.val+'</text>';
+    }
+  });
+  s+='</svg>';
+  host.innerHTML=s;
 }
 
 // ---- threat hunting (queries the local SQLite history via /api/hunt-sql) ----

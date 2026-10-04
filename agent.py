@@ -87,7 +87,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -7808,6 +7808,222 @@ def _hkey(*parts):
     return hashlib.sha1(s.encode("utf-8", "replace")).hexdigest()[:16]
 
 
+# --- Device location by external IP (opt-in) -------------------------------------------------------
+# For the Authentications map's "device location" layer: where this machine's own public IP
+# geolocates, so a laptop that suddenly appears in another country stands out (stolen / unauthorized
+# use). OFF by default. When enabled it makes ONE outbound request to learn the public IP; geolocation
+# then happens offline against the local ipinfo DB. It uses urllib (never curl/wget), so it does not
+# trip the b-geo-disco detection, and the connection belongs to the agent's own PID, which is already
+# excluded from the graph and from detections.
+AUTHMAP_SETTINGS_FILE = os.path.join(HERE, "authmap-settings.json")
+EXTIP_SERVICES = ("https://ipinfo.io/ip", "https://api.ipify.org",
+                  "https://ifconfig.me/ip", "https://icanhazip.com")
+
+
+class ExternalIp:
+    def __init__(self, geo=None, path=AUTHMAP_SETTINGS_FILE, interval=6 * 3600):
+        self.geo = geo
+        self.path = path
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.enabled = False
+        self.ip = None
+        self.rec = None
+        self.ts = 0
+        self.error = None
+        self._load()
+
+    def attach_geo(self, geo):
+        if geo is not None:
+            self.geo = geo
+
+    def _load(self):
+        try:
+            with open(self.path) as f:
+                d = json.load(f)
+            self.enabled = bool(d.get("resolve_external_ip"))
+            self.ip = d.get("ip")
+            self.rec = d.get("rec")
+            self.ts = int(d.get("ts") or 0)
+        except (OSError, ValueError):
+            pass
+
+    def _save(self):
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"resolve_external_ip": self.enabled, "ip": self.ip,
+                           "rec": self.rec, "ts": self.ts}, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def set_enabled(self, on):
+        with self.lock:
+            self.enabled = bool(on)
+            if not self.enabled:
+                self.ip, self.rec, self.error = None, None, None
+            self._save()
+        if self.enabled:
+            self.refresh(force=True)
+        return self.status()
+
+    def _fetch_ip(self):
+        for url in EXTIP_SERVICES:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Scouter-agent"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    txt = r.read(64).decode("utf-8", "replace").strip()
+                ipaddress.ip_address(txt)        # validate it really is an IP
+                return txt
+            except Exception:                    # noqa: BLE001 — try the next service
+                continue
+        return None
+
+    def refresh(self, force=False):
+        if not self.enabled:
+            return
+        now = int(time.time())
+        if not force and self.ip and (now - self.ts) < self.interval:
+            return
+        ip = self._fetch_ip()
+        with self.lock:
+            if ip:
+                self.ip, self.ts, self.error = ip, now, None
+                try:
+                    self.rec = self.geo.lookup(ip) if (self.geo and self.geo.enabled) else None
+                except Exception:                # noqa: BLE001
+                    self.rec = None
+            else:
+                self.error = "could not reach any IP-lookup service"
+            self._save()
+
+    def maybe_refresh(self):
+        if self.enabled and (not self.ip or (int(time.time()) - self.ts) >= self.interval):
+            self.refresh()
+
+    def status(self):
+        rec = self.rec or {}
+        return {"enabled": self.enabled, "ip": self.ip,
+                "resolved": bool(self.ip and self.rec),
+                "lat": rec.get("lat"), "lng": rec.get("lng"),
+                "country": rec.get("country"),
+                "place": rec.get("summary") or rec.get("country"),
+                "ts": self.ts, "error": self.error,
+                "geo_available": bool(self.geo and self.geo.enabled)}
+
+
+_EXTERNAL_IP = None
+
+
+def external_ip(geo=None):
+    """Lazy process-wide ExternalIp, so it needn't be threaded through the cache constructor."""
+    global _EXTERNAL_IP
+    if _EXTERNAL_IP is None:
+        _EXTERNAL_IP = ExternalIp(geo)
+    else:
+        _EXTERNAL_IP.attach_geo(geo)
+    return _EXTERNAL_IP
+
+
+# Local-login source tokens (console / terminal / sudo / loopback) — these map to the DEVICE layer
+# (plotted at the machine's own external IP), as opposed to a remote source address.
+_LOCAL_AUTH_SOURCES = {"console", "sudo", "localhost", "", "127.0.0.1", "::1"}
+
+
+def _auth_category(src):
+    s = (src or "").strip().lower()
+    if s in _LOCAL_AUTH_SOURCES or s.startswith(("tty", "console", "pts", "/dev/")):
+        return "device"
+    try:
+        return "remote" if ipaddress.ip_address(src).is_global else "device"
+    except ValueError:
+        return "remote"           # a remote hostname we can't geolocate -> remote, but unmapped
+
+
+def build_auth_map(history, geo, extip, days=30):
+    """Aggregate recent auth events into map points. Remote logins plot at their source IP's
+    location; local logins plot at the device's own external-IP location (when resolved). Points are
+    grouped by (layer, success, place); anything we can't geolocate is counted as unmapped."""
+    out = {"geo_available": bool(geo and geo.enabled),
+           "external_ip": extip.status() if extip else {"enabled": False},
+           "window_days": days, "points": [],
+           "unmapped": {"remote": 0, "device": 0},
+           # Raw device (local) auth events, independent of whether THIS host resolved its own
+           # external IP. The Mesh places these at the host's observed connection IP, so device
+           # logins map fleet-wide without each agent having to make its own outbound lookup.
+           "device_events": [],
+           "totals": {"remote_ok": 0, "remote_fail": 0, "device_ok": 0, "device_fail": 0}}
+    if not history:
+        return out
+    rows = history.recent_auths(days)
+    dev = out["external_ip"]
+    agg = {}
+
+    def add(layer, success, lat, lng, country, place, user, ts, source, method):
+        k = (layer, bool(success), country or "",
+             round(lat, 1) if lat is not None else None,
+             round(lng, 1) if lng is not None else None)
+        p = agg.get(k)
+        if not p:
+            p = {"layer": layer, "success": bool(success), "lat": lat, "lng": lng,
+                 "country": country, "place": place, "count": 0,
+                 "users": set(), "sources": set(), "events": [], "last_ts": 0}
+            agg[k] = p
+        p["count"] += 1
+        if user:
+            p["users"].add(user)
+        if source:
+            p["sources"].add(source)
+        if len(p["events"]) < 200:         # recent events for drill-in (rows arrive newest-first)
+            p["events"].append([ts or 0, user or "", source or "", 1 if success else 0, method or ""])
+        p["last_ts"] = max(p["last_ts"], ts or 0)
+
+    for r in rows:
+        src = (r.get("source") or "").strip()
+        success = bool(r.get("success"))
+        ts, user, method = r.get("ts") or 0, r.get("user"), r.get("method")
+        if _auth_category(src) == "remote":
+            out["totals"]["remote_ok" if success else "remote_fail"] += 1
+            rec = None
+            try:
+                rec = geo.lookup(src) if (geo and geo.enabled and _is_ip(src)) else None
+            except Exception:                    # noqa: BLE001
+                rec = None
+            country = (rec or {}).get("country")
+            lat, lng = (rec or {}).get("lat"), (rec or {}).get("lng")
+            if not country and lat is None:
+                out["unmapped"]["remote"] += 1
+            else:
+                add("remote", success, lat, lng, country,
+                    (rec or {}).get("summary") or country or src, user, ts, src, method)
+        else:
+            out["totals"]["device_ok" if success else "device_fail"] += 1
+            if len(out["device_events"]) < 400:        # fleet-side placement material (newest-first)
+                out["device_events"].append([ts or 0, user or "", src or "local",
+                                             1 if success else 0, method or ""])
+            if dev.get("resolved"):
+                add("device", success, dev.get("lat"), dev.get("lng"), dev.get("country"),
+                    dev.get("place"), user, ts, src or "local", method)
+            else:
+                out["unmapped"]["device"] += 1
+
+    for p in agg.values():
+        p["users"] = sorted(p["users"])[:20]
+        p["sources"] = sorted(p["sources"])[:10]
+        p["events_trunc"] = p["count"] > len(p["events"])
+        out["points"].append(p)
+    return out
+
+
+def _is_ip(s):
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return False
+
+
 class HistoryDB:
     def __init__(self, enabled=True, interval=15, max_mb=0, path=HISTORY_FILE):
         self.enabled = enabled
@@ -8339,6 +8555,21 @@ class HistoryDB:
                 self.conn.commit()
             except Exception:  # noqa: BLE001
                 pass
+
+    def recent_auths(self, days=30):
+        """Auth events in the last `days`, newest first, for the Authentications map."""
+        if not self.enabled:
+            return []
+        cutoff = int(time.time()) - int(days) * 86400
+        with self.lock:
+            try:
+                cur = self.conn.execute(
+                    "SELECT ts, etype, user, source, method, success FROM auth_events "
+                    "WHERE ts >= ? ORDER BY ts DESC LIMIT 20000", (cutoff,))
+                return [{"ts": r[0], "etype": r[1], "user": r[2], "source": r[3],
+                         "method": r[4], "success": r[5]} for r in cur.fetchall()]
+            except Exception:  # noqa: BLE001
+                return []
 
     def record_exec_events(self, rows):
         """rows: (id, ts, pid, ppid, exe, cmdline, uid, signing_id, platform, first_seen, last_seen)."""
@@ -12790,7 +13021,7 @@ class MeshReporter:
                       "/api/groups", "/api/rules", "/api/suppressions", "/api/playbook",
                       "/api/alert-history", "/api/ai-analysis", "/api/health", "/api/sensors",
                       "/api/export", "/api/ioc-feeds", "/api/geoip", "/api/respond", "/api/ai",
-                      "/api/decoys"}   # fleet CONFIG read (Phase B)
+                      "/api/decoys", "/api/auth-map"}   # fleet CONFIG read (Phase B) + Mesh auth map
     VIEW_MAX_BYTES = 6 * 1024 * 1024          # cap a relayed view body (stays under the mesh ingest cap)
     # POST endpoints the mesh may drive on demand for REMOTE MANAGEMENT — only when the operator opted
     # this host into remote commands (--mesh-commands), gated by the mesh admin token.
@@ -15429,6 +15660,22 @@ def make_handler(cache):
                 self.send_header("Cache-Control", "no-store, must-revalidate")
                 self.end_headers()
                 self.wfile.write(body)
+            elif path == "/worldmap.json":
+                # Static base map for the Authentications geo view. Embedded once, served to the UI;
+                # nothing is fetched from the network to draw the map.
+                wm = os.path.join(HERE, "worldmap.json")
+                try:
+                    with open(wm, "rb") as f:
+                        blob = f.read()
+                except OSError:
+                    self.send_error(404, "worldmap.json not found next to agent.py")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(blob)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(blob)
             elif path == "/api/health":
                 self._send_json({"ok": True, "version": __version__, "euid": os.geteuid(),
                                  "privilege": "full" if os.geteuid() == 0 else "user",
@@ -15593,6 +15840,19 @@ def make_handler(cache):
                 else:
                     cache.get()   # ensure a fresh reconcile has run this cycle
                     self._send_json({"enabled": True, "incidents": cache.incidents.list()})
+            elif path == "/api/auth-map":
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                try:
+                    days = max(1, min(365, int(q.get("days", [30])[0])))
+                except (ValueError, TypeError):
+                    days = 30
+                geo = cache.enrich.geo if cache.enrich else None
+                extip = external_ip(geo)
+                extip.maybe_refresh()
+                self._send_json(build_auth_map(cache.history, geo, extip, days))
+            elif path == "/api/extip":
+                geo = cache.enrich.geo if cache.enrich else None
+                self._send_json(external_ip(geo).status())
             elif path == "/api/ai":
                 self._send_json(cache.ai.status() if cache.ai
                                 else {"enabled": False, "configured": False, "available": False})
@@ -15793,6 +16053,17 @@ def make_handler(cache):
                     cache.invalidate()
                     self._send_json({"ok": bool(rec), "incident": rec} if rec
                                     else {"ok": False, "error": "no such incident"}, status=200 if rec else 404)
+            elif u.path == "/api/extip":
+                # Opt-in: resolve this host's external IP (one outbound request) for the device
+                # layer of the Authentications map. Off by default; a deliberate operator choice.
+                length = int(self.headers.get("Content-Length") or 0)
+                raw_b = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+                try:
+                    payload = json.loads(raw_b) if raw_b else {}
+                except ValueError:
+                    payload = {}
+                geo = cache.enrich.geo if cache.enrich else None
+                self._send_json(external_ip(geo).set_enabled(bool(payload.get("enabled"))))
             elif u.path == "/api/decoys":
                 # op=set (enable/disable — disabling removes what was planted), op=replant,
                 # op=fleet-bait (the mesh syncing the fleet's bait usernames to this host).

@@ -6,7 +6,23 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.1.0 / Linux agent 1.1.0 — 2026-10-04
+
 ### Added
+
+**Authentications map — see where logins come from.** A new **Authentications** tab (just after
+Process Tree) plots this host's logins on an offline world map. **Remote** logins plot at the source
+IP's location; **device** logins (console, sudo, terminal) plot at this machine's own external-IP
+location, so a device that shows up somewhere unexpected stands out. Successful only by default, with
+a toggle to reveal failed attempts (brute-force sources); remote/device layer toggles; a
+7/30/90/365-day window; and point drill-in to the underlying events (time, user, source, method,
+status).
+
+Resolving this host's own external IP is **opt-in** — one outbound lookup over `urllib`, off by
+default — so nothing leaves the machine unless the operator asks. The base map (`worldmap.json`,
+country paths + centroids) is served locally and embedded, so nothing is fetched to draw it. The
+agent exposes the data on `/api/auth-map` (including raw `device_events`), which the Scouter Mesh
+consumes to build a fleet-wide map that places each host by its observed connection IP.
 
 **Detection-flow Sankeys on the Metrics page.** Five selectable three-column flows over the alerts
 in the current window, band width = alert count, ribbons tinted by their source:

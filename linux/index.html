@@ -301,6 +301,7 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   .dexpand:hover{color:var(--accent)}
   /* Metrics tab */
   #metrics{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:16px}
+  #auth{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:16px}
   #incidents{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:12px}
   #attack{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:10px 12px}
   #groups{position:absolute;inset:0;overflow:hidden;display:none;background:var(--bg)}
@@ -877,6 +878,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <button id="tabIncidents" onclick="showTab('incidents')">Investigations<span id="incBadge" class="tabbadge" style="display:none"></span></button>
       <button id="tabGraph" onclick="showTab('graph')">Node Graph</button>
       <button id="tabTree" onclick="showTab('tree')">Process Tree</button>
+      <button id="tabAuth" onclick="showTab('auth')">Authentications</button>
       <button id="tabHunt" onclick="showTab('hunt')">Hunt</button>
       <button id="tabTimeline" onclick="showTab('timeline')">Event Timeline</button>
       <button id="tabDetections" onclick="showTab('detections')">Detections</button>
@@ -1157,6 +1159,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     </div>
     <div id="detections"></div>
     <div id="metrics"></div>
+    <div id="auth"></div>
     <div id="response"></div>
     <div id="sensors"></div>
     <div id="timeline"></div>
@@ -2619,9 +2622,10 @@ function treeSelect(id){
 // ---- tabs / meta ----
 function showTab(t){
   currentTab=t;
-  document.getElementById('app').classList.toggle('nodetail', t==='metrics');  // reclaim the unused right rail
-  for(const [tab,btn] of [['graph','tabGraph'],['tree','tabTree'],['hunt','tabHunt'],['timeline','tabTimeline'],['alerts','tabAlerts'],['detections','tabDetections'],['sensors','tabSensors'],['response','tabResponse'],['metrics','tabMetrics'],['incidents','tabIncidents'],['attack','tabAttack'],['groups','tabGroups']])
+  document.getElementById('app').classList.toggle('nodetail', t==='metrics'||t==='auth');  // reclaim the unused right rail
+  for(const [tab,btn] of [['graph','tabGraph'],['tree','tabTree'],['hunt','tabHunt'],['timeline','tabTimeline'],['alerts','tabAlerts'],['detections','tabDetections'],['sensors','tabSensors'],['response','tabResponse'],['metrics','tabMetrics'],['auth','tabAuth'],['incidents','tabIncidents'],['attack','tabAttack'],['groups','tabGroups']])
     document.getElementById(btn).classList.toggle('on',t===tab);
+  document.getElementById('auth').style.display=t==='auth'?'block':'none';
   document.getElementById('alerts').style.display=t==='alerts'?'block':'none';
   document.getElementById('tree').style.display=t==='tree'?'block':'none';
   document.getElementById('hunt').style.display=t==='hunt'?'block':'none';
@@ -2644,6 +2648,7 @@ function showTab(t){
   if(t==='sensors') renderSensors();
   if(t==='timeline') openTimeline();
   if(t==='metrics') renderMetrics();
+  if(t==='auth') renderAuthMap();
   if(t==='incidents') openIncidents();   // one-shot load + render; no auto-refresh (use the Refresh button)
   if(t==='attack') renderAttack();
   if(t==='groups') renderGroups();
@@ -3492,6 +3497,140 @@ const OB_NAV=[['alerts','Alerts'],['incidents','Incidents'],['graph','Graph'],['
   ['metrics','Metrics'],['attack','ATT&CK'],['groups','Threat Groups']];
 let obResults=[], obSel=0, obDbTimer=null, obDbSeq=0, obAttackTried=false;
 
+// ===== Authentications map: where logins to this host come from (remote source IPs; local logins
+// at the device's own external-IP location). Hand-drawn SVG over an embedded equirectangular world
+// map — nothing is fetched to draw it. Success-only by default; a toggle reveals failed attempts. ====
+let authWorld=null, authData=null, authDays=30;
+let authLayers={device:true, remote:true}, authShowFailed=false, authSel=null;
+const AUTH_COLORS={remoteOk:'var(--accent)', remoteFail:'var(--sev-critical)',
+                   deviceOk:'var(--good)', deviceFail:'var(--sev-high)'};
+function renderAuthMap(){
+  const box=document.getElementById('auth'); if(!box) return;
+  if(!authWorld){
+    box.innerHTML='<div class="hint">Loading map…</div>';
+    fetch('/worldmap.json').then(r=>r.json()).then(w=>{ authWorld=w; authFetch(); })
+      .catch(e=>{ box.innerHTML='<div class="empty-big">Could not load the base map: '+esc(''+e)+'</div>'; });
+  } else authFetch();
+}
+function authFetch(){
+  fetch('/api/auth-map?days='+authDays).then(r=>r.json()).then(d=>{ authData=d; authDraw(); })
+    .catch(e=>{ document.getElementById('auth').innerHTML='<div class="empty-big">Error loading authentications: '+esc(''+e)+'</div>'; });
+}
+function authSetLayer(k){ authLayers[k]=!authLayers[k]; authSel=null; authDraw(); }
+function authSetFailed(){ authShowFailed=!authShowFailed; authSel=null; authDraw(); }
+function authSetDays(v){ authDays=+v||30; authSel=null; authFetch(); }
+function authToggleExtIp(on){
+  fetch('/api/extip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})})
+    .then(r=>r.json()).then(()=>authFetch()).catch(()=>authFetch());
+}
+function authProj(lon,lat){ return [ (lon+180)/360*authWorld.w, (90-lat)/180*authWorld.h ]; }
+function authPointXY(p){
+  if(p.lat!=null && p.lng!=null) return authProj(p.lng,p.lat);
+  const c=authWorld.centroids[p.country]; return c?authProj(c[0],c[1]):null;
+}
+function authPointColor(p){ return p.layer==='device' ? (p.success?AUTH_COLORS.deviceOk:AUTH_COLORS.deviceFail)
+                                                       : (p.success?AUTH_COLORS.remoteOk:AUTH_COLORS.remoteFail); }
+function authLeg(c,label){ return '<span style="display:flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:50%;background:'+c+'"></span>'+esc(label)+'</span>'; }
+function authDraw(){
+  const box=document.getElementById('auth'), d=authData; if(!box||!d) return;
+  const t=d.totals||{}, g=n=>t[n]||0;
+  (d.points||[]).forEach((p,i)=>{ p.__i=i; });   // stable index for drill-in clicks
+  const pill=(on,label,onclick)=>'<button class="btn'+(on?' pri':'')+'" style="padding:2px 10px;font-size:11px;margin:0 6px 6px 0" onclick="'+onclick+'">'+label+'</button>';
+  let h='<h2 style="margin-top:0">Authentications</h2>';
+  h+='<div class="hint" style="margin-bottom:10px">Where logins to this host come from. <b>Remote</b> logins plot at the source IP’s location; <b>device</b> logins (console, sudo, terminal) plot at this machine’s own external-IP location — so a device that appears somewhere unexpected stands out. Successful only by default; toggle failed to surface brute-force sources.</div>';
+  h+='<div id="authCtl" style="margin-bottom:6px">';
+  h+=pill(authLayers.remote,'Remote ('+(g('remote_ok')+(authShowFailed?g('remote_fail'):0))+')',"authSetLayer('remote')");
+  h+=pill(authLayers.device,'Device ('+(g('device_ok')+(authShowFailed?g('device_fail'):0))+')',"authSetLayer('device')");
+  h+='<span style="display:inline-block;width:12px"></span>';
+  h+=pill(authShowFailed,'Show failed'+((g('remote_fail')+g('device_fail'))?' ('+(g('remote_fail')+g('device_fail'))+')':''),'authSetFailed()');
+  h+='<span style="display:inline-block;width:12px"></span>';
+  h+='<select onchange="authSetDays(this.value)" style="background:var(--chip);color:var(--txt);border:1px solid var(--line);border-radius:7px;font-size:11px;padding:2px 6px">'+
+     [7,30,90,365].map(n=>'<option value="'+n+'"'+(authDays===n?' selected':'')+'>last '+(n===365?'year':n+' days')+'</option>').join('')+'</select>';
+  h+='</div>';
+  const ex=d.external_ip||{};
+  h+='<div class="hint" style="margin-bottom:8px;font-size:11px">';
+  h+='<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" '+(ex.enabled?'checked':'')+' onchange="authToggleExtIp(this.checked)"> Resolve device location by external IP <span style="opacity:.7">(one outbound lookup; off by default)</span></label>';
+  if(ex.enabled) h+=ex.resolved?(' · this host: <b>'+esc(ex.place||ex.ip||'?')+'</b>'):(' · '+esc(ex.error||'resolving…'));
+  else h+=' · <span style="opacity:.8">off — device logins are counted but not placed on the map</span>';
+  if(!d.geo_available) h+='<br><span style="color:var(--sev-medium)">Geo enrichment is off — turn it on (Geo / ASN Enrichment) to place points. Free tier is country-level; a paid ipinfo DB gives city precision.</span>';
+  h+='</div>';
+  h+='<div id="authMap" style="width:100%"></div>';
+  h+='<div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:11px;color:var(--muted)">'+
+     authLeg(AUTH_COLORS.remoteOk,'remote · success')+authLeg(AUTH_COLORS.remoteFail,'remote · failed')+
+     authLeg(AUTH_COLORS.deviceOk,'device · success')+authLeg(AUTH_COLORS.deviceFail,'device · failed')+
+     '<span style="opacity:.7">dot size = number of events · click a point for details</span></div>';
+  h+='<div id="authDetail" style="margin-top:10px"></div>';
+  box.innerHTML=h;
+  authDrawSvg();
+  if(authSel!=null) authRenderDetail();
+}
+function authDrawSvg(){
+  const host=document.getElementById('authMap'), d=authData, w=authWorld; if(!host||!d||!w) return;
+  const pts=(d.points||[]).filter(p=>authLayers[p.layer] && (authShowFailed || p.success));
+  const maxc=Math.max(1,...pts.map(p=>p.count)), rad=c=>3+9*Math.sqrt(c/maxc);
+  let s='<svg viewBox="0 0 '+w.w+' '+w.h+'" width="100%" preserveAspectRatio="xMidYMid meet" '+
+    'style="display:block;max-width:960px;background:var(--well);border:1px solid var(--line);border-radius:10px" '+
+    'role="img" aria-label="World map of authentication locations">';
+  s+='<path d="'+w.path+'" fill="var(--panel2)" stroke="var(--line)" stroke-width="0.4"/>';
+  pts.slice().sort((a,b)=>(a.success===b.success)?0:(a.success?-1:1)).forEach(p=>{   // failed on top
+    const xy=authPointXY(p); if(!xy) return;
+    const col=authPointColor(p), r=rad(p.count);
+    const tip=(p.layer==='device'?'Device':'Remote')+' · '+(p.success?'successful':'FAILED')+'\n'+
+      (p.place||p.country||'')+'\n'+p.count+' event(s)'+
+      (p.users&&p.users.length?'\nusers: '+p.users.join(', '):'')+
+      (p.sources&&p.sources.length?'\nfrom: '+p.sources.join(', '):'');
+    const cx=xy[0].toFixed(1), cy=xy[1].toFixed(1);
+    if(p.__i===authSel) s+='<circle cx="'+cx+'" cy="'+cy+'" r="'+(r+4).toFixed(1)+'" fill="none" stroke="var(--txt)" stroke-width="1.5" stroke-opacity="0.9"/>';
+    s+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r.toFixed(1)+'" fill="'+col+
+       '" fill-opacity="'+(p.success?'0.5':'0.62')+'" stroke="'+col+'" stroke-width="'+(p.success?'1':'1.3')+
+       '" style="cursor:pointer" onclick="authSelectPoint('+p.__i+')"><title>'+esc(tip)+' — click for details</title></circle>';
+  });
+  s+='</svg>';
+  host.innerHTML=s;
+  if(!pts.length){
+    const any=(d.totals&&(d.totals.remote_ok+d.totals.remote_fail+d.totals.device_ok+d.totals.device_fail));
+    host.innerHTML+='<div class="hint" style="margin-top:8px">'+
+      (!any?'No authentications recorded in this window yet.':
+        (!d.geo_available?'Nothing to plot — geo enrichment is off.':
+          'No '+(authShowFailed?'':'successful ')+'authentications match the current filters.'))+'</div>';
+  }
+  const um=d.unmapped||{};
+  if((um.remote||0)+(um.device||0)) host.innerHTML+='<div class="hint" style="margin-top:6px;font-size:11px;opacity:.8">'+
+    (um.remote?um.remote+' remote event(s) could not be geolocated':'')+((um.remote&&um.device)?' · ':'')+
+    (um.device?um.device+' device event(s) not placed (enable device location above)':'')+'</div>';
+}
+function authSelectPoint(i){
+  authSel=i; authDrawSvg(); authRenderDetail();
+  const dd=document.getElementById('authDetail'); if(dd) dd.scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+function authCloseDetail(){ authSel=null; const dd=document.getElementById('authDetail'); if(dd) dd.innerHTML=''; authDrawSvg(); }
+function authRenderDetail(){
+  const host=document.getElementById('authDetail'); if(!host) return;
+  const p=authData&&authData.points&&authData.points[authSel];
+  if(!p){ host.innerHTML=''; return; }
+  const col=authPointColor(p);
+  let h='<div style="border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:10px 12px;max-width:960px">';
+  h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span style="width:10px;height:10px;border-radius:50%;background:'+col+';flex:none"></span>'+
+     '<b>'+esc(p.place||p.country||'Unknown location')+'</b><span class="hint" style="font-size:12px">· '+(p.layer==='device'?'device':'remote')+' · '+(p.success?'successful':'failed')+
+     ' · '+p.count+' event(s)'+(p.events_trunc?' (latest '+(p.events||[]).length+' shown)':'')+'</span>'+
+     '<span style="flex:1"></span><span class="lnk" style="cursor:pointer;font-size:14px" title="Close" onclick="authCloseDetail()">✕</span></div>';
+  h+='<div style="max-height:260px;overflow:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">'+
+     '<thead><tr style="text-align:left;color:var(--muted)">'+
+     ['Time','User','Source','Method','Status'].map(c=>'<th style="padding:3px 8px;position:sticky;top:0;background:var(--panel)">'+c+'</th>').join('')+
+     '</tr></thead><tbody>';
+  (p.events||[]).forEach(e=>{
+    const ts=e[0], user=e[1], src=e[2], ok=e[3], method=e[4];
+    const dt=ts?new Date(ts*1000).toLocaleString():'—';
+    h+='<tr style="border-top:1px solid var(--line)">'+
+       '<td style="padding:3px 8px;white-space:nowrap">'+esc(dt)+'</td>'+
+       '<td style="padding:3px 8px">'+esc(user||'—')+'</td>'+
+       '<td style="padding:3px 8px;font-family:var(--mono,monospace)">'+esc(src||'—')+'</td>'+
+       '<td style="padding:3px 8px">'+esc(method||'—')+'</td>'+
+       '<td style="padding:3px 8px;color:'+(ok?'var(--good)':'var(--sev-critical)')+'">'+(ok?'success':'failed')+'</td></tr>';
+  });
+  h+='</tbody></table></div></div>';
+  host.innerHTML=h;
+}
 // ---- Sensor health: live coverage of every telemetry source (Linux) ----
 function sensorCards(m){
   const root = m.privilege==='full', cards=[];

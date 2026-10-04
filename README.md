@@ -4,7 +4,7 @@
 
 <h1 align="center">Scouter</h1>
 
-<p align="center"><em>Size Up Your Threats — one host at a time</em></p>
+<p align="center"><em>Size Up Your Threats</em></p>
 
 <p align="center">
   <img alt="Platforms: macOS and Linux" src="https://img.shields.io/badge/platform-macOS_%7C_Linux-2b2f3a?style=flat-square">

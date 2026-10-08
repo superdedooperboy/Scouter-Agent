@@ -88,7 +88,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -13237,7 +13237,7 @@ class SyslogCollector:
     is collected or sent unless enabled."""
 
     def __init__(self, reporter, enabled=False, port=SYSLOG_DEFAULT_PORT, bind="0.0.0.0",
-                 tcp=False, keep=None, keep_allows=False):
+                 tcp=False, keep=None, keep_allows=False, priority=0):
         self.reporter = reporter
         self.enabled = enabled
         self.port = int(port)
@@ -13245,6 +13245,8 @@ class SyslogCollector:
         self.tcp = bool(tcp)
         self.keep = set(keep) if keep else set(SYSLOG_KEEP_DEFAULT)
         self.keep_allows = bool(keep_allows)
+        self.priority = int(priority)
+        self.role = None               # set by the mesh election: designated / backup / standby (None = forward)
         self.lock = threading.Lock()
         self.queue = []
         self.counts = {"received": 0, "kept": 0, "dropped": 0, "sent": 0, "forward_err": 0}
@@ -13342,7 +13344,28 @@ class SyslogCollector:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _forwarding(self):
+        # Only the mesh-designated collector forwards. No role yet (standalone, or an old mesh) = forward.
+        return self.role in (None, "designated")
+
+    def set_role(self, role):
+        if role not in (None, "designated", "backup", "standby"):
+            return
+        changed = role != self.role
+        self.role = role
+        if changed and role == "designated" and self.enabled:
+            try:
+                self.flush()                             # just promoted — push the warm buffer now
+            except Exception:  # noqa: BLE001
+                pass
+
+    def capability(self):
+        return {"capable": bool(self.enabled), "priority": self.priority,
+                "port": self.port, "receiving": self.counts["received"] > 0}
+
     def flush(self):
+        if not self._forwarding():
+            return                                       # a backup/standby holds its warm buffer, never forwards
         with self.lock:
             if not self.queue:
                 return
@@ -13369,7 +13392,7 @@ class SyslogCollector:
 
     def status(self):
         return {"enabled": self.enabled, "port": self.port, "bind": self.bind,
-                "tcp": bool(self._tcp),
+                "tcp": bool(self._tcp), "role": self.role, "priority": self.priority,
                 "queued": len(self.queue), "keep": sorted(self.keep),
                 "keep_allows": self.keep_allows, "counts": dict(self.counts),
                 "last_error": self.last_error}
@@ -13603,6 +13626,7 @@ class MeshReporter:
             raise
         self._on_authok()
         self._maybe_settoken(d)
+        self._maybe_collector_role(d)
         if self._maybe_unenroll(d):
             return {"commands": [], "hunts": []}
         self._maybe_sync_rules(d)
@@ -13617,6 +13641,14 @@ class MeshReporter:
         if isinstance(nt, str) and nt.strip() and nt.strip() != self.token:
             self.set_token(nt.strip())               # updates the Keychain + self.token
             self.counts["token_rot"] = self.counts.get("token_rot", 0) + 1
+
+    def _maybe_collector_role(self, resp):
+        """The mesh election tells us our syslog-collector role for this site. Only the designated
+        collector forwards; a backup holds a warm buffer and takes over on failover. Absent (old mesh
+        or election off) leaves us forwarding, which is the correct standalone behavior."""
+        col = getattr(self.cache, "syslog", None)
+        if col is not None:
+            col.set_role((resp or {}).get("collector_role"))
 
     def _maybe_unenroll(self, resp):
         """The mesh can UNENROLL this host over the authenticated channel (site decommission, BYOD
@@ -13894,6 +13926,8 @@ class MeshReporter:
             "incidents": {"open": int((meta.get("incidents") or {}).get("open") or 0),
                           "total": int((meta.get("incidents") or {}).get("count") or 0)},
             "alerts": alerts,      # the open queue (all of it for a capable mesh); closed pulled on demand
+            "collector": (self.cache.syslog.capability()        # XDR: syslog-collector capability, for the election
+                          if getattr(self.cache, "syslog", None) else None),
         }
 
     def _ssl_ctx(self):
@@ -13947,6 +13981,7 @@ class MeshReporter:
         try:
             d = json.loads(resp.decode("utf-8")) or {}
             self._maybe_settoken(d)
+            self._maybe_collector_role(d)
             if self._maybe_unenroll(d):
                 return
             self._maybe_sync_rules(d)
@@ -18286,6 +18321,9 @@ def main():
                     help="also accept TCP syslog (newline-framed) in addition to UDP")
     ap.add_argument("--syslog-keep-allows", action="store_true",
                     help="also keep routine firewall ALLOW events (louder and costlier; off by default)")
+    ap.add_argument("--syslog-priority", type=int, default=0,
+                    help="collector election priority — the mesh picks the highest-priority online host "
+                         "per site as the Designated Collector. Pin an always-on host with a higher value.")
     args = ap.parse_args()
     if args.break_glass is not None:
         # Arm or end a window and exit — this does not start an agent. The running agent notices the
@@ -18433,7 +18471,8 @@ def main():
     cache.mesh = mesh
     cache.syslog = SyslogCollector(mesh, enabled=args.syslog, port=args.syslog_port,
                                    bind=args.syslog_bind, tcp=args.syslog_tcp,
-                                   keep_allows=args.syslog_keep_allows)   # XDR Phase 2 edge collector
+                                   keep_allows=args.syslog_keep_allows,
+                                   priority=args.syslog_priority)   # XDR Phase 2 edge collector
     cache.local_control = bool(args.local_control)
     cache.autohunts = AutoHuntStore()      # hunts raised by validated-malicious alerts
     cache.chat = chat                      # chat alerting (unmanaged hosts only)

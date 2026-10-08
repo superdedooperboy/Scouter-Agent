@@ -162,6 +162,39 @@ class TestListener(unittest.TestCase):
         self.assertEqual(rep.batches[0][0]["src_ip"], "203.0.113.9")
 
 
+class TestRole(unittest.TestCase):
+    EV = [{"type": "firewall_deny", "src_ip": "45.9.1.2"}]
+
+    def test_no_role_forwards(self):
+        rep = _FakeReporter()
+        col = agent.SyslogCollector(rep, enabled=False)
+        col.queue = list(self.EV)
+        col.flush()
+        self.assertEqual(len(rep.batches), 1)        # standalone / no election -> forward
+
+    def test_backup_holds(self):
+        rep = _FakeReporter()
+        col = agent.SyslogCollector(rep, enabled=False)
+        col.set_role("backup")
+        col.queue = list(self.EV)
+        col.flush()
+        self.assertEqual(rep.batches, [])            # a backup never forwards
+        self.assertEqual(len(col.queue), 1)          # buffer held warm for failover
+
+    def test_promote_forwards(self):
+        rep = _FakeReporter()
+        col = agent.SyslogCollector(rep, enabled=False)
+        col.set_role("backup")
+        col.queue = list(self.EV)
+        col.set_role("designated")                   # promoted
+        col.flush()
+        self.assertEqual(len(rep.batches), 1)
+
+    def test_capability(self):
+        cap = agent.SyslogCollector(_FakeReporter(), enabled=False, priority=5).capability()
+        self.assertEqual(cap["priority"], 5)
+        self.assertFalse(cap["capable"])             # enabled=False
+
 
 if __name__ == "__main__":
     unittest.main()

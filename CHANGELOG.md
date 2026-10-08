@@ -6,6 +6,24 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.2.0 / Linux agent 1.2.0 — 2026-10-08
+
+### Added
+
+**XDR syslog collector + mesh-coordinated election.** An optional edge collector for third-party
+network telemetry (firewall / AP / router), off by default (`--syslog`). It listens for LAN syslog on
+UDP (and optional TCP), parses the RFC3164/5424 envelope, routes each line to a device profile
+(pfSense/OPNsense, FortiGate, SonicWall, dnsmasq DHCP, hostapd Wi-Fi, plus a generic fallback),
+normalizes it to the mesh's common event schema, keeps only the security-relevant events — denies,
+identity, auth failures, config changes, and allows that cross the trust boundary (touch a public IP)
+— and forwards them in batches to the mesh over the agent's authenticated relay.
+
+So enabling it fleet-wide doesn't make every host forward at once, the mesh elects one Designated
+Collector per site plus a backup: each agent reports its collector capability and a `--syslog-priority`
+on check-in, learns its role in the response, and only the designated collector forwards; a backup
+holds a warm buffer and takes over on failover. Pairs with Scouter Mesh 0.7.33 (`/api/logs`,
+`/api/collectors`, `/api/net-context`).
+
 ## macOS agent 1.1.0 / Linux agent 1.1.0 — 2026-10-04
 
 ### Added

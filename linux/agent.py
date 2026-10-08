@@ -43,6 +43,7 @@ import argparse
 import base64
 import atexit
 import bisect
+import calendar
 import collections
 import csv
 import glob
@@ -15368,6 +15369,380 @@ class NtfyClient:
         return {"ok": ok, "error": err}
 
 
+# ===== Third-party syslog collector (XDR Phase 2) ================================================
+# An edge collector: listen for syslog from LAN network gear (firewall / AP / router), normalize each
+# line to the mesh's common event schema, keep only the security-relevant events, and forward them in
+# batches to the mesh over the agent's authenticated relay. Off by default. The listener binds the LAN
+# so devices can reach it; raw syslog never crosses the internet and the mesh is never exposed on 514.
+SYSLOG_DEFAULT_PORT = 514
+SYSLOG_FLUSH_SECS = 15
+SYSLOG_FLUSH_MAX = 500                 # events per forward batch (the mesh caps at its own LOG_MAX_BATCH)
+SYSLOG_QUEUE_MAX = 20000               # bound memory if the mesh is unreachable
+SYSLOG_MAX_DATAGRAM = 16 * 1024
+# Keep these normalized event types by default; drop the rest (routine allows, chatter). This is the
+# main cost lever — most of a firewall's volume is routine allows we never store.
+SYSLOG_KEEP_DEFAULT = {"firewall_deny", "dhcp_lease", "wifi_assoc", "auth_fail", "config_change", "ids_alert"}
+_SYS_PRI_RE = re.compile(r"^<(\d{1,3})>")
+_SYS_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_SYS_MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b")
+_SYS_DENY_WORDS = ("deny", "denied", "drop", "dropped", "block", "blocked", "reject")
+_SYS_ALLOW_WORDS = ("allow", "allowed", "accept", "accepted", "pass", "permit")
+
+
+def _sys_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sys_fw_type(action):
+    a = (action or "").lower()
+    if any(w in a for w in _SYS_DENY_WORDS):
+        return "firewall_deny"
+    if any(w in a for w in _SYS_ALLOW_WORDS):
+        return "firewall_allow"
+    return None
+
+
+def _sys_is_public(ip):
+    try:
+        return bool(ip) and ipaddress.ip_address(ip).is_global
+    except ValueError:
+        return False
+
+
+def _sys_kv(msg):
+    """Parse FortiGate / SonicWall style key=value (value may be "quoted") into a lower-cased dict."""
+    out = {}
+    for m in re.finditer(r'([A-Za-z][\w.-]*)=("([^"]*)"|\S+)', msg):
+        out[m.group(1).lower()] = m.group(3) if m.group(3) is not None else m.group(2)
+    return out
+
+
+def _sys_ts(s):
+    """RFC5424 ISO timestamp -> epoch (UTC). RFC3164 has no year/zone, so we return None and let the
+    mesh stamp receipt time — syslog arrives within seconds, so the drift is negligible."""
+    s = (s or "").strip()
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})", s)
+    if not m:
+        return None
+    try:
+        return calendar.timegm(tuple(int(m.group(i)) for i in range(1, 7)) + (0, 0, 0))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _parse_syslog(raw):
+    """Best-effort RFC3164 / RFC5424 envelope -> {host, tag, msg, ts, severity}."""
+    s = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+    s = s.strip()
+    sev = None
+    m = _SYS_PRI_RE.match(s)
+    if m:
+        sev = int(m.group(1)) & 7
+        s = s[m.end():]
+    host = tag = ""
+    msg = s
+    ts = None
+    if s[:2] == "1 ":                                   # RFC5424: "1 TS HOST APP PROCID MSGID SD MSG"
+        parts = s[2:].split(" ", 6)
+        if len(parts) >= 7:
+            ts = _sys_ts(parts[0])
+            host, tag = parts[1], parts[2]
+            msg = parts[6]
+    else:                                               # RFC3164: "Mmm dd hh:mm:ss HOST TAG[pid]: MSG"
+        m2 = re.match(r"^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+(\S+)\s+(.*)$", s)
+        if m2:
+            host = m2.group(1)
+            rest = m2.group(2)
+            mt = re.match(r"^([\w\-/.]+)(?:\[\d+\])?:\s*(.*)$", rest)
+            if mt:
+                tag, msg = mt.group(1), mt.group(2)
+            else:
+                msg = rest
+    return {"host": host or ("" if host is None else host), "tag": tag or "", "msg": msg or "",
+            "ts": ts, "severity": sev}
+
+
+# ---- device profiles: each returns a normalized event dict, or None if the line isn't its shape ----
+def _prof_dnsmasq(env):
+    # DHCP lease (dnsmasq backs pfSense, UniFi and many SMB routers): "DHCPACK(if) 10.0.0.12 <mac> host"
+    m = re.search(r"DHCPACK\([^)]*\)\s+(\S+)\s+([0-9a-fA-F:]{17})(?:\s+(\S+))?", env["msg"])
+    if not m:
+        return None
+    return {"device_class": "router", "type": "dhcp_lease", "action": "lease",
+            "src_ip": m.group(1), "mac": m.group(2).lower(), "host": m.group(3) or None}
+
+
+def _prof_hostapd(env):
+    # Wi-Fi (de)association (UniFi / hostapd): "AP-STA-CONNECTED <mac>"
+    m = re.search(r"AP-STA-(CONNECTED|DISCONNECTED)\s+([0-9a-fA-F:]{17})", env["msg"])
+    if not m:
+        return None
+    return {"device_class": "ap", "type": "wifi_assoc",
+            "action": "assoc" if m.group(1) == "CONNECTED" else "deassoc", "mac": m.group(2).lower()}
+
+
+def _prof_pfsense(env):
+    # pfSense / OPNsense filterlog CSV. Field layout is the documented one; offsets differ by IP version.
+    if "filterlog" not in (env["tag"] or ""):
+        return None
+    f = env["msg"].split(",")
+    if len(f) < 9:
+        return None
+    action = (f[6] or "").lower()
+    ev = {"device_class": "firewall", "rule": f[0] or None,
+          "action": "deny" if action in ("block", "reject") else "allow",
+          "type": "firewall_deny" if action in ("block", "reject") else "firewall_allow"}
+    try:
+        if f[8] == "4" and len(f) >= 22:
+            ev["src_ip"], ev["dst_ip"] = f[18] or None, f[19] or None
+            ev["src_port"], ev["dst_port"] = _sys_int(f[20]), _sys_int(f[21])
+        elif f[8] == "6" and len(f) >= 19:
+            ev["src_ip"], ev["dst_ip"] = f[15] or None, f[16] or None
+            ev["src_port"], ev["dst_port"] = _sys_int(f[17]), _sys_int(f[18])
+    except IndexError:
+        pass
+    return ev
+
+
+def _prof_fortigate(env):
+    # FortiGate: key=value pairs. type=traffic/event, action=accept|deny, srcip/dstip/srcport/dstport.
+    m = env["msg"]
+    if "srcip=" not in m and "logid=" not in m and "devname=" not in m:
+        return None
+    kv = _sys_kv(m)
+    if "srcip" not in kv and "dstip" not in kv:
+        return None
+    act = (kv.get("action") or "").lower()
+    return {"device_class": "firewall", "action": act or None, "type": _sys_fw_type(act),
+            "src_ip": kv.get("srcip"), "dst_ip": kv.get("dstip"),
+            "src_port": _sys_int(kv.get("srcport")), "dst_port": _sys_int(kv.get("dstport")),
+            "user": kv.get("user") or None, "rule": kv.get("policyid") or kv.get("policyname")}
+
+
+def _prof_sonicwall(env):
+    # SonicWall: key=value, with src/dst as "IP:port:iface". Drops are in fw_action or the message.
+    m = env["msg"]
+    if "sn=" not in m and "fw=" not in m and "src=" not in m:
+        return None
+    kv = _sys_kv(m)
+
+    def addr(v):
+        if not v:
+            return None, None
+        p = v.split(":")
+        ip = p[0] if p and _SYS_IP_RE.match(p[0] or "") else None
+        return ip, (_sys_int(p[1]) if len(p) > 1 else None)
+
+    s_ip, s_pt = addr(kv.get("src"))
+    d_ip, d_pt = addr(kv.get("dst"))
+    if not s_ip and not d_ip:
+        return None
+    act = (kv.get("fw_action") or kv.get("action") or "").lower()
+    low = m.lower()
+    ty = _sys_fw_type(act) or ("firewall_deny" if any(w in low for w in _SYS_DENY_WORDS) else None)
+    if not ty:
+        return None
+    return {"device_class": "firewall", "type": ty, "action": act or ("deny" if ty == "firewall_deny" else None),
+            "src_ip": s_ip, "dst_ip": d_ip, "src_port": s_pt, "dst_port": d_pt,
+            "user": kv.get("user") or None, "rule": kv.get("fw_action") or None}
+
+
+def _prof_generic(env):
+    # Fallback for any device: pull IPs / a MAC / an action keyword out of the message.
+    m = env["msg"]
+    low = m.lower()
+    act = "deny" if any(w in low for w in _SYS_DENY_WORDS) else ("allow" if any(w in low for w in _SYS_ALLOW_WORDS) else None)
+    ips = _SYS_IP_RE.findall(m)
+    mac = _SYS_MAC_RE.search(m)
+    ev = {"device_class": "network", "action": act,
+          "src_ip": ips[0] if ips else None, "dst_ip": ips[1] if len(ips) > 1 else None,
+          "mac": mac.group(0).lower() if mac else None}
+    if act == "deny":
+        ev["type"] = "firewall_deny"
+    elif act == "allow":
+        ev["type"] = "firewall_allow"
+    elif ev["mac"]:
+        ev["type"] = "net_event"
+    else:
+        return None
+    return ev
+
+
+_SYS_PROFILES = (_prof_dnsmasq, _prof_hostapd, _prof_pfsense, _prof_fortigate, _prof_sonicwall, _prof_generic)
+
+
+def normalize_syslog(raw, keep=None, keep_allows=False):
+    """Parse one syslog line to a normalized event, or None if it is dropped (unparseable or filtered).
+    Pure function — the unit tests drive it directly."""
+    env = _parse_syslog(raw)
+    ev = None
+    for prof in _SYS_PROFILES:
+        ev = prof(env)
+        if ev:
+            break
+    if not ev:
+        return None
+    ev.setdefault("device", env.get("host") or None)
+    if env.get("ts"):
+        ev["ts"] = env["ts"]
+    keep = SYSLOG_KEEP_DEFAULT if keep is None else keep
+    ty = ev.get("type")
+    if ty == "firewall_allow":
+        # Keep allows only when they cross the trust boundary (touch a public IP) — the Mesh keeps
+        # those briefly, deduped, for retro-matching against later-flagged IPs. keep_allows keeps all.
+        if keep_allows:
+            return ev
+        return ev if (_sys_is_public(ev.get("src_ip")) or _sys_is_public(ev.get("dst_ip"))) else None
+    return ev if ty in keep else None
+
+
+class SyslogCollector:
+    """Listens for LAN syslog, normalizes + filters at the edge, and forwards kept events to the mesh
+    in batches over the agent's authenticated relay (MeshReporter.send_logs). Off by default; nothing
+    is collected or sent unless enabled."""
+
+    def __init__(self, reporter, enabled=False, port=SYSLOG_DEFAULT_PORT, bind="0.0.0.0",
+                 tcp=False, keep=None, keep_allows=False):
+        self.reporter = reporter
+        self.enabled = enabled
+        self.port = int(port)
+        self.bind = bind
+        self.tcp = bool(tcp)
+        self.keep = set(keep) if keep else set(SYSLOG_KEEP_DEFAULT)
+        self.keep_allows = bool(keep_allows)
+        self.lock = threading.Lock()
+        self.queue = []
+        self.counts = {"received": 0, "kept": 0, "dropped": 0, "sent": 0, "forward_err": 0}
+        self.last_error = None
+        self._udp = None
+        self._tcp = None
+        if enabled:
+            self.start()
+
+    def start(self):
+        try:
+            self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._udp.bind((self.bind, self.port))
+        except OSError as e:
+            self.last_error = f"syslog bind {self.bind}:{self.port} failed: {e}"
+            print("  " + self.last_error + (" (ports below 1024 need root)" if self.port < 1024 else ""))
+            self.enabled = False
+            return
+        threading.Thread(target=self._udp_loop, daemon=True).start()
+        if self.tcp:
+            try:
+                self._tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self._tcp.bind((self.bind, self.port))
+                self._tcp.listen(8)
+                threading.Thread(target=self._tcp_loop, daemon=True).start()
+            except OSError as e:
+                print(f"  syslog TCP bind failed: {e}")
+                self._tcp = None
+        threading.Thread(target=self._flush_loop, daemon=True).start()
+        print(f"  syslog collector on {self.bind}:{self.port}/udp"
+              + ("+tcp" if self._tcp else "") + " — forwarding kept events to the mesh")
+
+    def _udp_loop(self):
+        while True:
+            try:
+                data, _addr = self._udp.recvfrom(SYSLOG_MAX_DATAGRAM)
+            except OSError:
+                return
+            self._handle(data)
+
+    def _tcp_loop(self):
+        while True:
+            try:
+                conn, _ = self._tcp.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._tcp_conn, args=(conn,), daemon=True).start()
+
+    def _tcp_conn(self, conn):
+        buf = b""
+        try:
+            conn.settimeout(120)
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if line.strip():
+                        self._handle(line)
+                if len(buf) > SYSLOG_MAX_DATAGRAM:
+                    buf = b""
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _handle(self, raw):
+        self.counts["received"] += 1
+        try:
+            ev = normalize_syslog(raw, self.keep, self.keep_allows)
+        except Exception:  # noqa: BLE001 — a malformed line must never kill the listener
+            ev = None
+        if not ev:
+            self.counts["dropped"] += 1
+            return
+        with self.lock:
+            if len(self.queue) < SYSLOG_QUEUE_MAX:
+                self.queue.append(ev)
+                self.counts["kept"] += 1
+            else:
+                self.counts["dropped"] += 1
+
+    def _flush_loop(self):
+        while True:
+            time.sleep(SYSLOG_FLUSH_SECS)
+            try:
+                self.flush()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def flush(self):
+        with self.lock:
+            if not self.queue:
+                return
+            batch = self.queue[:SYSLOG_FLUSH_MAX]
+            self.queue = self.queue[SYSLOG_FLUSH_MAX:]
+        rep = self.reporter
+        if not (rep and rep.enabled and rep.configured()):
+            self._requeue(batch)                         # mesh not configured yet — hold (bounded)
+            return
+        try:
+            res = rep.send_logs(batch)
+            self.counts["sent"] += int((res or {}).get("accepted", len(batch)))
+            self.last_error = None
+        except Exception as e:  # noqa: BLE001
+            self.counts["forward_err"] += 1
+            self.last_error = str(e)[:200]
+            self._requeue(batch)
+
+    def _requeue(self, batch):
+        with self.lock:
+            self.queue = batch + self.queue
+            if len(self.queue) > SYSLOG_QUEUE_MAX:
+                self.queue = self.queue[-SYSLOG_QUEUE_MAX:]
+
+    def status(self):
+        return {"enabled": self.enabled, "port": self.port, "bind": self.bind,
+                "tcp": bool(self._tcp),
+                "queued": len(self.queue), "keep": sorted(self.keep),
+                "keep_allows": self.keep_allows, "counts": dict(self.counts),
+                "last_error": self.last_error}
+
+
 class MeshReporter:
     """Agent side of **Scouter Mesh** — optional multi-host reporting. When --mesh-url is set, a
     background thread periodically pushes a *compact* snapshot (host identity, severity counts, top
@@ -15946,6 +16321,28 @@ class MeshReporter:
             self._process_jobs(d)                                        # fallback delivery via ingest
         except (ValueError, UnicodeDecodeError):
             pass
+
+    def send_logs(self, events):
+        """XDR Phase 2: forward a batch of normalized third-party network events to the mesh's
+        /api/logs. Mirrors the report push — gzip when the mesh accepts it, the enrollment token, the
+        TLS context and auth-fail handling. Returns the mesh receipt ({accepted, dropped, ...})."""
+        if not (self.enabled and self.configured()) or not events:
+            return {"accepted": 0}
+        body = json.dumps({"events": events}).encode("utf-8")
+        headers = {"Content-Type": "application/json", "X-Scouter-Mesh-Token": self.token}
+        if self._mesh_accepts_gzip():
+            body = gzip.compress(body, compresslevel=6)
+            headers["Content-Encoding"] = "gzip"
+        req = urllib.request.Request(self.url + "/api/logs", data=body, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10, context=self._ssl_ctx()) as r:
+                d = json.loads(r.read().decode("utf-8")) or {}
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                self._on_authfail()
+            raise
+        self._on_authok()
+        return d
 
     def mesh_ips(self):
         """Resolve the mesh server to IP(s). Used to keep the control channel alive through an
@@ -17186,6 +17583,18 @@ def main():
                          "NOTE: a host connected to a mesh already accepts these by default — the mesh it "
                          "reports to is that endpoint's authority. This flag only matters if you later "
                          "disconnect from the mesh. (Never kill/delete; the --no-response lock still wins.)")
+    ap.add_argument("--syslog", action="store_true",
+                    help="(XDR) run the third-party syslog collector: listen for LAN network-device logs, "
+                         "normalize + filter them, and forward the security-relevant events to the mesh")
+    ap.add_argument("--syslog-port", type=int, default=SYSLOG_DEFAULT_PORT,
+                    help=f"UDP/TCP port the syslog collector listens on (default {SYSLOG_DEFAULT_PORT}; "
+                         f"below 1024 needs root). Point your firewall/AP/router syslog at this host:port.")
+    ap.add_argument("--syslog-bind", default="0.0.0.0", metavar="ADDR",
+                    help="address the syslog collector binds (default 0.0.0.0, so LAN devices can reach it)")
+    ap.add_argument("--syslog-tcp", action="store_true",
+                    help="also accept TCP syslog (newline-framed) in addition to UDP")
+    ap.add_argument("--syslog-keep-allows", action="store_true",
+                    help="also keep routine firewall ALLOW events (louder and costlier; off by default)")
     args = ap.parse_args()
     if args.break_glass is not None:
         # Arm or end a window and exit — this does not start an agent. The running agent notices the
@@ -17321,6 +17730,9 @@ def main():
     mesh.apply_cli(url=args.mesh_url, token=args.mesh_token, interval=args.mesh_interval,
                    name=args.mesh_name, insecure=args.mesh_insecure)
     cache.mesh = mesh
+    cache.syslog = SyslogCollector(mesh, enabled=args.syslog, port=args.syslog_port,
+                                   bind=args.syslog_bind, tcp=args.syslog_tcp,
+                                   keep_allows=args.syslog_keep_allows)   # XDR Phase 2 edge collector
     cache.local_control = bool(args.local_control)
     cache.autohunts = AutoHuntStore()      # hunts raised by validated-malicious alerts
     cache.chat = chat                      # chat alerting (unmanaged hosts only)

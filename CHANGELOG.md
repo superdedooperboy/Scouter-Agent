@@ -6,6 +6,33 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.3.0 — 2026-10-08
+
+### Added
+
+**In-agent vulnerability scanning (CTEM-Lite), macOS-first.** The agent now scans itself for exposure,
+all pure-stdlib and entirely local — nothing about the inventory ever leaves the machine. Three pieces,
+surfaced on a new **Vulnerabilities** tab and `GET /api/vulns`:
+
+- **OS update currency** — macOS version/build, pending Apple updates (parsed from `softwareupdate`,
+  with the security/recommended/restart ones flagged), and the XProtect data version. The single
+  highest-value, most authoritative Mac signal; no third-party database required.
+- **Software inventory** — top-level `.app` bundles (bundle id + version), Homebrew formulae, and
+  globally-installed language packages (pip / npm), the latter queried as the console user when the
+  agent runs as root.
+- **Advisory matching** — a GeoIP-style feed engine. A JSON advisory feed (`--vuln-feed-url`, with a
+  small built-in **example** set so the pipeline works offline, flagged so nothing is passed off as a
+  confirmed CVE) is matched against apps/Homebrew; and **OSV** language-ecosystem data is fetched
+  offline (`--vuln-osv auto|off|LIST`) — the per-ecosystem archive is downloaded daily and indexed
+  *only for the packages actually installed*, then matched locally.
+
+Findings are severity-ranked and prioritized **"vulnerable **and** live"**: a finding whose software is
+currently running (an executing process inside the app bundle) is marked ⚡ and sorted first. A compact
+rollup (OS currency + severity counts + top findings) rides the mesh check-in for the fleet
+Vulnerabilities view (Scouter Mesh 0.7.34). On by default; disable with `--no-vuln`, tune with
+`--vuln-interval`. The scan runs on a long timer (softwareupdate/brew are slow), never on the
+per-snapshot path.
+
 ## macOS agent 1.2.0 / Linux agent 1.2.0 — 2026-10-08
 
 ### Added

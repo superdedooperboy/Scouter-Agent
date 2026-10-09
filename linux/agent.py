@@ -77,6 +77,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -90,7 +91,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -3618,6 +3619,800 @@ class GeoIP:
             "has_token": self.has_token(), "token_source": self.token_source(),
             "secret_backend": "keychain" if self.secrets.keychain else "file",
             "url": self._url_for_tier(),
+        }
+
+
+# ===========================================================================
+# In-agent vulnerability scanning (CTEM-Lite), Linux (Debian/Ubuntu-first).
+#
+# Three cooperating pieces, all pure-stdlib and entirely local:
+#   * LinuxOSCurrency    — distro/kernel + pending APT updates (security pocket
+#                          flagged) + reboot-required. The authoritative "are you
+#                          patched" signal: a distro security update exists
+#                          precisely when a CVE has a fix available.
+#   * LinuxSoftwareInventory — installed dpkg packages + pip/npm globals.
+#   * VulnFeed / OSVFeeds — shared with the macOS agent: a JSON advisory feed
+#                          (matched against dpkg packages) and offline OSV
+#                          language-ecosystem matching. Only feeds are fetched;
+#                          nothing about the inventory leaves the machine.
+#
+# VulnScanner ties them into prioritized findings served on /api/vulns. A dpkg
+# finding is flagged "live" when a running process is owned by that package
+# (resolved through the agent's DpkgIndex). The scan runs on a long timer.
+# ===========================================================================
+
+
+def _ver_key(v):
+    """Numeric version comparison key: the integer runs in a dotted version.
+
+    Good for the dotted-decimal versions that .app bundles and Homebrew report
+    (e.g. '131.0.6778.69', '3.4.0'). Ecosystem-specific semantics (PEP 440,
+    semver pre-releases) are a deliberate follow-on handled per-feed."""
+    parts = re.findall(r"\d+", str(v or ""))
+    return tuple(int(p) for p in parts) if parts else ()
+
+
+def _vcmp_key(a, b):
+    """Compare two _ver_key tuples; shorter is zero-padded. Returns -1/0/1."""
+    n = max(len(a), len(b))
+    a = a + (0,) * (n - len(a))
+    b = b + (0,) * (n - len(b))
+    return (a > b) - (a < b)
+
+
+def _version_affected(version, affected):
+    """Does `version` fall inside any constraint-set in `affected`?
+
+    `affected` is a list of dicts (OR across the list). Each dict is a set of
+    bound operators (lt/le/gt/ge/eq) that must ALL hold (AND within the set).
+    An unparseable version matches nothing — we never raise a finding we cannot
+    stand behind."""
+    vk = _ver_key(version)
+    if not vk or not affected:
+        return False
+    for cs in affected:
+        if not isinstance(cs, dict) or not cs:
+            continue
+        ok = True
+        for op, bound in cs.items():
+            c = _vcmp_key(vk, _ver_key(bound))
+            if ((op == "lt" and not c < 0) or (op == "le" and not c <= 0)
+                    or (op == "gt" and not c > 0) or (op == "ge" and not c >= 0)
+                    or (op == "eq" and c != 0)):
+                ok = False
+                break
+        if ok:
+            return True
+    return False
+
+
+def _run_as_user(cmd, timeout=60):
+    """run() an inventory command. On Linux the system package tools (pip/npm) list the
+    system/global view fine as root, so unlike macOS Homebrew there's no user to drop to."""
+    return run(cmd, timeout=timeout)
+
+
+def _pip_packages():
+    """Globally-installed Python distributions, tagged with the OSV 'PyPI' ecosystem."""
+    py = shutil.which("python3") or shutil.which("python")
+    if not py:
+        return []
+    rc, out, _ = _run_as_user([py, "-m", "pip", "list", "--format=json",
+                               "--disable-pip-version-check"], timeout=60)
+    if rc != 0:
+        return []
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        return []
+    return [{"ecosystem": "PyPI", "name": r["name"], "version": r.get("version")}
+            for r in rows if isinstance(r, dict) and r.get("name")]
+
+
+def _npm_global_packages():
+    """Globally-installed npm packages, tagged with the OSV 'npm' ecosystem."""
+    if not shutil.which("npm"):
+        return []
+    rc, out, _ = _run_as_user(["npm", "ls", "-g", "--depth=0", "--json"], timeout=60)
+    if not out:
+        return []
+    try:
+        deps = (json.loads(out) or {}).get("dependencies") or {}
+    except ValueError:
+        return []
+    return [{"ecosystem": "npm", "name": n, "version": (d or {}).get("version")}
+            for n, d in deps.items() if n]
+
+
+# ---- OSV advisory parsing (used by OSVFeeds to match language packages offline) ----
+def _osv_cve(rec):
+    for a in rec.get("aliases") or []:
+        if str(a).upper().startswith("CVE-"):
+            return a
+    return rec.get("id")
+
+
+def _osv_severity(rec):
+    ds = rec.get("database_specific") or {}
+    s = str(ds.get("severity") or "").lower()
+    if s in ("critical", "high", "medium", "low"):
+        return s
+    if s == "moderate":
+        return "medium"
+    for sev in rec.get("severity") or []:
+        try:
+            n = float(sev.get("score"))
+        except (TypeError, ValueError):
+            continue
+        return "critical" if n >= 9 else "high" if n >= 7 else "medium" if n >= 4 else "low"
+    return "medium"
+
+
+def _osv_url(rec):
+    for ref in rec.get("references") or []:
+        if isinstance(ref, dict) and ref.get("url"):
+            return ref["url"]
+    return "https://osv.dev/vulnerability/%s" % rec.get("id", "")
+
+
+def _osv_affected(version, affected_entries):
+    """OSV match: is `version` affected by any of this package's affected entries? Returns the
+    fixed version (str, possibly '') when affected, else None. Handles the exact `versions` list
+    and SEMVER/ECOSYSTEM ranges (introduced/fixed/last_affected); GIT ranges are skipped."""
+    vk = _ver_key(version)
+    if not vk:
+        return None
+    for aff in affected_entries or []:
+        if any(_vcmp_key(vk, _ver_key(x)) == 0 for x in (aff.get("versions") or [])):
+            return _osv_fixed(aff) or ""
+        for rng in aff.get("ranges") or []:
+            if rng.get("type") not in ("SEMVER", "ECOSYSTEM"):
+                continue
+            introduced = fixed = last = None
+            for ev in rng.get("events") or []:
+                if "introduced" in ev:
+                    introduced = ev["introduced"]
+                elif "fixed" in ev:
+                    fixed = ev["fixed"]
+                elif "last_affected" in ev:
+                    last = ev["last_affected"]
+            lo_ok = True if (not introduced or introduced == "0") else _vcmp_key(vk, _ver_key(introduced)) >= 0
+            if fixed is not None:
+                hi_ok = _vcmp_key(vk, _ver_key(fixed)) < 0
+            elif last is not None:
+                hi_ok = _vcmp_key(vk, _ver_key(last)) <= 0
+            else:
+                hi_ok = True
+            if lo_ok and hi_ok:
+                return fixed or ""
+    return None
+
+
+def _osv_fixed(aff):
+    for rng in aff.get("ranges") or []:
+        for ev in rng.get("events") or []:
+            if ev.get("fixed"):
+                return ev["fixed"]
+    return None
+
+
+# A small, deliberately EXAMPLE advisory set. It proves the match pipeline offline
+# (one per match kind: a bundle id, another bundle id, a Homebrew package) and is
+# flagged example:true end-to-end so a finding is never passed off as a confirmed,
+
+class VulnFeed:
+    """GeoIP-style vulnerability advisory feed: fetch once on a timer, index, match
+    locally. Seed advisories are always present; a downloaded feed layers on top."""
+
+    def __init__(self, enabled=True, interval=86400, url=None,
+                 cache_file=None, seed=None):
+        self.enabled = enabled
+        self.interval = max(3600, interval)
+        self.url = (url or "").strip() or None
+        self.cache_file = cache_file or os.path.join(HERE, "vuln-feed.json")
+        self.seed = list(seed if seed is not None else VULN_SEED_ADVISORIES)
+        self._remote = []
+        self.lock = threading.Lock()
+        self._idx = {"bundle_id": {}, "name": {}, "eco": {}}
+        self.state = {"advisories": 0, "last_fetched": None, "last_error": None,
+                      "fetching": False, "source": "seed"}
+        self._reindex()
+        self._load_cache()
+        if self.enabled and self.url:
+            threading.Thread(target=self._refresh_loop, daemon=True).start()
+
+    @staticmethod
+    def _keys_for(adv):
+        m = adv.get("match") or {}
+        out = []
+        if m.get("bundle_id"):
+            out.append(("bundle_id", str(m["bundle_id"]).lower()))
+        if m.get("name"):
+            out.append(("name", str(m["name"]).lower()))
+        if m.get("ecosystem") and m.get("package"):
+            out.append(("eco", "%s::%s" % (str(m["ecosystem"]).lower(),
+                                           str(m["package"]).lower())))
+        return out
+
+    def _reindex(self):
+        idx = {"bundle_id": {}, "name": {}, "eco": {}}
+        n = 0
+        for adv in self.seed + self._remote:
+            if not isinstance(adv, dict) or not adv.get("affected"):
+                continue
+            keys = self._keys_for(adv)
+            if not keys:
+                continue
+            for kind, key in keys:
+                idx[kind].setdefault(key, []).append(adv)
+            n += 1
+        with self.lock:
+            self._idx = idx
+            self.state["advisories"] = n
+
+    def match(self, bundle_id=None, name=None, version=None,
+              ecosystem=None, package=None):
+        with self.lock:
+            idx = self._idx
+        cand, seen = [], set()
+        for kind, key in (("bundle_id", bundle_id and bundle_id.lower()),
+                          ("name", name and name.lower()),
+                          ("eco", (ecosystem and package)
+                           and "%s::%s" % (ecosystem.lower(), package.lower()))):
+            if not key:
+                continue
+            for adv in idx[kind].get(key, []):
+                if id(adv) not in seen:
+                    seen.add(id(adv))
+                    cand.append(adv)
+        return [adv for adv in cand if _version_affected(version, adv.get("affected"))]
+
+    # ---- fetch (mirrors GeoIP/IOCFeeds: one outbound download, then local match) ----
+    def _refresh_loop(self):
+        time.sleep(4)
+        while True:
+            if self.enabled and self.url:
+                age = ((time.time() - self.state["last_fetched"])
+                       if self.state["last_fetched"] else 1e12)
+                if age >= self.interval:
+                    self._fetch()
+            time.sleep(300)
+
+    def _load_cache(self):
+        try:
+            with open(self.cache_file) as f:
+                self._ingest(json.load(f), source="cache")
+            self.state["last_fetched"] = os.path.getmtime(self.cache_file)
+        except (OSError, ValueError):
+            pass
+
+    def _fetch(self):
+        if not (self.enabled and self.url) or self.state["fetching"]:
+            return
+        self.state["fetching"] = True
+        try:
+            req = urllib.request.Request(
+                self.url, headers={"User-Agent": "%s (+offline vuln feed)" % USER_AGENT})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                raw = r.read()
+            data = json.loads(gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw)
+            self._ingest(data, source="remote")
+            try:
+                tmp = self.cache_file + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(data, f)
+                os.replace(tmp, self.cache_file)
+            except OSError:
+                pass
+            self.state.update({"last_fetched": time.time(), "last_error": None})
+        except Exception as e:  # noqa: BLE001
+            self.state["last_error"] = str(e)[:200]
+        finally:
+            self.state["fetching"] = False
+
+    def _ingest(self, data, source):
+        advs = data.get("advisories") if isinstance(data, dict) else data
+        if not isinstance(advs, list):
+            return
+        self._remote = [a for a in advs if isinstance(a, dict) and a.get("match")]
+        self.state["source"] = source
+        self._reindex()
+
+    def refresh(self):
+        if not (self.enabled and self.url):
+            return {"ok": False, "error": "no feed url configured (seed only)"}
+        threading.Thread(target=self._fetch, daemon=True).start()
+        return {"ok": True, "refreshing": True}
+
+    def status(self):
+        return {"enabled": self.enabled, "url": self.url, "interval": self.interval,
+                "advisories": self.state["advisories"], "source": self.state["source"],
+                "seed": len(self.seed), "remote": len(self._remote),
+                "last_fetched": self.state["last_fetched"],
+                "last_error": self.state["last_error"]}
+
+
+OSV_ECOSYSTEMS = {"pypi": "PyPI", "npm": "npm"}      # our key -> OSV ecosystem name
+OSV_URL = "https://osv-vulnerabilities.storage.googleapis.com/%s/all.zip"
+
+
+class OSVFeeds:
+    """Offline OSV matching for language packages. Downloads the per-ecosystem advisory archive
+    (all.zip) on a daily cadence — the one outbound fetch, exactly like GeoIP — then indexes and
+    matches installed versions LOCALLY. Nothing about the inventory leaves the machine.
+
+    The index is filtered to the packages actually installed (set each scan via prepare()), so a
+    host holds advisories only for its own software, not the entire ecosystem. In 'auto' mode an
+    ecosystem is downloaded only once a package for it is present."""
+
+    def __init__(self, enabled=True, interval=86400, ecosystems="auto", cache_dir=None):
+        self.enabled = enabled
+        self.interval = max(3600, interval)
+        self.mode = (ecosystems or "auto")           # "auto" | "off" | "pypi,npm"
+        self.cache_dir = cache_dir or HERE
+        self.lock = threading.Lock()
+        self._idx = {}          # osv_eco -> {pkg_lower -> [compact_record, ...]}
+        self.wanted = {}        # osv_eco -> set(pkg_lower)
+        self.state = {}         # osv_eco -> {records, last_fetched, last_error, fetching}
+
+    def _wants(self, key):
+        if self.mode == "off":
+            return False
+        if self.mode == "auto":
+            return True
+        return key in {m.strip().lower() for m in self.mode.split(",") if m.strip()}
+
+    def _zip_path(self, key):
+        return os.path.join(self.cache_dir, "osv-%s.zip" % key)
+
+    def prepare(self, packages):
+        """Point the index at the currently-installed packages, fetching/indexing each active
+        ecosystem as needed. Called from the scanner's daily scan (blocking, bounded)."""
+        if not self.enabled or self.mode == "off":
+            return
+        want = {}
+        for p in packages or []:
+            key = _OSV_KEY_BY_NAME.get(p.get("ecosystem"))
+            if key and self._wants(key):
+                want.setdefault(OSV_ECOSYSTEMS[key], set()).add(str(p.get("name") or "").lower())
+        with self.lock:
+            self.wanted = want
+        for key, osv_eco in OSV_ECOSYSTEMS.items():
+            if osv_eco in want and want[osv_eco]:
+                self._ensure(key, osv_eco)
+            else:
+                with self.lock:
+                    self._idx.pop(osv_eco, None)
+
+    def _ensure(self, key, osv_eco):
+        st = self.state.setdefault(osv_eco, {"records": 0, "last_fetched": None,
+                                             "last_error": None, "fetching": False})
+        zp = self._zip_path(key)
+        fresh = os.path.exists(zp) and (time.time() - os.path.getmtime(zp)) < self.interval
+        if not fresh:
+            self._fetch(key, osv_eco)
+        if os.path.exists(zp):
+            self._index(key, osv_eco)
+
+    def _fetch(self, key, osv_eco):
+        st = self.state[osv_eco]
+        if st["fetching"]:
+            return
+        st["fetching"] = True
+        try:
+            req = urllib.request.Request(OSV_URL % osv_eco,
+                                         headers={"User-Agent": "%s (+offline OSV)" % USER_AGENT})
+            with urllib.request.urlopen(req, timeout=180) as r:
+                raw = r.read()
+            tmp = self._zip_path(key) + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(raw)
+            os.replace(tmp, self._zip_path(key))
+            st["last_fetched"] = time.time()
+            st["last_error"] = None
+        except Exception as e:  # noqa: BLE001
+            st["last_error"] = str(e)[:200]
+        finally:
+            st["fetching"] = False
+
+    def _index(self, key, osv_eco):
+        with self.lock:
+            wanted = set(self.wanted.get(osv_eco) or ())
+        if not wanted:
+            return
+        idx = {}
+        try:
+            with zipfile.ZipFile(self._zip_path(key)) as z:
+                for name in z.namelist():
+                    if not name.endswith(".json"):
+                        continue
+                    try:
+                        rec = json.loads(z.read(name))
+                    except (ValueError, OSError):
+                        continue
+                    self._index_record(rec, osv_eco, wanted, idx)
+        except (zipfile.BadZipFile, OSError) as e:
+            self.state.setdefault(osv_eco, {})["last_error"] = "index: %s" % str(e)[:160]
+            return
+        with self.lock:
+            self._idx[osv_eco] = idx
+            self.state.setdefault(osv_eco, {})["records"] = sum(len(v) for v in idx.values())
+
+    @staticmethod
+    def _index_record(rec, osv_eco, wanted, idx):
+        if rec.get("withdrawn"):
+            return
+        per_pkg = {}
+        for aff in rec.get("affected") or []:
+            pkg = (aff.get("package") or {})
+            if pkg.get("ecosystem") != osv_eco:
+                continue
+            pname = str(pkg.get("name") or "").lower()
+            if pname in wanted:
+                per_pkg.setdefault(pname, []).append(aff)
+        if not per_pkg:
+            return
+        compact = {"id": rec.get("id"), "cve": _osv_cve(rec), "severity": _osv_severity(rec),
+                   "title": rec.get("summary") or (rec.get("details") or "")[:120],
+                   "url": _osv_url(rec)}
+        for pname, affs in per_pkg.items():
+            idx.setdefault(pname, []).append(dict(compact, affected=affs))
+
+    def match(self, ecosystem, name, version):
+        """Advisories affecting (ecosystem, name, version), in the scanner's advisory format."""
+        with self.lock:
+            bucket = (self._idx.get(ecosystem) or {}).get(str(name or "").lower())
+            recs = list(bucket) if bucket else []
+        hits = []
+        for rec in recs:
+            fixed = _osv_affected(version, rec.get("affected"))
+            if fixed is None:
+                continue
+            hits.append({"id": rec["id"], "cve": rec["cve"], "severity": rec["severity"],
+                         "title": rec["title"], "url": rec["url"],
+                         "fixed": fixed or None, "example": False})
+        return hits
+
+    def status(self):
+        with self.lock:
+            ecos = {e: {"records": self.state.get(e, {}).get("records", 0),
+                        "wanted": len(self.wanted.get(e) or ()),
+                        "last_fetched": self.state.get(e, {}).get("last_fetched"),
+                        "last_error": self.state.get(e, {}).get("last_error")}
+                    for e in OSV_ECOSYSTEMS.values()}
+        return {"enabled": self.enabled, "mode": self.mode, "ecosystems": ecos}
+
+
+_OSV_KEY_BY_NAME = {v: k for k, v in OSV_ECOSYSTEMS.items()}   # "PyPI"->"pypi", "npm"->"npm"
+
+
+
+# A small, deliberately EXAMPLE advisory set (keyed to dpkg package names), flagged example:true
+# end-to-end so a finding is never passed off as a confirmed CVE. Point --vuln-feed-url at a live
+# feed for real advisories; the authoritative distro signal is APT security currency below.
+VULN_SEED_ADVISORIES = [
+    {"id": "SCOUTER-EXAMPLE-OPENSSL", "example": True, "severity": "medium",
+     "match": {"name": "openssl"}, "affected": [{"lt": "3.0.0"}], "fixed": "3.0.0",
+     "title": "openssl behind a major release (example advisory)",
+     "url": "https://www.openssl.org/news/vulnerabilities.html"},
+    {"id": "SCOUTER-EXAMPLE-LIBSSL", "example": True, "severity": "medium",
+     "match": {"name": "libssl1.1"}, "affected": [{"lt": "9.9"}], "fixed": None,
+     "title": "libssl1.1 is end-of-life (example advisory)",
+     "url": "https://www.openssl.org/news/vulnerabilities.html"},
+]
+
+
+def _parse_apt_upgrade(text):
+    """Parse `apt-get -s upgrade` output. Each upgradable package is an 'Inst' line, e.g.
+       Inst libfoo [1.0] (1.1 Ubuntu:22.04/jammy-security [amd64])
+    Flag the ones whose target archive is a security pocket (jammy-security / bookworm-security /
+    Debian-Security). Uses APT's cached lists, so it never hits the network."""
+    out = []
+    for line in (text or "").splitlines():
+        if not line.startswith("Inst "):
+            continue
+        toks = line.split()
+        if len(toks) < 2:
+            continue
+        name = toks[1]
+        paren = line.split("(", 1)[1].lower() if "(" in line else ""
+        out.append({"name": name, "security": ("security" in paren),
+                    "line": line.strip()[:200]})
+    return out
+
+
+def _parse_dpkg_status(path):
+    """Installed packages (name, version) from the dpkg status file — a pure file read, no
+    dpkg-query subprocess (matching DpkgIndex). Only fully-installed entries are returned."""
+    out = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            blob = f.read()
+    except OSError:
+        return out
+    for para in blob.split("\n\n"):
+        name = ver = status = None
+        for line in para.splitlines():
+            if line.startswith("Package: "):
+                name = line[9:].strip()
+            elif line.startswith("Version: "):
+                ver = line[9:].strip()
+            elif line.startswith("Status: "):
+                status = line[8:].strip()
+        if name and ver and status and status.endswith(" installed"):
+            out.append({"name": name, "version": ver})
+    return out
+
+
+class LinuxOSCurrency:
+    """Distro/kernel currency + pending APT security updates — the authoritative Linux exposure
+    signal (a security update exists precisely when a CVE has a distro fix available)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self._state = {}
+
+    @staticmethod
+    def _os_release():
+        info = {}
+        try:
+            with open("/etc/os-release") as f:
+                for line in f:
+                    if "=" in line:
+                        k, v = line.rstrip("\n").split("=", 1)
+                        info[k] = v.strip().strip('"')
+        except OSError:
+            pass
+        return info
+
+    @staticmethod
+    def _kernel():
+        rc, out, _ = run(["uname", "-r"], timeout=5)
+        return out.strip() if rc == 0 and out.strip() else None
+
+    @staticmethod
+    def _pending_updates():
+        # Simulated upgrade against the CACHED package lists — no network, no state change.
+        rc, out, err = run(["apt-get", "-s", "upgrade"], timeout=60)
+        if rc == 124:
+            return None, "apt-get timed out"
+        if rc not in (0, 100):            # 100 = lock held / busy; treat as "no data this cycle"
+            return None, (err or "apt-get unavailable")[:160]
+        return _parse_apt_upgrade(out), None
+
+    def check(self):
+        osr = self._os_release()
+        pending, perr = self._pending_updates()
+        state = {
+            "distro": osr.get("NAME") or osr.get("ID"),
+            "version": osr.get("VERSION_ID") or osr.get("VERSION"),
+            "pretty": osr.get("PRETTY_NAME"),
+            "kernel": self._kernel(),
+            "pending": pending or [],
+            "pending_error": perr,
+            "reboot_required": os.path.exists("/var/run/reboot-required"),
+            "checked": time.time(),
+        }
+        with self.lock:
+            self._state = state
+        return state
+
+    @staticmethod
+    def findings(state):
+        pend = state.get("pending") or []
+        if not pend:
+            return []
+        sec = [u for u in pend if u.get("security")]
+        sev = "high" if sec else "medium"
+        label = "%d pending package update%s" % (len(pend), "" if len(pend) == 1 else "s")
+        if sec:
+            label += " (%d security)" % len(sec)
+        titles = [u.get("name") for u in pend if u.get("name")]
+        return [{
+            "source": "os-update", "kind": "os_currency", "severity": sev,
+            "component": state.get("pretty") or state.get("distro") or "Linux",
+            "installed_version": state.get("version"),
+            "title": label, "detail": ", ".join(titles[:12])[:400], "fixed": None,
+            "restart": bool(state.get("reboot_required")),
+        }]
+
+
+class LinuxSoftwareInventory:
+    """Installed dpkg packages + globally-installed language packages (pip / npm)."""
+
+    DPKG_STATUS = "/var/lib/dpkg/status"
+
+    def __init__(self, osv="auto"):
+        self.osv = (osv or "auto")
+
+    def _want_eco(self, key):
+        if self.osv == "off":
+            return False
+        if self.osv == "auto":
+            return True
+        return key in {m.strip().lower() for m in self.osv.split(",") if m.strip()}
+
+    def _packages(self):
+        out = []
+        if self._want_eco("pypi"):
+            out += _pip_packages()
+        if self._want_eco("npm"):
+            out += _npm_global_packages()
+        return out
+
+    def collect(self):
+        dpkg, pkgs = _parse_dpkg_status(self.DPKG_STATUS), self._packages()
+        return {"dpkg": dpkg, "packages": pkgs, "collected": time.time(),
+                "counts": {"dpkg": len(dpkg), "packages": len(pkgs)}}
+
+
+class VulnScanner:
+    """Orchestrates OS-currency + inventory + feed/OSV matching into prioritized findings.
+
+    Runs on a long timer (daily); apt-get/pip/npm are comparatively slow, so this never runs on
+    the per-snapshot path. dpkg findings are flagged 'live' when a running process is owned by the
+    package (resolved through the agent's DpkgIndex)."""
+
+    def __init__(self, enabled=True, interval=86400, feed_url=None, history=None,
+                 osv="auto", dpkg_index=None):
+        self.enabled = enabled
+        self.interval = max(3600, interval)
+        self.history = history
+        self.dpkg_index = dpkg_index
+        self.os_currency = LinuxOSCurrency()
+        self.inventory = LinuxSoftwareInventory(osv=osv)
+        self.feed = VulnFeed(enabled=enabled, interval=interval, url=feed_url)
+        self.osv = OSVFeeds(enabled=enabled, interval=interval, ecosystems=osv)
+        self.lock = threading.Lock()
+        self._result = {"findings": [], "counts": {}, "os": {}, "scanned": None,
+                        "scanning": False, "error": None, "summary": {}}
+        self._stop = False
+
+    def start(self):
+        if self.enabled:
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    def stop(self):
+        self._stop = True
+
+    def _loop(self):
+        time.sleep(8)
+        while not self._stop:
+            with self.lock:
+                last = self._result["scanned"]
+            age = (time.time() - last) if last else 1e12
+            if age >= self.interval:
+                self.scan()
+            time.sleep(300)
+
+    def _live_packages(self):
+        """dpkg package names that own a currently-running process executable."""
+        idx = self.dpkg_index
+        if not idx:
+            return set()
+        try:
+            live = set()
+            for p in collect_processes().values():
+                exe = p.get("exe")
+                if not exe:
+                    continue
+                pkg = idx.package_for(exe)
+                if pkg:
+                    live.add(pkg)
+            return live
+        except Exception:  # noqa: BLE001 — liveness is best-effort enrichment, never fatal
+            return set()
+
+    def _build_findings(self, osc, inv, live_pkgs=None):
+        live_pkgs = live_pkgs or set()
+        out = list(LinuxOSCurrency.findings(osc))
+        for pkg in inv.get("dpkg", []):
+            hits = self.feed.match(name=pkg.get("name"), version=pkg.get("version"))
+            if not hits:
+                continue
+            live = pkg.get("name") in live_pkgs
+            for adv in hits:
+                out.append(self._finding(adv, "dpkg", pkg.get("name"),
+                                         pkg.get("version"), live=live))
+        for pkg in inv.get("packages", []):
+            eco = pkg.get("ecosystem")
+            for adv in self.osv.match(eco, pkg.get("name"), pkg.get("version")):
+                out.append(self._finding(adv, "pkg:" + (eco or "").lower(),
+                                         "%s (%s)" % (pkg.get("name"), eco), pkg.get("version")))
+        out = self._dedupe(out)
+        out.sort(key=lambda f: (-SEV_RANK.get(f.get("severity"), 0),
+                                not f.get("live"), f.get("component") or ""))
+        return out
+
+    @staticmethod
+    def _finding(adv, kind, component, version, live=False):
+        return {"source": "feed", "kind": kind,
+                "severity": adv.get("severity", "medium"),
+                "id": adv.get("id"), "cve": adv.get("cve") or adv.get("id"),
+                "component": component, "installed_version": version,
+                "fixed": adv.get("fixed"), "title": adv.get("title"),
+                "url": adv.get("url"), "example": bool(adv.get("example")),
+                "live": bool(live)}
+
+    @staticmethod
+    def _dedupe(findings):
+        """Collapse the same CVE arriving via two records (e.g. GHSA + a distro entry) to one per
+        (component, advisory), keeping the highest severity and OR-ing the live flag."""
+        best, order = {}, []
+        for f in findings:
+            key = (f.get("component"), f.get("cve") or f.get("id") or f.get("title"))
+            cur = best.get(key)
+            if cur is None:
+                best[key] = dict(f)
+                order.append(key)
+            elif SEV_RANK.get(f.get("severity"), 0) > SEV_RANK.get(cur.get("severity"), 0):
+                live = cur.get("live") or f.get("live")
+                best[key] = dict(f)
+                best[key]["live"] = live
+            else:
+                cur["live"] = cur.get("live") or f.get("live")
+        return [best[k] for k in order]
+
+    @staticmethod
+    def _summary(findings):
+        counts = {}
+        for f in findings:
+            counts[f.get("severity", "info")] = counts.get(f.get("severity", "info"), 0) + 1
+        return {"total": len(findings), "by_severity": counts,
+                "example": sum(1 for f in findings if f.get("example")),
+                "live": sum(1 for f in findings if f.get("live"))}
+
+    def scan(self):
+        with self.lock:
+            self._result["scanning"] = True
+        try:
+            osc = self.os_currency.check()
+            inv = self.inventory.collect()
+            self.osv.prepare(inv.get("packages"))
+            findings = self._build_findings(osc, inv, self._live_packages())
+            result = {"findings": findings, "counts": inv.get("counts", {}),
+                      "os": osc, "scanned": time.time(), "scanning": False,
+                      "error": None, "summary": self._summary(findings)}
+        except Exception as e:  # noqa: BLE001
+            result = dict(self._result)
+            result.update({"scanning": False, "error": str(e)[:200]})
+        with self.lock:
+            self._result = result
+        return result
+
+    def status(self):
+        with self.lock:
+            res = dict(self._result)
+        res.update({"enabled": self.enabled, "interval": self.interval,
+                    "feed": self.feed.status(), "osv": self.osv.status()})
+        return res
+
+    def fleet_summary(self, top=15):
+        """A lean vuln summary for the mesh check-in. The os block uses the mesh's shared field
+        names (product_version / build_version) so one fleet view serves macOS and Linux:
+        product_version = distro version, build_version = kernel."""
+        with self.lock:
+            res = dict(self._result)
+        if not res.get("scanned"):
+            return None
+        osc = res.get("os") or {}
+        pend = osc.get("pending") or []
+        findings = res.get("findings") or []
+        return {
+            "scanned": res.get("scanned"),
+            "os": {"product_version": osc.get("version"),
+                   "build_version": osc.get("kernel"),
+                   "xprotect": None,
+                   "pending": len(pend),
+                   "security": sum(1 for u in pend if u.get("security")),
+                   "restart": bool(osc.get("reboot_required"))},
+            "counts": res.get("counts") or {},
+            "summary": res.get("summary") or {},
+            "top": [{"severity": f.get("severity"), "component": f.get("component"),
+                     "installed_version": f.get("installed_version"), "fixed": f.get("fixed"),
+                     "cve": f.get("cve"), "kind": f.get("kind"), "title": f.get("title"),
+                     "example": bool(f.get("example")), "live": bool(f.get("live"))}
+                    for f in findings[:top]],
         }
 
 
@@ -13553,6 +14348,13 @@ def make_handler(cache):
             elif path == "/api/geoip":
                 enr = cache.enrich
                 self._send_json(enr.geo.status() if (enr and enr.geo) else {"enabled": False})
+            elif path == "/api/vulns":
+                # CTEM-Lite vuln scan: APT update currency + dpkg/pip/npm inventory + advisory matches,
+                # all computed locally. Whitelisted read-only so the mesh can fan it across the fleet.
+                vs = getattr(cache, "vulns", None)
+                if vs and "rescan=1" in self.path:
+                    threading.Thread(target=vs.scan, daemon=True).start()
+                self._send_json(vs.status() if vs else {"enabled": False})
             elif path == "/api/vr":
                 self._send_json(cache.vr.status() if cache.vr
                                 else {"enabled": False, "available": False, "running": False})
@@ -15787,7 +16589,7 @@ class MeshReporter:
                       "/api/groups", "/api/rules", "/api/suppressions", "/api/playbook",
                       "/api/alert-history", "/api/ai-analysis", "/api/health", "/api/sensors",
                       "/api/export", "/api/ioc-feeds", "/api/geoip", "/api/respond", "/api/ai",
-                      "/api/auth-map"}   # fleet CONFIG read (Phase B) + Mesh auth map
+                      "/api/auth-map", "/api/vulns"}   # fleet CONFIG read (Phase B) + Mesh auth map + vuln scan
     VIEW_MAX_BYTES = 6 * 1024 * 1024          # cap a relayed view body (stays under the mesh ingest cap)
     # POST endpoints the mesh may drive on demand for REMOTE MANAGEMENT — only when the operator opted
     # this host into remote commands (--mesh-commands), gated by the mesh admin token.
@@ -16294,6 +17096,8 @@ class MeshReporter:
             "alerts": alerts,      # the open queue (all of it for a capable mesh); closed pulled on demand
             "collector": (self.cache.syslog.capability()        # XDR: syslog-collector capability, for the election
                           if getattr(self.cache, "syslog", None) else None),
+            "vulns": (self.cache.vulns.fleet_summary()           # CTEM-Lite: compact vuln rollup for the fleet view
+                      if getattr(self.cache, "vulns", None) and self.cache.vulns.enabled else None),
         }
 
     def _ssl_ctx(self):
@@ -17633,6 +18437,20 @@ def main():
     ap.add_argument("--syslog-priority", type=int, default=0,
                     help="collector election priority — the mesh picks the highest-priority online host "
                          "per site as the Designated Collector. Pin an always-on host with a higher value.")
+    ap.add_argument("--no-vuln", action="store_true",
+                    help="disable in-agent vulnerability scanning (APT update currency + dpkg/pip/npm "
+                         "inventory + advisory matching). On by default.")
+    ap.add_argument("--vuln-interval", type=int, default=86400,
+                    help="seconds between vulnerability scans (default daily; apt-get/pip/npm are slow, "
+                         "so this runs on a long timer, never per snapshot).")
+    ap.add_argument("--vuln-feed-url", default=None,
+                    help="URL of a vulnerability advisory feed (JSON) to match the inventory against. "
+                         "Fetched once per interval and matched locally; nothing about the inventory "
+                         "leaves the machine. Without one, only the built-in example advisories apply.")
+    ap.add_argument("--vuln-osv", default="auto", metavar="auto|off|LIST",
+                    help="language-ecosystem scanning via OSV (offline): 'auto' (default; scan pip/npm "
+                         "globals when present), 'off', or a comma list like 'pypi,npm'. The per-ecosystem "
+                         "OSV archive is downloaded daily and matched locally — nothing leaves the machine.")
     args = ap.parse_args()
     if args.break_glass is not None:
         # Arm or end a window and exit — this does not start an agent. The running agent notices the
@@ -17772,6 +18590,10 @@ def main():
                                    bind=args.syslog_bind, tcp=args.syslog_tcp,
                                    keep_allows=args.syslog_keep_allows,
                                    priority=args.syslog_priority)   # XDR Phase 2 edge collector
+    cache.vulns = VulnScanner(enabled=not args.no_vuln, interval=args.vuln_interval,
+                              feed_url=args.vuln_feed_url, history=history, osv=args.vuln_osv,
+                              dpkg_index=getattr(fs_sig, "dpkg", None))   # CTEM-Lite vuln scan
+    cache.vulns.start()
     cache.local_control = bool(args.local_control)
     cache.autohunts = AutoHuntStore()      # hunts raised by validated-malicious alerts
     cache.chat = chat                      # chat alerting (unmanaged hosts only)

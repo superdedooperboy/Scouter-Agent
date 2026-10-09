@@ -6,6 +6,30 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## Linux agent 1.3.0 — 2026-10-09
+
+### Added
+
+**In-agent vulnerability scanning (CTEM-Lite) for Linux.** The Linux agent gains the same
+Vulnerabilities tab and `GET /api/vulns` as macOS, Debian/Ubuntu-first and entirely local:
+
+- **APT update currency** — distro/kernel (`/etc/os-release`, `uname`), pending package updates
+  parsed from a simulated `apt-get -s upgrade` against the cached lists (no network), with the
+  **security-pocket** ones flagged (`*-security`), plus a reboot-required check. This is the
+  authoritative Linux exposure signal — a distro security update exists precisely when a CVE has a fix
+  available.
+- **Inventory** — installed dpkg packages (a pure read of `/var/lib/dpkg/status`, no `dpkg-query`
+  spawns) plus pip/npm globals.
+- **Advisory matching** — the shared GeoIP-style engine: a JSON advisory feed (`--vuln-feed-url`, with
+  a small flagged example set) matched against dpkg packages, and offline **OSV** language-ecosystem
+  matching (`--vuln-osv auto|off|LIST`), downloaded per-ecosystem and indexed only for installed
+  packages.
+
+A dpkg finding is flagged **"vulnerable and live"** (⚡, sorted first) when a running process is owned
+by that package, resolved through the agent's existing dpkg index. The compact rollup rides the mesh
+check-in so a mixed macOS/Linux fleet shows one unified Vulnerabilities view (Scouter Mesh 0.7.35). On
+by default; `--no-vuln` / `--vuln-interval`. New tests in `linux/tests/test_vuln_scanner.py`.
+
 ## macOS agent 1.3.0 — 2026-10-08
 
 ### Added

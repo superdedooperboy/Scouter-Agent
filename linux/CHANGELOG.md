@@ -6,6 +6,11 @@ All notable changes to Linux Scouter are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **In-agent vulnerability scanning (CTEM-Lite), 1.3.0** — APT update currency
+  (pending updates with security-pocket ones flagged + reboot-required), a
+  dpkg + pip/npm inventory, and local advisory/OSV matching, on a new
+  Vulnerabilities tab and `/api/vulns`; dpkg findings flagged "live" when a
+  running process is owned by the package. On by default (`--no-vuln`).
 - Initial repository scaffold ported from the Mac Scouter base: MIT license,
   README, `.gitignore`, and this changelog.
 - Portable core carried over unchanged: graph UI (`index.html`), HTTP snapshot

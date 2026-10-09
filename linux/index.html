@@ -302,6 +302,7 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   /* Metrics tab */
   #metrics{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:16px}
   #auth{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:16px}
+  #vulns{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:16px}
   #incidents{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:12px}
   #attack{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:10px 12px}
   #groups{position:absolute;inset:0;overflow:hidden;display:none;background:var(--bg)}
@@ -885,6 +886,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <button id="tabResponse" onclick="showTab('response')">Response</button>
       <button id="tabSensors" onclick="showTab('sensors')">Sensors<span id="senBadge" class="tabbadge" style="display:none"></span></button>
       <button id="tabMetrics" onclick="showTab('metrics')">Metrics</button>
+      <button id="tabVulns" onclick="showTab('vulns')">Vulnerabilities</button>
       <button id="tabAttack" onclick="showTab('attack')">ATT&amp;CK</button>
       <button id="tabGroups" onclick="showTab('groups')">Threat Groups</button>
     </div>
@@ -1159,6 +1161,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     </div>
     <div id="detections"></div>
     <div id="metrics"></div>
+    <div id="vulns"></div>
     <div id="auth"></div>
     <div id="response"></div>
     <div id="sensors"></div>
@@ -2622,8 +2625,8 @@ function treeSelect(id){
 // ---- tabs / meta ----
 function showTab(t){
   currentTab=t;
-  document.getElementById('app').classList.toggle('nodetail', t==='metrics'||t==='auth');  // reclaim the unused right rail
-  for(const [tab,btn] of [['graph','tabGraph'],['tree','tabTree'],['hunt','tabHunt'],['timeline','tabTimeline'],['alerts','tabAlerts'],['detections','tabDetections'],['sensors','tabSensors'],['response','tabResponse'],['metrics','tabMetrics'],['auth','tabAuth'],['incidents','tabIncidents'],['attack','tabAttack'],['groups','tabGroups']])
+  document.getElementById('app').classList.toggle('nodetail', t==='metrics'||t==='auth'||t==='vulns');  // reclaim the unused right rail
+  for(const [tab,btn] of [['graph','tabGraph'],['tree','tabTree'],['hunt','tabHunt'],['timeline','tabTimeline'],['alerts','tabAlerts'],['detections','tabDetections'],['sensors','tabSensors'],['response','tabResponse'],['metrics','tabMetrics'],['vulns','tabVulns'],['auth','tabAuth'],['incidents','tabIncidents'],['attack','tabAttack'],['groups','tabGroups']])
     document.getElementById(btn).classList.toggle('on',t===tab);
   document.getElementById('auth').style.display=t==='auth'?'block':'none';
   document.getElementById('alerts').style.display=t==='alerts'?'block':'none';
@@ -2634,6 +2637,7 @@ function showTab(t){
   document.getElementById('sensors').style.display=t==='sensors'?'block':'none';
   document.getElementById('timeline').style.display=t==='timeline'?'block':'none';
   document.getElementById('metrics').style.display=t==='metrics'?'block':'none';
+  document.getElementById('vulns').style.display=t==='vulns'?'block':'none';
   document.getElementById('incidents').style.display=t==='incidents'?'block':'none';
   document.getElementById('attack').style.display=t==='attack'?'block':'none';
   document.getElementById('groups').style.display=t==='groups'?'block':'none';
@@ -2648,6 +2652,7 @@ function showTab(t){
   if(t==='sensors') renderSensors();
   if(t==='timeline') openTimeline();
   if(t==='metrics') renderMetrics();
+  if(t==='vulns') renderVulns();
   if(t==='auth') renderAuthMap();
   if(t==='incidents') openIncidents();   // one-shot load + render; no auto-refresh (use the Refresh button)
   if(t==='attack') renderAttack();
@@ -3973,6 +3978,65 @@ function restartAgent(){
     };
     setTimeout(tick,1500);                         // give it a moment to drop the socket and rebind
   });
+}
+function vAgo(ts){ if(!ts) return 'never'; const d=Date.now()/1000-ts; if(d<3600) return Math.round(d/60)+'m ago'; if(d<86400) return Math.round(d/3600)+'h ago'; return Math.round(d/86400)+'d ago'; }
+function renderVulns(){
+  const box=document.getElementById('vulns'); if(!box) return;
+  box.innerHTML='<div class="hint">Scanning posture…</div>';
+  fetch('/api/vulns').then(r=>r.json()).then(d=>{ vulnDrawHost(d); }).catch(e=>{ box.innerHTML='<div class="hint">Error: '+esc(''+e)+'</div>'; });
+}
+function vulnRescan(){ const b=document.getElementById('vulns'); if(b) b.innerHTML='<div class="hint">Rescanning… (apt/dpkg inventory can take a moment)</div>'; fetch('/api/vulns?rescan=1').then(r=>r.json()).then(()=>{ setTimeout(renderVulns,1500); }).catch(()=>{}); }
+function vulnDrawHost(d){
+  const box=document.getElementById('vulns'); if(!box) return;
+  if(d && d.enabled===false){ box.innerHTML='<div class="empty-big">Vulnerability scanning is disabled on this host (<code>--no-vuln</code>).</div>'; return; }
+  const os=(d&&d.os)||{}, sum=(d&&d.summary)||{}, bysev=sum.by_severity||{}, feed=(d&&d.feed)||{}, osv=(d&&d.osv)||{}, cnt=(d&&d.counts)||{};
+  const findings=(d&&d.findings)||[];
+  let h='';
+  h+='<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:2px 0 12px">';
+  h+='<div style="font-size:15px;font-weight:600">Vulnerability posture</div><span style="flex:1"></span>';
+  h+='<span class="hint" style="margin:0">last scan '+vAgo(d&&d.scanned)+(d&&d.scanning?' · scanning…':'')+'</span>';
+  h+='<button class="btn" onclick="vulnRescan()">Rescan</button></div>';
+  if(!(d&&d.scanned)){ h+='<div class="empty-big">No scan yet — the first scan runs shortly after launch (it checks APT for pending updates and inventories your packages). <span class="clr" style="color:var(--accent);cursor:pointer;text-decoration:underline" onclick="vulnRescan()">Scan now</span></div>'; box.innerHTML=h; return; }
+  // --- OS currency banner ---
+  const pend=os.pending||[]; const sec=pend.filter(u=>u.security).length;
+  let band, bandcol;
+  if(sec){ band='Behind on <b>'+sec+' security update'+(sec===1?'':'s')+'</b>'+(pend.length>sec?(' (+'+(pend.length-sec)+' other)'):'')+(os.reboot_required?' · reboot required':''); bandcol='var(--sev-high)'; }
+  else if(pend.length){ band='<b>'+pend.length+' package update'+(pend.length===1?'':'s')+'</b> pending'; bandcol='var(--sev-medium)'; }
+  else { band='Up to date on APT security updates'; bandcol='var(--good)'; }
+  h+='<div style="border:1px solid var(--line);border-left:3px solid '+bandcol+';border-radius:8px;background:var(--panel);padding:10px 13px;margin-bottom:12px">';
+  h+='<span style="color:'+bandcol+'">'+band+'</span>';
+  h+='<span class="hint" style="margin-left:10px">'+esc(os.pretty||os.distro||'Linux')+(os.kernel?(' · kernel '+esc(os.kernel)):'')+'</span>';
+  if(pend.length){ h+='<div class="hint" style="margin-top:4px">'+pend.slice(0,10).map(u=>esc(u.name||'')).join(' · ')+'</div>'; }
+  h+='</div>';
+  // --- summary tiles / pills ---
+  const live=sum.live||0;
+  h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">';
+  ['critical','high','medium','low'].forEach(s=>{ h+='<span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:20px;padding:3px 11px;font-size:12px"><span style="width:9px;height:9px;border-radius:50%;background:'+(SEV_COLOR[s]||'var(--chip)')+'"></span>'+s+' <b>'+(bysev[s]||0)+'</b></span>'; });
+  if(live) h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--sev-high);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--sev-high)">⚡ '+live+' vulnerable &amp; running</span>';
+  h+='<span class="hint" style="align-self:center">'+(cnt.dpkg||0)+' dpkg · '+(cnt.packages||0)+' pkgs scanned</span>';
+  h+='</div>';
+  // --- findings table ---
+  if(!findings.length){ h+='<div class="empty-big" style="color:var(--good)">No known-vulnerable software found in the current inventory.</div>'; box.innerHTML=h; return; }
+  h+='<table class="vtbl" style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--line)">'+
+     '<th style="padding:6px 8px">Severity</th><th style="padding:6px 8px">Component</th><th style="padding:6px 8px">Installed</th><th style="padding:6px 8px">Fixed in</th><th style="padding:6px 8px">Advisory</th></tr></thead><tbody>';
+  findings.forEach(f=>{
+    const col=SEV_COLOR[f.severity]||'var(--chip)';
+    const adv=f.url?('<a href="'+esc(f.url)+'" target="_blank" rel="noopener" style="color:var(--accent)">'+esc(f.cve||f.id||'link')+'</a>'):esc(f.cve||f.id||'—');
+    h+='<tr style="border-bottom:1px solid var(--line)">'+
+       '<td style="padding:6px 8px"><span style="display:inline-block;min-width:58px;text-align:center;background:'+col+';color:#0b0e14;border-radius:5px;padding:1px 7px;font-size:11px;font-weight:600">'+esc(f.severity||'')+'</span></td>'+
+       '<td style="padding:6px 8px">'+esc(f.component||'?')+(f.live?' <span title="a process from this package is running now" style="color:var(--sev-high)">⚡</span>':'')+(f.example?' <span class="hint" style="margin:0;border:1px solid var(--line);border-radius:4px;padding:0 4px">example</span>':'')+'<div class="hint" style="margin:0">'+esc(f.title||'')+'</div></td>'+
+       '<td style="padding:6px 8px;font-variant-numeric:tabular-nums">'+esc(f.installed_version||'—')+'</td>'+
+       '<td style="padding:6px 8px;font-variant-numeric:tabular-nums;color:var(--good)">'+esc(f.fixed||'—')+'</td>'+
+       '<td style="padding:6px 8px">'+adv+'</td></tr>';
+  });
+  h+='</tbody></table>';
+  // --- provenance / honesty ---
+  const ecoBits=Object.keys((osv.ecosystems)||{}).map(e=>e+' '+((osv.ecosystems[e]||{}).records||0)).join(' · ');
+  h+='<div class="hint" style="margin-top:10px">Advisory sources: APT security currency (authoritative) · '+(feed.url?('custom feed ('+feed.advisories+')'):('built-in '+feed.seed+' example'))+
+     (osv.mode&&osv.mode!=='off'?(' · OSV '+esc(osv.mode)+(ecoBits?(' ['+esc(ecoBits)+']'):'')):'')+
+     '. '+(sum.example?('Rows tagged <b>example</b> are demonstration advisories, not confirmed CVEs — point <code>--vuln-feed-url</code> at a live feed. '):'')+
+     'Everything is computed on this machine; no inventory leaves the host.</div>';
+  box.innerHTML=h;
 }
 function renderMetrics(){
   const box=document.getElementById('metrics'); if(!box) return;

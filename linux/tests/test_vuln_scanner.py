@@ -186,6 +186,86 @@ class TestRemediation(unittest.TestCase):
         self.assertEqual(vs._result["summary"]["total"], 0)
 
 
+class TestDistroFamilies(unittest.TestCase):
+    def test_family_detection(self):
+        self.assertEqual(agent._distro_family({"ID": "ubuntu", "ID_LIKE": "debian"}), "debian")
+        self.assertEqual(agent._distro_family({"ID": "debian"}), "debian")
+        self.assertEqual(agent._distro_family({"ID": "rocky", "ID_LIKE": "rhel centos fedora"}), "rhel")
+        self.assertEqual(agent._distro_family({"ID": "fedora"}), "rhel")
+        self.assertEqual(agent._distro_family({"ID": "alpine"}), "alpine")
+        self.assertIsNone(agent._distro_family({"ID": "arch"}))
+
+    def test_dnf_checkupdate_and_security(self):
+        sec = agent._parse_dnf_security(
+            "RHSA-2024:1234 Important/Sec. bash-5.1.8-9.el9.x86_64\n"
+            "FEDORA-2024-aa Moderate/Sec. python3-libs-3.9.18-1.el9.x86_64\n"
+            "RHBA-2024:9  bugfix        tzdata-2024a-1.el9.noarch")
+        self.assertEqual(sec, {"bash", "python3-libs"})
+        ups = agent._parse_dnf_checkupdate(
+            "\nbash.x86_64        5.1.8-9.el9     baseos\n"
+            "python3-libs.x86_64 3.9.18-1.el9    appstream\n"
+            "tzdata.noarch      2024a-1.el9     baseos\n"
+            "Obsoleting Packages\n", security_names=sec)
+        bysec = {u["name"]: u["security"] for u in ups}
+        self.assertEqual(set(bysec), {"bash", "python3-libs", "tzdata"})
+        self.assertTrue(bysec["bash"]); self.assertFalse(bysec["tzdata"])
+
+    def test_apk_parsers(self):
+        up = agent._parse_apk_upgradable("busybox-1.36.1-r5 < 1.36.1-r7\nssl_client-1.36.1-r5 < 1.36.1-r7")
+        self.assertEqual([u["name"] for u in up], ["busybox", "ssl_client"])
+        inv = agent._parse_apk_info("busybox-1.36.1-r5\nmusl-1.2.4-r2\npy3-pip-23.1.2-r0")
+        d = {x["name"]: x["version"] for x in inv}
+        self.assertEqual(d["busybox"], "1.36.1-r5")
+        self.assertEqual(d["py3-pip"], "23.1.2-r0")
+
+    def test_rpm_parser_and_nevra(self):
+        inv = agent._parse_rpm_qa("bash 5.1.8-9.el9\npython3-libs 3.9.18-1.el9")
+        self.assertEqual({x["name"]: x["version"] for x in inv}["python3-libs"], "3.9.18-1.el9")
+        self.assertEqual(agent._nevra_name("bash-5.1.8-9.el9"), "bash")
+        self.assertEqual(agent._nevra_name("python3-libs-3.9.18-1.el9"), "python3-libs")
+
+    def test_os_currency_findings_per_family(self):
+        f = agent.LinuxOSCurrency.findings({"family": "rhel", "version": "9", "pending": [
+            {"name": "bash", "security": True}]})[0]
+        self.assertIn("dnf", f["description"])
+        self.assertTrue(any("redhat" in r or "rockylinux" in r for r in f["references"]))
+        f2 = agent.LinuxOSCurrency.findings({"family": "alpine", "version": "3.19", "pending": [
+            {"name": "busybox", "security": False}]})[0]
+        self.assertIn("apk", f2["description"])
+
+
+class TestEdrAlerts(unittest.TestCase):
+    def _scanner(self, sev="critical"):
+        d = tempfile.mkdtemp(); self.fired = []
+        vs = agent.VulnScanner(enabled=False, feed_url=None, osv="off",
+                               alert_severity=sev, on_alert=lambda f: self.fired.append(f))
+        vs._alerted_path = os.path.join(d, "a.json"); vs._alerted, vs._alert_baselined = set(), False
+        vs.remediation = agent.VulnRemediationStore(path=os.path.join(d, "r.json"))
+        return vs
+
+    def _f(self, sev, live=False, cve="CVE-X"):
+        return {"severity": sev, "component": "openssl", "cve": cve, "kind": "dpkg",
+                "sig": "dpkg|openssl|%s" % cve.lower(), "live": live, "remediation": None}
+
+    def test_baseline_new_threshold_live(self):
+        vs = self._scanner("critical")
+        vs._raise_alerts([self._f("critical", cve="C1")])          # baseline, silent
+        self.assertEqual(self.fired, [])
+        vs._raise_alerts([self._f("critical", cve="C1"), self._f("critical", cve="C2")])
+        self.assertEqual([f["cve"] for f in self.fired], ["C2"])   # only the new one
+        vs._alerted = set(); vs._alert_baselined = True            # reset for threshold check
+        vs._raise_alerts([self._f("high", cve="H1")]); self.assertEqual([f["cve"] for f in self.fired], ["C2"])  # high not live -> none new
+        vs._raise_alerts([self._f("high", live=True, cve="H2")])   # high AND live -> alerts
+        self.assertEqual(self.fired[-1]["cve"], "H2")
+
+    def test_off_and_remediated(self):
+        vs = self._scanner("off"); vs._alert_baselined = True
+        vs._raise_alerts([self._f("critical")]); self.assertEqual(self.fired, [])
+        vs2 = self._scanner("critical"); vs2._alert_baselined = True
+        g = self._f("critical"); g["remediation"] = {"status": "accepted"}
+        vs2._raise_alerts([g]); self.assertEqual(self.fired, [])
+
+
 class TestEnrichment(unittest.TestCase):
     def test_osv_enriched_and_os_currency_description(self):
         rec = {"id": "GHSA-x", "summary": "s", "details": "the flaw", "aliases": ["CVE-9"],

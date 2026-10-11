@@ -91,7 +91,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -4169,6 +4169,90 @@ def _parse_dpkg_status(path):
     return out
 
 
+def _distro_family(osr):
+    """Which package manager this distro uses, from /etc/os-release ID + ID_LIKE:
+    'debian' (apt/dpkg), 'rhel' (dnf/rpm — Fedora/RHEL/Rocky/Alma/Amazon), 'alpine' (apk), or None."""
+    toks = set((((osr.get("ID") or "") + " " + (osr.get("ID_LIKE") or "")).lower()).split())
+    if toks & {"debian", "ubuntu"}:
+        return "debian"
+    if toks & {"rhel", "fedora", "centos", "rocky", "almalinux", "ol", "amzn"}:
+        return "rhel"
+    if "alpine" in toks:
+        return "alpine"
+    return None
+
+
+def _nevra_name(nevra):
+    """Package name from an RPM NEVRA or Alpine name-ver-rN (strip the trailing version + release)."""
+    parts = (nevra or "").rsplit("-", 2)
+    return parts[0] if len(parts) == 3 else (nevra or "")
+
+
+def _parse_dnf_security(text):
+    """Package names with a pending SECURITY advisory, from `dnf updateinfo list --security`
+    (rows like 'RHSA-2024:1234 Important/Sec. bash-5.1.8-9.el9.x86_64')."""
+    names = set()
+    for line in (text or "").splitlines():
+        p = line.split()
+        if len(p) >= 3 and "sec" in p[1].lower():
+            names.add(_nevra_name(p[-1].rsplit(".", 1)[0]))      # drop .arch, then NEVRA->name
+    return names
+
+
+def _parse_dnf_checkupdate(text, security_names=None):
+    """Parse `dnf check-update` output (rows like 'bash.x86_64  5.1.8-9.el9  baseos')."""
+    sec = security_names or set()
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.rstrip()
+        if not line or line[0].isspace() or line.startswith(("Obsoleting", "Last metadata", "Security:")):
+            continue
+        p = line.split()
+        if len(p) < 3 or "." not in p[0]:
+            continue
+        name = p[0].rsplit(".", 1)[0]                            # strip .arch
+        out.append({"name": name, "security": (name in sec), "line": line.strip()[:200]})
+    return out
+
+
+def _parse_apk_upgradable(text):
+    """Parse `apk version -l '<'` (rows like 'busybox-1.36.1-r5 < 1.36.1-r7'). Alpine has no
+    separate security channel, so nothing is flagged security here (all upgrades are from -stable)."""
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if "<" not in line:
+            continue
+        left = line.split("<", 1)[0].strip()
+        name = _nevra_name(left)
+        if name:
+            out.append({"name": name, "security": False, "line": line[:200]})
+    return out
+
+
+def _parse_rpm_qa(text):
+    """Parse `rpm -qa --qf '%{NAME} %{VERSION}-%{RELEASE}\\n'` into {name, version}."""
+    out = []
+    for raw in (text or "").splitlines():
+        p = raw.split()
+        if len(p) >= 2:
+            out.append({"name": p[0], "version": p[1]})
+    return out
+
+
+def _parse_apk_info(text):
+    """Parse `apk info -v` (rows like 'busybox-1.36.1-r5') into {name, version}."""
+    out = []
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        name = _nevra_name(s)
+        if name and len(name) < len(s):
+            out.append({"name": name, "version": s[len(name) + 1:]})
+    return out
+
+
 class LinuxOSCurrency:
     """Distro/kernel currency + pending APT security updates — the authoritative Linux exposure
     signal (a security update exists precisely when a CVE has a distro fix available)."""
@@ -4196,26 +4280,51 @@ class LinuxOSCurrency:
         return out.strip() if rc == 0 and out.strip() else None
 
     @staticmethod
-    def _pending_updates():
-        # Simulated upgrade against the CACHED package lists — no network, no state change.
+    def _pending_updates(family):
+        """Pending updates against the CACHED package lists — no network, no state change. Dispatched
+        by distro family: apt (Debian/Ubuntu), dnf (RHEL family), apk (Alpine)."""
+        if family == "rhel":
+            rc, out, err = run(["dnf", "-q", "check-update"], timeout=120)
+            if rc == 124:
+                return None, "dnf timed out"
+            if rc not in (0, 100):            # 100 = updates available; anything else = no data
+                return None, (err or "dnf unavailable")[:160]
+            src, sout, _ = run(["dnf", "-q", "updateinfo", "list", "--security"], timeout=120)
+            sec = _parse_dnf_security(sout) if src == 0 else set()
+            return _parse_dnf_checkupdate(out, sec), None
+        if family == "alpine":
+            rc, out, err = run(["apk", "version", "-l", "<"], timeout=30)
+            if rc not in (0,):
+                return None, (err or "apk unavailable")[:160]
+            return _parse_apk_upgradable(out), None
+        # default: Debian/Ubuntu (apt) — simulated upgrade
         rc, out, err = run(["apt-get", "-s", "upgrade"], timeout=60)
         if rc == 124:
             return None, "apt-get timed out"
-        if rc not in (0, 100):            # 100 = lock held / busy; treat as "no data this cycle"
+        if rc not in (0, 100):
             return None, (err or "apt-get unavailable")[:160]
         return _parse_apt_upgrade(out), None
 
+    @staticmethod
+    def _reboot_required(family):
+        if family == "rhel":
+            rc, _, _ = run(["needs-restarting", "-r"], timeout=10)
+            return rc == 1                       # 1 = reboot needed, 0 = not, other = tool missing
+        return os.path.exists("/var/run/reboot-required")   # debian/ubuntu
+
     def check(self):
         osr = self._os_release()
-        pending, perr = self._pending_updates()
+        family = _distro_family(osr)
+        pending, perr = self._pending_updates(family)
         state = {
             "distro": osr.get("NAME") or osr.get("ID"),
             "version": osr.get("VERSION_ID") or osr.get("VERSION"),
             "pretty": osr.get("PRETTY_NAME"),
+            "family": family,
             "kernel": self._kernel(),
             "pending": pending or [],
             "pending_error": perr,
-            "reboot_required": os.path.exists("/var/run/reboot-required"),
+            "reboot_required": self._reboot_required(family),
             "checked": time.time(),
         }
         with self.lock:
@@ -4234,14 +4343,20 @@ class LinuxOSCurrency:
             label += " (%d security)" % len(sec)
         titles = [u.get("name") for u in pend if u.get("name")]
         detail = ", ".join(titles[:12])[:400]
+        fam = state.get("family")
+        tool = {"rhel": "dnf", "alpine": "apk"}.get(fam, "apt")
+        refs = {"rhel": ["https://access.redhat.com/security/security-updates/",
+                         "https://errata.rockylinux.org/"],
+                "alpine": ["https://security.alpinelinux.org/"]}.get(
+                    fam, ["https://ubuntu.com/security/notices", "https://www.debian.org/security/"])
         return [{
             "source": "os-update", "kind": "os_currency", "severity": sev,
             "component": state.get("pretty") or state.get("distro") or "Linux",
             "installed_version": state.get("version"),
             "title": label, "detail": detail,
-            "description": ("APT reports these upgradable packages: " + detail +
-                            ". Security-pocket updates close known, distro-fixed CVEs; apply them to stay current."),
-            "references": ["https://ubuntu.com/security/notices", "https://www.debian.org/security/"],
+            "description": ("%s reports these upgradable packages: %s. Security updates close known, "
+                            "distro-fixed CVEs; apply them to stay current." % (tool, detail)),
+            "references": refs,
             "cvss": None, "aliases": [], "published": None, "url": None,
             "fixed": None, "restart": bool(state.get("reboot_required")),
             "live": False, "remediation": None,
@@ -4271,10 +4386,26 @@ class LinuxSoftwareInventory:
             out += _npm_global_packages()
         return out
 
+    @staticmethod
+    def _native(family):
+        """Installed OS packages for the distro family, tagged with the manager kind."""
+        if family == "rhel":
+            rc, out, _ = run(["rpm", "-qa", "--qf", "%{NAME} %{VERSION}-%{RELEASE}\n"], timeout=90)
+            return (_parse_rpm_qa(out) if rc == 0 else []), "rpm"
+        if family == "alpine":
+            rc, out, _ = run(["apk", "info", "-v"], timeout=60)
+            return (_parse_apk_info(out) if rc == 0 else []), "apk"
+        return _parse_dpkg_status("/var/lib/dpkg/status"), "dpkg"
+
     def collect(self):
-        dpkg, pkgs = _parse_dpkg_status(self.DPKG_STATUS), self._packages()
-        return {"dpkg": dpkg, "packages": pkgs, "collected": time.time(),
-                "counts": {"dpkg": len(dpkg), "packages": len(pkgs)}}
+        family = _distro_family(LinuxOSCurrency._os_release())
+        native, kind = self._native(family)
+        pkgs = self._packages()
+        out = {"native": native, "native_kind": kind, "packages": pkgs, "collected": time.time(),
+               "counts": {kind: len(native), "packages": len(pkgs)}}
+        if kind == "dpkg":
+            out["dpkg"] = native              # back-compat alias for the Debian path
+        return out
 
 
 # Remediation states an operator can record against a finding. 'open' is the default (absence of a
@@ -4357,7 +4488,7 @@ class VulnScanner:
     package (resolved through the agent's DpkgIndex)."""
 
     def __init__(self, enabled=True, interval=86400, feed_url=None, history=None,
-                 osv="auto", dpkg_index=None):
+                 osv="auto", dpkg_index=None, alert_severity="critical", on_alert=None):
         self.enabled = enabled
         self.interval = max(3600, interval)
         self.history = history
@@ -4367,6 +4498,10 @@ class VulnScanner:
         self.feed = VulnFeed(enabled=enabled, interval=interval, url=feed_url)
         self.osv = OSVFeeds(enabled=enabled, interval=interval, ecosystems=osv)
         self.remediation = VulnRemediationStore()   # operator decisions: patched/mitigated/accepted/FP
+        self.alert_severity = alert_severity         # raise an EDR alert at/above this severity ("off" to disable)
+        self.on_alert = on_alert                      # callback(finding) -> notify + SIEM export; set by main
+        self._alerted_path = os.path.join(HERE, "vuln-alerted.json")
+        self._alerted, self._alert_baselined = self._load_alerted()
         self.lock = threading.Lock()
         self._result = {"findings": [], "counts": {}, "os": {}, "scanned": None,
                         "scanning": False, "error": None, "summary": {}}
@@ -4410,13 +4545,14 @@ class VulnScanner:
     def _build_findings(self, osc, inv, live_pkgs=None):
         live_pkgs = live_pkgs or set()
         out = list(LinuxOSCurrency.findings(osc))
-        for pkg in inv.get("dpkg", []):
+        native_kind = inv.get("native_kind", "dpkg")
+        for pkg in inv.get("native", inv.get("dpkg", [])):
             hits = self.feed.match(name=pkg.get("name"), version=pkg.get("version"))
             if not hits:
                 continue
             live = pkg.get("name") in live_pkgs
             for adv in hits:
-                out.append(self._finding(adv, "dpkg", pkg.get("name"),
+                out.append(self._finding(adv, native_kind, pkg.get("name"),
                                          pkg.get("version"), live=live))
         for pkg in inv.get("packages", []):
             eco = pkg.get("ecosystem")
@@ -4499,6 +4635,55 @@ class VulnScanner:
                 "live": sum(1 for f in active if f.get("live")),
                 "resolved": len(findings) - len(active)}
 
+    def _load_alerted(self):
+        try:
+            with open(self._alerted_path) as f:
+                d = json.load(f)
+            return set(d.get("sigs") or []), True        # file present -> already baselined
+        except (OSError, ValueError):
+            return set(), False
+
+    def _save_alerted(self):
+        try:
+            tmp = self._alerted_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"sigs": sorted(self._alerted)}, f)
+            os.replace(tmp, self._alerted_path)
+        except OSError:
+            pass
+
+    def _alert_worthy(self, f):
+        """Critical findings alert; so does a high finding whose software is actually running
+        (vulnerable AND live is the urgent case), unless alerting is turned off."""
+        if self.alert_severity == "off":
+            return False
+        sr = SEV_RANK.get(f.get("severity"), 0)
+        if sr >= SEV_RANK.get(self.alert_severity, 4):
+            return True
+        return bool(f.get("live") and sr >= SEV_RANK.get("high", 3))
+
+    def _raise_alerts(self, findings):
+        """Fire an EDR alert (notification + SIEM export, via on_alert) for each newly-detected
+        alert-worthy ACTIVE finding. The first scan on a fresh host baselines silently so the whole
+        existing backlog isn't replayed; the alerted set persists so a restart doesn't re-alert."""
+        if self.alert_severity == "off" or not self.on_alert:
+            return
+        worthy = {f["sig"]: f for f in findings
+                  if f.get("sig") and self._active(f) and self._alert_worthy(f)}
+        if not self._alert_baselined:
+            self._alerted = set(worthy)
+            self._alert_baselined = True
+            self._save_alerted()
+            return
+        for sig, f in worthy.items():
+            if sig not in self._alerted:
+                try:
+                    self.on_alert(f)
+                except Exception:  # noqa: BLE001 — a notify/export hiccup must never break the scan
+                    pass
+        self._alerted = (self._alerted | set(worthy)) & set(worthy)   # forget gone/resolved -> recurrence re-alerts
+        self._save_alerted()
+
     def scan(self):
         with self.lock:
             self._result["scanning"] = True
@@ -4509,6 +4694,7 @@ class VulnScanner:
             now = time.time()
             findings = self._build_findings(osc, inv, self._live_packages())
             self._apply_remediation(findings, now)      # attach decisions, resolve 'patched', re-sort
+            self._raise_alerts(findings)                 # EDR alert on new high-sev findings
             result = {"findings": findings, "counts": inv.get("counts", {}),
                       "os": osc, "scanned": now, "scanning": False,
                       "error": None, "summary": self._summary(findings)}
@@ -10659,6 +10845,21 @@ class AlertExporter:
                 "recommended_response": node.get("rec"),
             },
         }
+
+    def export_vuln(self, f, hostname, source="linux-scouter"):
+        """Emit a SIEM/SOAR event for a newly-raised vulnerability finding (webhook + JSONL)."""
+        if not self.enabled:
+            return
+        self._enqueue({
+            "timestamp": iso_utc_ms(), "event": "vulnerability", "source": source, "host": hostname,
+            "vulnerability": {
+                "id": f.get("sig"), "cve": f.get("cve"), "component": f.get("component"),
+                "severity": f.get("severity"), "cvss": f.get("cvss"), "kind": f.get("kind"),
+                "installed_version": f.get("installed_version"), "fixed": f.get("fixed"),
+                "live": bool(f.get("live")), "title": f.get("title"),
+                "references": (f.get("references") or [])[:5],
+            },
+        })
 
     # -- the per-snapshot entry point ------------------------------------
     def process(self, nodes, meta):
@@ -18621,6 +18822,10 @@ def main():
                     help="language-ecosystem scanning via OSV (offline): 'auto' (default; scan pip/npm "
                          "globals when present), 'off', or a comma list like 'pypi,npm'. The per-ecosystem "
                          "OSV archive is downloaded daily and matched locally — nothing leaves the machine.")
+    ap.add_argument("--vuln-alert-severity", default="critical", metavar="critical|high|off",
+                    help="raise an EDR alert (phone/chat notification + SIEM export) when a NEW finding at "
+                         "or above this severity appears; a vulnerable-AND-running 'high' always alerts. "
+                         "'off' disables vuln alerting (the Vulnerabilities tab still shows everything).")
     args = ap.parse_args()
     if args.break_glass is not None:
         # Arm or end a window and exit — this does not start an agent. The running agent notices the
@@ -18760,9 +18965,22 @@ def main():
                                    bind=args.syslog_bind, tcp=args.syslog_tcp,
                                    keep_allows=args.syslog_keep_allows,
                                    priority=args.syslog_priority)   # XDR Phase 2 edge collector
+    def _vuln_on_alert(f):
+        # EDR alert for a new high-severity vuln finding: phone/chat notification + SIEM/SOAR export.
+        sev = f.get("severity") or "high"
+        live = " · running now" if f.get("live") else ""
+        notify_all("Vulnerability (%s): %s" % (sev, f.get("component") or "?"),
+                   "%s%s — update to %s. %s" % (f.get("cve") or f.get("id") or "", live,
+                                                f.get("fixed") or "?", (f.get("title") or "")[:120]),
+                   severity=sev)
+        try:
+            exporter.export_vuln(f, socket.gethostname())
+        except Exception:  # noqa: BLE001
+            pass
     cache.vulns = VulnScanner(enabled=not args.no_vuln, interval=args.vuln_interval,
                               feed_url=args.vuln_feed_url, history=history, osv=args.vuln_osv,
-                              dpkg_index=getattr(fs_sig, "dpkg", None))   # CTEM-Lite vuln scan
+                              dpkg_index=getattr(fs_sig, "dpkg", None),
+                              alert_severity=args.vuln_alert_severity, on_alert=_vuln_on_alert)
     cache.vulns.start()
     cache.local_control = bool(args.local_control)
     cache.autohunts = AutoHuntStore()      # hunts raised by validated-malicious alerts

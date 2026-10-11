@@ -319,6 +319,59 @@ class TestRemediation(unittest.TestCase):
         self.assertEqual(vs._result["findings"][0]["remediation"]["by"], "lonnie")
 
 
+class TestEdrAlerts(unittest.TestCase):
+    def _scanner(self, sev="critical"):
+        d = tempfile.mkdtemp()
+        self.fired = []
+        vs = agent.VulnScanner(enabled=False, feed_url=None, osv="off",
+                               alert_severity=sev, on_alert=lambda f: self.fired.append(f))
+        vs._alerted_path = os.path.join(d, "vuln-alerted.json")
+        vs._alerted, vs._alert_baselined = set(), False
+        vs.remediation = agent.VulnRemediationStore(path=os.path.join(d, "rem.json"))
+        return vs
+
+    def _finding(self, sev, live=False, cve="CVE-X", comp="pkg"):
+        return {"severity": sev, "component": comp, "cve": cve, "kind": "app",
+                "sig": "app|%s|%s" % (comp, cve.lower()), "live": live, "remediation": None}
+
+    def test_baseline_then_new_alert(self):
+        vs = self._scanner("critical")
+        existing = [self._finding("critical", cve="CVE-1")]
+        vs._raise_alerts(existing)                      # first pass = silent baseline
+        self.assertEqual(self.fired, [])
+        # a NEW critical finding on the next scan fires
+        vs._raise_alerts(existing + [self._finding("critical", cve="CVE-2")])
+        self.assertEqual(len(self.fired), 1)
+        self.assertEqual(self.fired[0]["cve"], "CVE-2")
+        # re-scan with the same set -> no duplicate alert
+        vs._raise_alerts(existing + [self._finding("critical", cve="CVE-2")])
+        self.assertEqual(len(self.fired), 1)
+
+    def test_threshold_and_live_high(self):
+        vs = self._scanner("critical"); vs._alert_baselined = True
+        vs._raise_alerts([self._finding("high", cve="H1")])          # high, not live -> no alert
+        self.assertEqual(self.fired, [])
+        vs._raise_alerts([self._finding("high", live=True, cve="H2")])  # high AND live -> alert
+        self.assertEqual([f["cve"] for f in self.fired], ["H2"])
+
+    def test_remediated_not_alerted(self):
+        vs = self._scanner("critical"); vs._alert_baselined = True
+        f = self._finding("critical", cve="CVE-9"); f["remediation"] = {"status": "mitigated"}
+        vs._raise_alerts([f])                            # resolved -> not active -> no alert
+        self.assertEqual(self.fired, [])
+
+    def test_off_disables(self):
+        vs = self._scanner("off"); vs._alert_baselined = True
+        vs._raise_alerts([self._finding("critical")])
+        self.assertEqual(self.fired, [])
+
+    def test_recurrence_realerts_after_gone(self):
+        vs = self._scanner("critical"); vs._alert_baselined = True
+        vs._raise_alerts([self._finding("critical", cve="CVE-5")]); self.assertEqual(len(self.fired), 1)
+        vs._raise_alerts([])                             # finding gone -> forgotten
+        vs._raise_alerts([self._finding("critical", cve="CVE-5")]); self.assertEqual(len(self.fired), 2)
+
+
 class TestEnrichment(unittest.TestCase):
     def test_osv_record_enriched(self):
         rec = {"id": "GHSA-x", "summary": "short", "details": "a long description of the flaw",

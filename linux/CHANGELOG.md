@@ -6,6 +6,12 @@ All notable changes to Linux Scouter are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **EDR alerts for high-severity findings + RPM/Alpine support, 1.5.0** — a new
+  critical (or vulnerable-and-running high) finding fires a notification + SIEM
+  export (`--vuln-alert-severity`). The agent now detects the distro family and
+  uses dnf/rpm (RHEL/Fedora/Rocky/Alma) or apk (Alpine) in addition to apt/dpkg
+  for update currency + inventory. (RPM/Alpine validated on synthetic fixtures;
+  confirm on a live host.)
 - **Vulnerability detail panel + remediation, 1.4.0** — click a finding for an
   in-console detail panel (description, CVSS, fixed-in, aliases, sources — no
   external redirect); mark findings Patched/Mitigated/Accepted/False positive

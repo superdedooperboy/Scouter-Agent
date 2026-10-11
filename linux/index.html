@@ -4027,7 +4027,8 @@ function vulnDrawHost(){
   ['critical','high','medium','low'].forEach(s=>{ h+='<span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:20px;padding:3px 11px;font-size:12px"><span style="width:9px;height:9px;border-radius:50%;background:'+(SEV_COLOR[s]||'var(--chip)')+'"></span>'+s+' <b>'+(bysev[s]||0)+'</b></span>'; });
   if(live) h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--sev-high);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--sev-high)">⚡ '+live+' vulnerable &amp; running</span>';
   if(sum.resolved) h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--good)">✓ '+sum.resolved+' resolved</span>';
-  h+='<span class="hint" style="align-self:center">'+(cnt.dpkg||0)+' dpkg · '+(cnt.packages||0)+' pkgs scanned</span>';
+  var nk=(cnt.rpm!=null?'rpm':(cnt.apk!=null?'apk':'dpkg'));
+  h+='<span class="hint" style="align-self:center">'+(cnt[nk]||0)+' '+nk+' · '+(cnt.packages||0)+' pkgs scanned</span>';
   h+='</div>';
   // --- two-column: findings list + detail panel ---
   if(!findings.length){ h+='<div class="empty-big" style="color:var(--good)">No known-vulnerable software found in the current inventory.</div>'; box.innerHTML=h; return; }

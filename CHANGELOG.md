@@ -6,6 +6,26 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.5.0 / Linux agent 1.5.0 — 2026-10-11
+
+### Added
+
+**High-severity vulnerabilities now raise EDR alerts.** When a new finding at or above a configurable
+severity appears (default **critical**, plus any **vulnerable-and-running "high"**), the agent fires the
+same pathways a detection does — a phone/chat notification and a SIEM/SOAR event (`event:
+"vulnerability"` via the webhook + JSONL sink). The first scan on a fresh host baselines silently (no
+backlog replay) and the alerted set persists, so a restart doesn't re-alert; a finding that's resolved
+or disappears is forgotten, so a later recurrence alerts again. `--vuln-alert-severity
+critical|high|off`. The Vulnerabilities tab still shows everything regardless.
+
+**Linux: RPM and Alpine support (not just Debian/Ubuntu).** The Linux agent now detects the distro
+family from `/etc/os-release` and uses the right tooling: **dnf** update currency + `rpm -qa`
+inventory on RHEL/Fedora/Rocky/AlmaLinux/Amazon, and **apk** currency + inventory on Alpine, alongside
+the existing apt/dpkg path. Security updates are flagged where the distro exposes them (apt pockets,
+`dnf updateinfo --security`), and reboot-required is read per family. The fleet view shows each host's
+native package count (dpkg/rpm/apk). _New RPM/Alpine paths are validated against synthetic fixtures;
+confirm on a live RHEL/Alpine host before relying on them._
+
 ## macOS agent 1.4.0 / Linux agent 1.4.0 — 2026-10-11
 
 ### Added

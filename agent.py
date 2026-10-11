@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -4281,16 +4281,20 @@ class VulnScanner:
     reaches out to Apple, so this never runs on the per-snapshot path."""
 
     def __init__(self, enabled=True, interval=86400, feed_url=None, history=None,
-                 live_provider=None, osv="auto"):
+                 live_provider=None, osv="auto", alert_severity="critical", on_alert=None):
         self.enabled = enabled
         self.interval = max(3600, interval)
         self.history = history
         self.live_provider = live_provider      # () -> set of running exe paths (default: collect_processes)
+        self.alert_severity = alert_severity    # raise an EDR alert at/above this severity ("off" to disable)
+        self.on_alert = on_alert                 # callback(finding) -> notify + SIEM export; set by main
         self.os_currency = OSCurrency()
         self.inventory = SoftwareInventory(osv=osv)
         self.feed = VulnFeed(enabled=enabled, interval=interval, url=feed_url)
         self.osv = OSVFeeds(enabled=enabled, interval=interval, ecosystems=osv)
         self.remediation = VulnRemediationStore()   # operator decisions: patched/mitigated/accepted/FP
+        self._alerted_path = os.path.join(HERE, "vuln-alerted.json")
+        self._alerted, self._alert_baselined = self._load_alerted()
         self.lock = threading.Lock()
         self._result = {"findings": [], "counts": {}, "os": {}, "scanned": None,
                         "scanning": False, "error": None, "summary": {}}
@@ -4429,6 +4433,55 @@ class VulnScanner:
                 "live": sum(1 for f in active if f.get("live")),
                 "resolved": len(findings) - len(active)}
 
+    def _load_alerted(self):
+        try:
+            with open(self._alerted_path) as f:
+                d = json.load(f)
+            return set(d.get("sigs") or []), True        # file present -> already baselined
+        except (OSError, ValueError):
+            return set(), False
+
+    def _save_alerted(self):
+        try:
+            tmp = self._alerted_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"sigs": sorted(self._alerted)}, f)
+            os.replace(tmp, self._alerted_path)
+        except OSError:
+            pass
+
+    def _alert_worthy(self, f):
+        """Critical findings alert; so does a high finding whose software is actually running
+        (vulnerable AND live is the urgent case), unless alerting is turned off."""
+        if self.alert_severity == "off":
+            return False
+        sr = SEV_RANK.get(f.get("severity"), 0)
+        if sr >= SEV_RANK.get(self.alert_severity, 4):
+            return True
+        return bool(f.get("live") and sr >= SEV_RANK.get("high", 3))
+
+    def _raise_alerts(self, findings):
+        """Fire an EDR alert (notification + SIEM export, via on_alert) for each newly-detected
+        alert-worthy ACTIVE finding. The first scan on a fresh host baselines silently so the whole
+        existing backlog isn't replayed; the alerted set persists so a restart doesn't re-alert."""
+        if self.alert_severity == "off" or not self.on_alert:
+            return
+        worthy = {f["sig"]: f for f in findings
+                  if f.get("sig") and self._active(f) and self._alert_worthy(f)}
+        if not self._alert_baselined:
+            self._alerted = set(worthy)
+            self._alert_baselined = True
+            self._save_alerted()
+            return
+        for sig, f in worthy.items():
+            if sig not in self._alerted:
+                try:
+                    self.on_alert(f)
+                except Exception:  # noqa: BLE001 — a notify/export hiccup must never break the scan
+                    pass
+        self._alerted = (self._alerted | set(worthy)) & set(worthy)   # forget gone/resolved -> recurrence re-alerts
+        self._save_alerted()
+
     def scan(self):
         with self.lock:
             self._result["scanning"] = True
@@ -4439,6 +4492,7 @@ class VulnScanner:
             now = time.time()
             findings = self._build_findings(osc, inv, self._live_exes())
             self._apply_remediation(findings, now)      # attach decisions, resolve 'patched', re-sort
+            self._raise_alerts(findings)                 # EDR alert on new high-sev findings
             result = {"findings": findings, "counts": inv.get("counts", {}),
                       "os": osc, "scanned": now, "scanning": False,
                       "error": None, "summary": self._summary(findings)}
@@ -15606,6 +15660,21 @@ class AlertExporter:
             },
         }
 
+    def export_vuln(self, f, hostname, source="mac-scouter"):
+        """Emit a SIEM/SOAR event for a newly-raised vulnerability finding (webhook + JSONL)."""
+        if not self.enabled:
+            return
+        self._enqueue({
+            "timestamp": iso_utc_ms(), "event": "vulnerability", "source": source, "host": hostname,
+            "vulnerability": {
+                "id": f.get("sig"), "cve": f.get("cve"), "component": f.get("component"),
+                "severity": f.get("severity"), "cvss": f.get("cvss"), "kind": f.get("kind"),
+                "installed_version": f.get("installed_version"), "fixed": f.get("fixed"),
+                "live": bool(f.get("live")), "title": f.get("title"),
+                "references": (f.get("references") or [])[:5],
+            },
+        })
+
     # -- the per-snapshot entry point ------------------------------------
     def process(self, nodes, meta):
         if not self.enabled:
@@ -19401,6 +19470,10 @@ def main():
                     help="language-ecosystem scanning via OSV (offline): 'auto' (default; scan pip/npm "
                          "globals when present), 'off', or a comma list like 'pypi,npm'. The per-ecosystem "
                          "OSV archive is downloaded daily and matched locally — nothing leaves the machine.")
+    ap.add_argument("--vuln-alert-severity", default="critical", metavar="critical|high|off",
+                    help="raise an EDR alert (phone/chat notification + SIEM export) when a NEW finding at "
+                         "or above this severity appears; a vulnerable-AND-running 'high' always alerts. "
+                         "'off' disables vuln alerting (the Vulnerabilities tab still shows everything).")
     args = ap.parse_args()
     if args.break_glass is not None:
         # Arm or end a window and exit — this does not start an agent. The running agent notices the
@@ -19550,9 +19623,21 @@ def main():
                                    bind=args.syslog_bind, tcp=args.syslog_tcp,
                                    keep_allows=args.syslog_keep_allows,
                                    priority=args.syslog_priority)   # XDR Phase 2 edge collector
+    def _vuln_on_alert(f):
+        # EDR alert for a new high-severity vuln finding: phone/chat notification + SIEM/SOAR export.
+        sev = f.get("severity") or "high"
+        live = " · running now" if f.get("live") else ""
+        notify_all("Vulnerability (%s): %s" % (sev, f.get("component") or "?"),
+                   "%s%s — update to %s. %s" % (f.get("cve") or f.get("id") or "", live,
+                                                f.get("fixed") or "?", (f.get("title") or "")[:120]),
+                   severity=sev)
+        try:
+            exporter.export_vuln(f, socket.gethostname())
+        except Exception:  # noqa: BLE001
+            pass
     cache.vulns = VulnScanner(enabled=not args.no_vuln, interval=args.vuln_interval,
-                              feed_url=args.vuln_feed_url, history=history,
-                              osv=args.vuln_osv)   # CTEM-Lite vuln scan ('live' uses collect_processes)
+                              feed_url=args.vuln_feed_url, history=history, osv=args.vuln_osv,
+                              alert_severity=args.vuln_alert_severity, on_alert=_vuln_on_alert)
     cache.vulns.start()
     cache.local_control = bool(args.local_control)
     cache.autohunts = AutoHuntStore()      # hunts raised by validated-malicious alerts

@@ -143,5 +143,69 @@ class TestOSV(unittest.TestCase):
         self.assertEqual(hits[0]["fixed"], "2.20.0")
 
 
+class TestRemediation(unittest.TestCase):
+    def _scanner(self):
+        vs = agent.VulnScanner(enabled=False, feed_url=None, osv="off")
+        vs.remediation = agent.VulnRemediationStore(
+            path=os.path.join(tempfile.mkdtemp(), "vuln-remediation.json"))
+        return vs
+
+    def test_sig_stable_across_version(self):
+        a = {"kind": "dpkg", "component": "openssl", "cve": "CVE-1", "installed_version": "1.1.1"}
+        b = dict(a, installed_version="3.0.2")
+        self.assertEqual(agent._finding_sig(a), agent._finding_sig(b))
+
+    def test_mitigate_and_patched_conflict(self):
+        vs = self._scanner()
+        inv = {"dpkg": [{"name": "openssl", "version": "1.1.1"}], "packages": []}
+        findings = vs._build_findings({"pending": []}, inv)
+        vs._apply_remediation(findings, 1000)
+        self.assertEqual(len(findings), 1)
+        sig = findings[0]["sig"]
+        # mitigate -> suppressed from active counts
+        vs.remediation.set(sig, "mitigated", note="not network-reachable")
+        vs._apply_remediation(findings, 1000)
+        s = vs._summary(findings)
+        self.assertEqual(s["total"], 0)
+        self.assertEqual(s["resolved"], 1)
+        # patched then a later scan still detects it -> conflict re-opens
+        vs.remediation.set(sig, "patched")
+        pts = vs.remediation.get(sig)["ts"]
+        vs._apply_remediation(findings, pts + 10)
+        self.assertTrue(findings[0]["remediation"]["conflict"])
+        self.assertEqual(vs._summary(findings)["total"], 1)
+
+    def test_set_remediation_live(self):
+        vs = self._scanner()
+        inv = {"dpkg": [{"name": "openssl", "version": "1.1.1"}], "packages": []}
+        findings = vs._build_findings({"pending": []}, inv)
+        vs._apply_remediation(findings, 1000)
+        vs._result = {"findings": findings, "scanned": 1000, "summary": vs._summary(findings)}
+        r = vs.set_remediation(findings[0]["sig"], "accepted", note="eol box", by="ops")
+        self.assertTrue(r["ok"])
+        self.assertEqual(vs._result["summary"]["total"], 0)
+
+
+class TestEnrichment(unittest.TestCase):
+    def test_osv_enriched_and_os_currency_description(self):
+        rec = {"id": "GHSA-x", "summary": "s", "details": "the flaw", "aliases": ["CVE-9"],
+               "references": [{"url": "https://ex/adv"}],
+               "severity": [{"type": "CVSS_V3", "score": "9.8"}],
+               "affected": [{"package": {"ecosystem": "PyPI", "name": "requests"},
+                             "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.0"}]}]}]}
+        d = tempfile.mkdtemp()
+        with zipfile.ZipFile(os.path.join(d, "osv-pypi.zip"), "w") as z:
+            z.writestr("x.json", json.dumps(rec))
+        osv = agent.OSVFeeds(enabled=True, ecosystems="pypi", cache_dir=d)
+        osv.prepare([{"ecosystem": "PyPI", "name": "requests", "version": "1.0"}])
+        hit = osv.match("PyPI", "requests", "1.0")[0]
+        self.assertEqual(hit["description"], "the flaw")
+        self.assertIn("https://ex/adv", hit["references"])
+        f = agent.LinuxOSCurrency.findings({"version": "22.04", "pending": [
+            {"name": "openssl", "security": True}]})[0]
+        self.assertIn("description", f)
+        self.assertTrue(f["references"])
+
+
 if __name__ == "__main__":
     unittest.main()

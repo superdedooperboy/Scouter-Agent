@@ -3980,20 +3980,33 @@ function restartAgent(){
   });
 }
 function vAgo(ts){ if(!ts) return 'never'; const d=Date.now()/1000-ts; if(d<3600) return Math.round(d/60)+'m ago'; if(d<86400) return Math.round(d/3600)+'h ago'; return Math.round(d/86400)+'d ago'; }
+var VHOST=null, VSEL=null, VSHOWRES=false;
+var VREM_LABEL={patched:'Patched',mitigated:'Mitigated',accepted:'Risk accepted',false_positive:'False positive'};
 function renderVulns(){
   const box=document.getElementById('vulns'); if(!box) return;
-  box.innerHTML='<div class="hint">Scanning posture…</div>';
-  fetch('/api/vulns').then(r=>r.json()).then(d=>{ vulnDrawHost(d); }).catch(e=>{ box.innerHTML='<div class="hint">Error: '+esc(''+e)+'</div>'; });
+  if(!VHOST) box.innerHTML='<div class="hint">Scanning posture…</div>';
+  fetch('/api/vulns').then(r=>r.json()).then(d=>{ VHOST=d; vulnDrawHost(); }).catch(e=>{ box.innerHTML='<div class="hint">Error: '+esc(''+e)+'</div>'; });
 }
-function vulnRescan(){ const b=document.getElementById('vulns'); if(b) b.innerHTML='<div class="hint">Rescanning… (apt/dpkg inventory can take a moment)</div>'; fetch('/api/vulns?rescan=1').then(r=>r.json()).then(()=>{ setTimeout(renderVulns,1500); }).catch(()=>{}); }
-function vulnDrawHost(d){
-  const box=document.getElementById('vulns'); if(!box) return;
+function vulnRescan(){ const b=document.getElementById('vulns'); if(b) b.innerHTML='<div class="hint">Rescanning… (apt/dpkg inventory can take a moment)</div>'; VHOST=null; fetch('/api/vulns?rescan=1').then(r=>r.json()).then(()=>{ setTimeout(renderVulns,1500); }).catch(()=>{}); }
+function vulnToggleResolved(){ VSHOWRES=!VSHOWRES; vulnDrawHost(); }
+function vulnSelectFinding(sig){ VSEL=(VSEL===sig?null:sig); vulnDrawHost(); }
+function vIsActive(f){ var r=f.remediation; if(!r) return true; return r.status==='patched' && r.conflict; }
+function vulnRemediate(sig,status){
+  var note=''; var el=document.getElementById('vulnNote'); if(el) note=(el.value||'').trim();
+  var url='/api/vulns?sig='+encodeURIComponent(sig)+'&status='+encodeURIComponent(status);
+  if(note) url+='&note='+encodeURIComponent(note);
+  fetch(url,{method:'POST'}).then(r=>r.json()).then(function(){ setTimeout(renderVulns,250); }).catch(()=>{});
+}
+function vulnDrawHost(){
+  const d=VHOST, box=document.getElementById('vulns'); if(!box) return;
   if(d && d.enabled===false){ box.innerHTML='<div class="empty-big">Vulnerability scanning is disabled on this host (<code>--no-vuln</code>).</div>'; return; }
   const os=(d&&d.os)||{}, sum=(d&&d.summary)||{}, bysev=sum.by_severity||{}, feed=(d&&d.feed)||{}, osv=(d&&d.osv)||{}, cnt=(d&&d.counts)||{};
   const findings=(d&&d.findings)||[];
+  const active=findings.filter(vIsActive), resolved=findings.filter(function(f){return !vIsActive(f);});
   let h='';
   h+='<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:2px 0 12px">';
   h+='<div style="font-size:15px;font-weight:600">Vulnerability posture</div><span style="flex:1"></span>';
+  if(resolved.length) h+='<label class="hint" style="margin:0;cursor:pointer"><input type="checkbox" '+(VSHOWRES?'checked':'')+' onchange="vulnToggleResolved()"> show resolved ('+resolved.length+')</label>';
   h+='<span class="hint" style="margin:0">last scan '+vAgo(d&&d.scanned)+(d&&d.scanning?' · scanning…':'')+'</span>';
   h+='<button class="btn" onclick="vulnRescan()">Rescan</button></div>';
   if(!(d&&d.scanned)){ h+='<div class="empty-big">No scan yet — the first scan runs shortly after launch (it checks APT for pending updates and inventories your packages). <span class="clr" style="color:var(--accent);cursor:pointer;text-decoration:underline" onclick="vulnRescan()">Scan now</span></div>'; box.innerHTML=h; return; }
@@ -4013,30 +4026,77 @@ function vulnDrawHost(d){
   h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">';
   ['critical','high','medium','low'].forEach(s=>{ h+='<span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:20px;padding:3px 11px;font-size:12px"><span style="width:9px;height:9px;border-radius:50%;background:'+(SEV_COLOR[s]||'var(--chip)')+'"></span>'+s+' <b>'+(bysev[s]||0)+'</b></span>'; });
   if(live) h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--sev-high);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--sev-high)">⚡ '+live+' vulnerable &amp; running</span>';
+  if(sum.resolved) h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--good)">✓ '+sum.resolved+' resolved</span>';
   h+='<span class="hint" style="align-self:center">'+(cnt.dpkg||0)+' dpkg · '+(cnt.packages||0)+' pkgs scanned</span>';
   h+='</div>';
-  // --- findings table ---
+  // --- two-column: findings list + detail panel ---
   if(!findings.length){ h+='<div class="empty-big" style="color:var(--good)">No known-vulnerable software found in the current inventory.</div>'; box.innerHTML=h; return; }
-  h+='<table class="vtbl" style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--line)">'+
-     '<th style="padding:6px 8px">Severity</th><th style="padding:6px 8px">Component</th><th style="padding:6px 8px">Installed</th><th style="padding:6px 8px">Fixed in</th><th style="padding:6px 8px">Advisory</th></tr></thead><tbody>';
-  findings.forEach(f=>{
-    const col=SEV_COLOR[f.severity]||'var(--chip)';
-    const adv=f.url?('<a href="'+esc(f.url)+'" target="_blank" rel="noopener" style="color:var(--accent)">'+esc(f.cve||f.id||'link')+'</a>'):esc(f.cve||f.id||'—');
-    h+='<tr style="border-bottom:1px solid var(--line)">'+
-       '<td style="padding:6px 8px"><span style="display:inline-block;min-width:58px;text-align:center;background:'+col+';color:#0b0e14;border-radius:5px;padding:1px 7px;font-size:11px;font-weight:600">'+esc(f.severity||'')+'</span></td>'+
-       '<td style="padding:6px 8px">'+esc(f.component||'?')+(f.live?' <span title="a process from this package is running now" style="color:var(--sev-high)">⚡</span>':'')+(f.example?' <span class="hint" style="margin:0;border:1px solid var(--line);border-radius:4px;padding:0 4px">example</span>':'')+'<div class="hint" style="margin:0">'+esc(f.title||'')+'</div></td>'+
-       '<td style="padding:6px 8px;font-variant-numeric:tabular-nums">'+esc(f.installed_version||'—')+'</td>'+
-       '<td style="padding:6px 8px;font-variant-numeric:tabular-nums;color:var(--good)">'+esc(f.fixed||'—')+'</td>'+
-       '<td style="padding:6px 8px">'+adv+'</td></tr>';
-  });
-  h+='</tbody></table>';
+  h+='<div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">';
+  h+='<div style="flex:1;min-width:360px">'+vulnTable(active,'active');
+  if(VSHOWRES && resolved.length) h+='<div class="hint" style="margin:12px 0 4px;text-transform:uppercase;letter-spacing:.04em">Resolved</div>'+vulnTable(resolved,'resolved');
+  h+='</div>';
+  h+='<div style="width:380px;flex:none;min-width:320px">'+vulnDetailPanel(findings)+'</div>';
+  h+='</div>';
   // --- provenance / honesty ---
   const ecoBits=Object.keys((osv.ecosystems)||{}).map(e=>e+' '+((osv.ecosystems[e]||{}).records||0)).join(' · ');
-  h+='<div class="hint" style="margin-top:10px">Advisory sources: APT security currency (authoritative) · '+(feed.url?('custom feed ('+feed.advisories+')'):('built-in '+feed.seed+' example'))+
+  h+='<div class="hint" style="margin-top:12px">Advisory sources: APT security currency (authoritative) · '+(feed.url?('custom feed ('+feed.advisories+')'):('built-in '+feed.seed+' example'))+
      (osv.mode&&osv.mode!=='off'?(' · OSV '+esc(osv.mode)+(ecoBits?(' ['+esc(ecoBits)+']'):'')):'')+
      '. '+(sum.example?('Rows tagged <b>example</b> are demonstration advisories, not confirmed CVEs — point <code>--vuln-feed-url</code> at a live feed. '):'')+
      'Everything is computed on this machine; no inventory leaves the host.</div>';
   box.innerHTML=h;
+}
+function vulnTable(rows, kind){
+  if(!rows.length) return '<div class="hint">'+(kind==='resolved'?'None.':'Nothing active — nicely done.')+'</div>';
+  let h='<table class="vtbl" style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--line)">'+
+     '<th style="padding:6px 8px">Severity</th><th style="padding:6px 8px">Component</th><th style="padding:6px 8px">Installed</th><th style="padding:6px 8px">Fixed in</th><th style="padding:6px 8px">State</th></tr></thead><tbody>';
+  rows.forEach(f=>{
+    const col=SEV_COLOR[f.severity]||'var(--chip)', selq=(VSEL===f.sig), r=f.remediation;
+    let state='<span class="hint" style="margin:0">—</span>';
+    if(r && r.status==='patched' && r.conflict) state='<span style="color:var(--sev-high)" title="marked patched, but still detected">patched ⚠</span>';
+    else if(r) state='<span style="color:var(--good)">'+esc(VREM_LABEL[r.status]||r.status)+'</span>';
+    h+='<tr onclick="vulnSelectFinding(\''+esc(f.sig)+'\')" style="border-bottom:1px solid var(--line);cursor:pointer'+(selq?';background:var(--chip)':'')+'">'+
+       '<td style="padding:6px 8px"><span style="display:inline-block;min-width:58px;text-align:center;background:'+col+';color:#0b0e14;border-radius:5px;padding:1px 7px;font-size:11px;font-weight:600">'+esc(f.severity||'')+'</span></td>'+
+       '<td style="padding:6px 8px">'+esc(f.component||'?')+(f.live?' <span title="a process from this package is running now" style="color:var(--sev-high)">⚡</span>':'')+(f.example?' <span class="hint" style="margin:0;border:1px solid var(--line);border-radius:4px;padding:0 4px">example</span>':'')+'<div class="hint" style="margin:0;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(f.title||f.cve||'')+'</div></td>'+
+       '<td style="padding:6px 8px;font-variant-numeric:tabular-nums">'+esc(f.installed_version||'—')+'</td>'+
+       '<td style="padding:6px 8px;font-variant-numeric:tabular-nums;color:var(--good)">'+esc(f.fixed||'—')+'</td>'+
+       '<td style="padding:6px 8px">'+state+'</td></tr>';
+  });
+  return h+'</tbody></table>';
+}
+function vulnDetailPanel(findings){
+  const f=findings.filter(x=>x.sig===VSEL)[0];
+  if(!f) return '<div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;color:var(--muted)">Select a finding to see its details and remediate it — no need to leave the console.</div>';
+  const col=SEV_COLOR[f.severity]||'var(--chip)', r=f.remediation;
+  let h='<div style="border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:13px 15px;position:sticky;top:8px">';
+  h+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="background:'+col+';color:#0b0e14;border-radius:5px;padding:1px 8px;font-size:11px;font-weight:700">'+esc(f.severity||'')+'</span>'+
+     '<b style="font-size:14px">'+esc(f.component||'?')+'</b>'+(f.live?' <span style="color:var(--sev-high)" title="running now">⚡ live</span>':'')+(f.example?' <span class="hint" style="border:1px solid var(--line);border-radius:4px;padding:0 4px">example</span>':'')+'</div>';
+  if(f.title) h+='<div style="margin:6px 0 8px;font-size:13px">'+esc(f.title)+'</div>';
+  function kv(k,v){ return v?('<div style="display:flex;gap:8px;font-size:12px;margin:2px 0"><span class="hint" style="margin:0;width:88px;flex:none">'+k+'</span><span style="font-variant-numeric:tabular-nums">'+v+'</span></div>'):''; }
+  h+='<div style="margin:8px 0;padding:8px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)">';
+  h+=kv('Installed', esc(f.installed_version||'—'));
+  h+=kv('Fixed in', f.fixed?('<span style="color:var(--good)">'+esc(f.fixed)+'</span>'):'—');
+  h+=kv('Advisory', esc(f.cve||f.id||'—'));
+  h+=kv('CVSS', f.cvss?esc(f.cvss):'');
+  h+=kv('Published', f.published?esc((''+f.published).slice(0,10)):'');
+  if(f.aliases && f.aliases.length) h+=kv('Aliases', esc(f.aliases.join(', ')));
+  h+='</div>';
+  if(f.description) h+='<div style="font-size:12.5px;line-height:1.5;margin:8px 0;max-height:180px;overflow:auto">'+esc(f.description)+'</div>';
+  if(f.references && f.references.length){ h+='<div class="hint" style="margin:6px 0 2px">Sources</div>';
+    f.references.slice(0,6).forEach(function(u){ h+='<div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="'+esc(u)+'" target="_blank" rel="noopener" style="color:var(--accent)">'+esc(u)+'</a></div>'; }); }
+  h+='<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">';
+  h+='<div class="hint" style="margin:0 0 6px;text-transform:uppercase;letter-spacing:.04em">Remediation</div>';
+  if(r){ var lbl=(r.status==='patched'&&r.conflict)?'patched — still detected ⚠':(VREM_LABEL[r.status]||r.status);
+    h+='<div style="font-size:12px;margin-bottom:6px;color:'+((r.status==='patched'&&r.conflict)?'var(--sev-high)':'var(--good)')+'">Current: <b>'+esc(lbl)+'</b>'+(r.by?(' · by '+esc(r.by)):'')+'</div>';
+    if(r.note) h+='<div class="hint" style="margin:0 0 6px">“'+esc(r.note)+'”</div>'; }
+  h+='<textarea id="vulnNote" placeholder="Note (what you patched, or the compensating control)…" style="width:100%;box-sizing:border-box;height:46px;font-size:12px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:6px 8px;resize:vertical">'+esc(r&&r.note?r.note:'')+'</textarea>';
+  h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:7px">';
+  [['patched','Patched'],['mitigated','Mitigated'],['accepted','Accept risk'],['false_positive','False positive']].forEach(function(s){
+    h+='<button class="btn" style="font-size:11px;padding:3px 9px" onclick="vulnRemediate(\''+esc(f.sig)+'\',\''+s[0]+'\')">'+s[1]+'</button>'; });
+  if(r) h+='<button class="btn" style="font-size:11px;padding:3px 9px" onclick="vulnRemediate(\''+esc(f.sig)+'\',\'open\')">Clear / reopen</button>';
+  h+='</div>';
+  h+='<div class="hint" style="margin-top:6px">“Patched” auto-verifies on the next scan — it re-opens if the fix is still missing.</div>';
+  h+='</div></div>';
+  return h;
 }
 function renderMetrics(){
   const box=document.getElementById('metrics'); if(!box) return;

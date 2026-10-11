@@ -243,5 +243,109 @@ class TestOSV(unittest.TestCase):
         self.assertEqual(osv.match("PyPI", "requests", "1.0"), [])
 
 
+class TestRemediation(unittest.TestCase):
+    def _scanner(self):
+        vs = agent.VulnScanner(enabled=False, feed_url=None, osv="off")
+        vs.remediation = agent.VulnRemediationStore(
+            path=os.path.join(tempfile.mkdtemp(), "vuln-remediation.json"))
+        return vs
+
+    def test_sig_stable_across_version(self):
+        a = {"kind": "app", "component": "Google Chrome", "cve": "CVE-1", "installed_version": "118"}
+        b = dict(a, installed_version="120")                 # version changed, sig must not
+        self.assertEqual(agent._finding_sig(a), agent._finding_sig(b))
+
+    def test_mitigate_suppresses_from_active_counts(self):
+        vs = self._scanner()
+        inv = {"apps": [{"name": "Google Chrome", "bundle_id": "com.google.Chrome",
+                         "version": "130.0.0.0", "path": "/Applications/Google Chrome.app"}],
+               "brew": [], "packages": []}
+        findings = vs._build_findings({"pending": []}, inv)
+        vs._apply_remediation(findings, scanned_ts=1000)
+        self.assertEqual(len(findings), 1)
+        sig = findings[0]["sig"]
+        self.assertEqual(vs._summary(findings)["total"], 1)   # active before remediation
+        # mitigate it -> drops out of active counts, stays in the list as resolved
+        vs.remediation.set(sig, "mitigated", note="WAF rule blocks the exploit path")
+        vs._apply_remediation(findings, scanned_ts=1000)
+        s = vs._summary(findings)
+        self.assertEqual(s["total"], 0)
+        self.assertEqual(s["resolved"], 1)
+        self.assertFalse(agent.VulnScanner._active(findings[0]))
+        self.assertEqual(findings[0]["remediation"]["status"], "mitigated")
+        self.assertEqual(findings[0]["remediation"]["note"], "WAF rule blocks the exploit path")
+
+    def test_patched_pending_then_conflict(self):
+        vs = self._scanner()
+        inv = {"apps": [{"name": "Google Chrome", "bundle_id": "com.google.Chrome",
+                         "version": "130.0.0.0", "path": "/Applications/Google Chrome.app"}],
+               "brew": [], "packages": []}
+        findings = vs._build_findings({"pending": []}, inv)
+        sig = agent._finding_sig(findings[0])
+        vs.remediation.set(sig, "patched")
+        pts = vs.remediation.get(sig)["ts"]
+        # a scan that ran BEFORE the patch mark -> pending verification, suppressed, no conflict
+        vs._apply_remediation(findings, scanned_ts=pts - 10)
+        self.assertFalse(agent.VulnScanner._active(findings[0]))
+        self.assertFalse(findings[0]["remediation"]["conflict"])
+        self.assertEqual(vs._summary(findings)["total"], 0)
+        # a fresh scan AFTER the mark that STILL detects it -> conflict -> re-opens as active
+        findings2 = vs._build_findings({"pending": []}, inv)
+        vs._apply_remediation(findings2, scanned_ts=pts + 10)
+        self.assertTrue(findings2[0]["remediation"]["conflict"])
+        self.assertTrue(agent.VulnScanner._active(findings2[0]))
+        self.assertEqual(vs._summary(findings2)["total"], 1)
+
+    def test_patched_gone_is_pruned(self):
+        vs = self._scanner()
+        vs.remediation.set("app|google chrome|cve-1", "patched")
+        self.assertIsNotNone(vs.remediation.get("app|google chrome|cve-1"))
+        # next scan no longer detects it (version now fixed) -> empty findings -> decision pruned
+        vs._apply_remediation([], scanned_ts=9999)
+        self.assertIsNone(vs.remediation.get("app|google chrome|cve-1"))
+
+    def test_set_remediation_updates_result_live(self):
+        vs = self._scanner()
+        inv = {"apps": [{"name": "Google Chrome", "bundle_id": "com.google.Chrome",
+                         "version": "130.0.0.0", "path": "/Applications/Google Chrome.app"}],
+               "brew": [], "packages": []}
+        findings = vs._build_findings({"pending": []}, inv)
+        vs._apply_remediation(findings, 1000)
+        vs._result = {"findings": findings, "scanned": 1000, "summary": vs._summary(findings)}
+        sig = findings[0]["sig"]
+        r = vs.set_remediation(sig, "accepted", note="low exposure", by="lonnie")
+        self.assertTrue(r["ok"])
+        self.assertEqual(vs._result["summary"]["total"], 0)     # recomputed without a rescan
+        self.assertEqual(vs._result["findings"][0]["remediation"]["by"], "lonnie")
+
+
+class TestEnrichment(unittest.TestCase):
+    def test_osv_record_enriched(self):
+        rec = {"id": "GHSA-x", "summary": "short", "details": "a long description of the flaw",
+               "aliases": ["CVE-2023-9"], "published": "2023-01-02T00:00:00Z",
+               "references": [{"type": "WEB", "url": "https://example/adv"},
+                              {"type": "FIX", "url": "https://example/fix"}],
+               "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
+               "affected": [{"package": {"ecosystem": "PyPI", "name": "requests"},
+                             "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.0"}]}]}]}
+        d = tempfile.mkdtemp()
+        with zipfile.ZipFile(os.path.join(d, "osv-pypi.zip"), "w") as z:
+            z.writestr("x.json", json.dumps(rec))
+        osv = agent.OSVFeeds(enabled=True, ecosystems="pypi", cache_dir=d)
+        osv.prepare([{"ecosystem": "PyPI", "name": "requests", "version": "1.0"}])
+        hit = osv.match("PyPI", "requests", "1.0")[0]
+        self.assertEqual(hit["description"], "a long description of the flaw")
+        self.assertIn("https://example/adv", hit["references"])
+        self.assertTrue(hit["cvss"].startswith("CVSSV3"))
+        self.assertEqual(hit["aliases"], ["CVE-2023-9"])
+        self.assertEqual(hit["published"], "2023-01-02T00:00:00Z")
+
+    def test_os_currency_finding_has_description(self):
+        f = agent.OSCurrency.findings({"product_version": "15.0", "pending": [
+            {"title": "Security Update", "security": True, "recommended": True, "restart": True}]})[0]
+        self.assertIn("description", f)
+        self.assertTrue(f["references"])
+
+
 if __name__ == "__main__":
     unittest.main()

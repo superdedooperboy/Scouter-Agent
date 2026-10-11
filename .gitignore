@@ -90,3 +90,4 @@ agent.log
 agent.log.*
 decoys.json
 mesh-exports.json
+vuln-remediation.json

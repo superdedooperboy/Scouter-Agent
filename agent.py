@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -3697,6 +3697,23 @@ def _osv_url(rec):
     return "https://osv.dev/vulnerability/%s" % rec.get("id", "")
 
 
+def _osv_cvss(rec):
+    """A human CVSS string (score or vector) from an OSV record's severity block, or None."""
+    for sev in rec.get("severity") or []:
+        if isinstance(sev, dict) and sev.get("score"):
+            t = sev.get("type") or "CVSS"
+            return "%s %s" % (t.replace("_", ""), sev["score"])
+    ds = rec.get("database_specific") or {}
+    return str(ds.get("cvss")) if ds.get("cvss") else None
+
+
+def _finding_sig(f):
+    """Stable key for a finding across scans/versions: kind + component (no version) + advisory id.
+    Used to persist a remediation decision so it follows the finding even as the version changes."""
+    return "%s|%s|%s" % ((f.get("kind") or ""), (f.get("component") or "").lower(),
+                         (f.get("cve") or f.get("id") or f.get("title") or "").lower())
+
+
 def _osv_affected(version, affected_entries):
     """OSV match: is `version` affected by any of this package's affected entries? Returns the
     fixed version (str, possibly '') when affected, else None. Handles the exact `versions` list
@@ -3815,11 +3832,17 @@ class OSCurrency:
         label = "%d pending Apple update%s" % (len(pend), "" if len(pend) == 1 else "s")
         if sec:
             label += " (%d security)" % len(sec)
+        detail = "; ".join(t for t in titles if t)[:400]
         return [{
             "source": "os-update", "kind": "os_currency", "severity": sev,
             "component": "macOS", "installed_version": state.get("product_version"),
-            "title": label, "detail": "; ".join(t for t in titles if t)[:400],
+            "title": label, "detail": detail,
+            "description": ("Apple Software Update reports these pending updates: " + detail +
+                            ". Security updates close known, Apple-fixed CVEs; install them to stay current."),
+            "references": ["https://support.apple.com/en-us/HT201222"],
+            "cvss": None, "aliases": [], "published": None, "url": None,
             "fixed": None, "restart": any(u.get("restart") for u in pend),
+            "live": False, "remediation": None,
         }]
 
 
@@ -4140,6 +4163,12 @@ class OSVFeeds:
             return
         compact = {"id": rec.get("id"), "cve": _osv_cve(rec), "severity": _osv_severity(rec),
                    "title": rec.get("summary") or (rec.get("details") or "")[:120],
+                   "description": (rec.get("details") or rec.get("summary") or "")[:1500],
+                   "references": [r["url"] for r in (rec.get("references") or [])
+                                  if isinstance(r, dict) and r.get("url")][:8],
+                   "cvss": _osv_cvss(rec),
+                   "aliases": [str(a) for a in (rec.get("aliases") or [])][:8],
+                   "published": rec.get("published") or rec.get("modified"),
                    "url": _osv_url(rec)}
         for pname, affs in per_pkg.items():
             idx.setdefault(pname, []).append(dict(compact, affected=affs))
@@ -4155,8 +4184,10 @@ class OSVFeeds:
             if fixed is None:
                 continue
             hits.append({"id": rec["id"], "cve": rec["cve"], "severity": rec["severity"],
-                         "title": rec["title"], "url": rec["url"],
-                         "fixed": fixed or None, "example": False})
+                         "title": rec["title"], "url": rec["url"], "fixed": fixed or None,
+                         "description": rec.get("description"), "references": rec.get("references"),
+                         "cvss": rec.get("cvss"), "aliases": rec.get("aliases"),
+                         "published": rec.get("published"), "example": False})
         return hits
 
     def status(self):
@@ -4170,6 +4201,77 @@ class OSVFeeds:
 
 
 _OSV_KEY_BY_NAME = {v: k for k, v in OSV_ECOSYSTEMS.items()}   # "PyPI"->"pypi", "npm"->"npm"
+
+# Remediation states an operator can record against a finding. 'open' is the default (absence of a
+# record). 'patched' is auto-verifying: it suppresses the finding until the next scan, which either
+# confirms it (finding gone) or RE-OPENS it as a conflict (still detected after you said you patched).
+# The others are standing decisions that keep the finding suppressed with your note.
+VULN_REMEDIATION_STATES = ("patched", "mitigated", "accepted", "false_positive")
+
+
+class VulnRemediationStore:
+    """Per-finding remediation decisions, keyed by a stable finding signature and persisted to disk,
+    so marking something patched / mitigated / accepted / a false positive survives rescans and
+    restarts. Mirrors TriageStore for alerts."""
+
+    def __init__(self, path=None):
+        self.path = path or os.path.join(HERE, "vuln-remediation.json")
+        self.lock = threading.Lock()
+        self.data = {}          # sig -> {status, note, by, ts}
+        self._load()
+
+    def _load(self):
+        try:
+            with open(self.path) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                self.data = {k: v for k, v in d.items()
+                             if isinstance(v, dict) and v.get("status") in VULN_REMEDIATION_STATES}
+        except (OSError, ValueError):
+            self.data = {}
+
+    def _save(self):
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.data, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def set(self, sig, status, note=None, by=None):
+        status = status if status in VULN_REMEDIATION_STATES else "open"
+        with self.lock:
+            if status == "open":                       # clearing a decision
+                self.data.pop(sig, None)
+                rec = None
+            else:
+                rec = {"status": status, "ts": int(time.time()),
+                       "note": (str(note)[:1000] if note else None),
+                       "by": (str(by)[:120] if by else None)}
+                self.data[sig] = rec
+            self._save()
+        return rec
+
+    def get(self, sig):
+        with self.lock:
+            r = self.data.get(sig)
+            return dict(r) if r else None
+
+    def prune(self, active_sigs):
+        """Drop decisions whose finding is no longer detected (e.g. a 'patched' item that's now gone —
+        verified resolved — or a 'mitigated' one that was also upgraded away)."""
+        with self.lock:
+            stale = [s for s in self.data if s not in active_sigs]
+            for s in stale:
+                self.data.pop(s, None)
+            if stale:
+                self._save()
+            return len(stale)
+
+    def all(self):
+        with self.lock:
+            return {k: dict(v) for k, v in self.data.items()}
 
 
 class VulnScanner:
@@ -4188,6 +4290,7 @@ class VulnScanner:
         self.inventory = SoftwareInventory(osv=osv)
         self.feed = VulnFeed(enabled=enabled, interval=interval, url=feed_url)
         self.osv = OSVFeeds(enabled=enabled, interval=interval, ecosystems=osv)
+        self.remediation = VulnRemediationStore()   # operator decisions: patched/mitigated/accepted/FP
         self.lock = threading.Lock()
         self._result = {"findings": [], "counts": {}, "os": {}, "scanned": None,
                         "scanning": False, "error": None, "summary": {}}
@@ -4250,9 +4353,35 @@ class VulnScanner:
                                          "%s (%s)" % (pkg.get("name"), eco),
                                          pkg.get("version")))
         out = self._dedupe(out)
-        out.sort(key=lambda f: (-SEV_RANK.get(f.get("severity"), 0),
-                                not f.get("live"), f.get("component") or ""))
         return out
+
+    @staticmethod
+    def _active(f):
+        """Is this finding still 'open' for the operator? Anything remediated (mitigated / accepted /
+        false-positive, or patched-and-verified-gone/pending) is resolved; a 'patched' finding that a
+        later scan still detects is a CONFLICT and counts as active again."""
+        r = f.get("remediation")
+        if not r:
+            return True
+        return bool(r.get("status") == "patched" and r.get("conflict"))
+
+    def _apply_remediation(self, findings, scanned_ts):
+        """Attach each finding's remediation decision and resolve 'patched' auto-verification, then
+        prune decisions whose finding is no longer detected, and order active findings first."""
+        for f in findings:
+            f["sig"] = _finding_sig(f)                  # stable id the remediation UI sends back
+            r = self.remediation.get(f["sig"])
+            if not r:
+                f["remediation"] = None
+                continue
+            conflict = (r.get("status") == "patched"
+                        and scanned_ts is not None and scanned_ts > r.get("ts", 0))
+            f["remediation"] = {"status": r.get("status"), "note": r.get("note"),
+                                "by": r.get("by"), "ts": r.get("ts"), "conflict": conflict}
+        self.remediation.prune({_finding_sig(f) for f in findings})
+        findings.sort(key=lambda f: (not self._active(f), -SEV_RANK.get(f.get("severity"), 0),
+                                     not f.get("live"), f.get("component") or ""))
+        return findings
 
     @staticmethod
     def _dedupe(findings):
@@ -4281,17 +4410,24 @@ class VulnScanner:
                 "id": adv.get("id"), "cve": adv.get("cve") or adv.get("id"),
                 "component": component, "installed_version": version,
                 "fixed": adv.get("fixed"), "title": adv.get("title"),
+                "description": adv.get("description"),
+                "references": adv.get("references") or [],
+                "cvss": adv.get("cvss"), "aliases": adv.get("aliases") or [],
+                "published": adv.get("published"),
                 "url": adv.get("url"), "example": bool(adv.get("example")),
-                "live": bool(live)}
+                "live": bool(live), "remediation": None}
 
-    @staticmethod
-    def _summary(findings):
+    @classmethod
+    def _summary(cls, findings):
+        """Active findings only drive the counts/severity tiles; resolved ones are tallied separately."""
+        active = [f for f in findings if cls._active(f)]
         counts = {}
-        for f in findings:
+        for f in active:
             counts[f.get("severity", "info")] = counts.get(f.get("severity", "info"), 0) + 1
-        return {"total": len(findings), "by_severity": counts,
-                "example": sum(1 for f in findings if f.get("example")),
-                "live": sum(1 for f in findings if f.get("live"))}
+        return {"total": len(active), "by_severity": counts,
+                "example": sum(1 for f in active if f.get("example")),
+                "live": sum(1 for f in active if f.get("live")),
+                "resolved": len(findings) - len(active)}
 
     def scan(self):
         with self.lock:
@@ -4300,9 +4436,11 @@ class VulnScanner:
             osc = self.os_currency.check()
             inv = self.inventory.collect()
             self.osv.prepare(inv.get("packages"))       # fetch/index OSV for installed language pkgs
+            now = time.time()
             findings = self._build_findings(osc, inv, self._live_exes())
+            self._apply_remediation(findings, now)      # attach decisions, resolve 'patched', re-sort
             result = {"findings": findings, "counts": inv.get("counts", {}),
-                      "os": osc, "scanned": time.time(), "scanning": False,
+                      "os": osc, "scanned": now, "scanning": False,
                       "error": None, "summary": self._summary(findings)}
         except Exception as e:  # noqa: BLE001
             result = dict(self._result)
@@ -4310,6 +4448,21 @@ class VulnScanner:
         with self.lock:
             self._result = result
         return result
+
+    def set_remediation(self, sig, status, note=None, by=None):
+        """Record an operator decision (patched/mitigated/accepted/false_positive, or open to clear)
+        against a finding signature, then re-apply it to the current result so the UI updates without
+        waiting for a rescan. A fresh scan later verifies a 'patched' decision."""
+        if not sig:
+            return {"ok": False, "error": "finding signature required"}
+        if status != "open" and status not in VULN_REMEDIATION_STATES:
+            return {"ok": False, "error": "unknown status"}
+        self.remediation.set(sig, status, note=note, by=by)
+        with self.lock:
+            findings = self._result.get("findings") or []
+            self._apply_remediation(findings, self._result.get("scanned"))
+            self._result["summary"] = self._summary(findings)
+        return {"ok": True, "sig": sig, "status": status}
 
     def status(self):
         with self.lock:
@@ -4341,7 +4494,9 @@ class VulnScanner:
             "top": [{"severity": f.get("severity"), "component": f.get("component"),
                      "installed_version": f.get("installed_version"), "fixed": f.get("fixed"),
                      "cve": f.get("cve"), "kind": f.get("kind"), "title": f.get("title"),
-                     "example": bool(f.get("example")), "live": bool(f.get("live"))}
+                     "example": bool(f.get("example")), "live": bool(f.get("live")),
+                     "sig": f.get("sig"),
+                     "remediation": (f.get("remediation") or {}).get("status")}
                     for f in findings[:top]],
         }
 
@@ -14313,7 +14468,8 @@ class MeshReporter:
     # The secret travels the SAME authenticated relay as the rest of the config; it never lands in a URL.
     WRITE_WHITELIST = {"/api/triage", "/api/triage-bulk", "/api/incidents", "/api/incidents-bulk", "/api/incident-members", "/api/decoys", "/api/incident-note", "/api/export",
                        "/api/ioc-feeds", "/api/ioc-key", "/api/geoip", "/api/ai-config", "/api/ai-key",
-                       "/api/notify", "/api/rules", "/api/rules-test", "/api/suppressions", "/api/respond"}   # + response posture
+                       "/api/notify", "/api/rules", "/api/rules-test", "/api/suppressions", "/api/respond",
+                       "/api/vulns"}   # + response posture + vuln remediation
 
     def __init__(self, cache, secrets=None, settings_file=None):
         self.cache = cache
@@ -17522,6 +17678,19 @@ def make_handler(cache):
                         hunts = autohunt_on_validated(cache, node_id, nt, nd,
                                                       by=("mesh" if getattr(self, "_mesh_write", False) else "analyst"))
                     self._send_json({"ok": True, "triage": rec, "auto_hunts": hunts})
+            elif u.path == "/api/vulns":
+                # Record an operator remediation decision against a finding: patched / mitigated /
+                # accepted / false_positive (or open to clear). 'patched' auto-verifies on the next scan.
+                qs = parse_qs(u.query)
+                sig = (qs.get("sig") or [""])[0]
+                status = (qs.get("status") or ["open"])[0]
+                note = (qs.get("note") or [None])[0]
+                by = "mesh" if getattr(self, "_mesh_write", False) else (qs.get("by") or ["analyst"])[0]
+                vs = getattr(cache, "vulns", None)
+                if not vs:
+                    self._send_json({"ok": False, "error": "vulnerability scanning disabled"}, status=400)
+                else:
+                    self._send_json(vs.set_remediation(sig, status, note=note, by=by))
             elif u.path == "/api/chat-notify":
                 length = int(self.headers.get("Content-Length") or 0)
                 raw_c = self.rfile.read(length).decode("utf-8", "replace") if length else ""

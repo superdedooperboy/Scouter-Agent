@@ -6,6 +6,26 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.4.0 / Linux agent 1.4.0 — 2026-10-11
+
+### Added
+
+**Vulnerability detail panel + remediation.** The Vulnerabilities tab is now a two-pane view: click a
+finding and an in-console detail panel shows the full advisory — description, CVSS, fixed-in, published
+date, aliases, and source links — so you no longer have to click out to an external site to understand
+it. Findings now carry that detail end-to-end (sourced from OSV, the advisory feed, and the OS-update
+check).
+
+**Remediate a finding without actually patching it yet.** Each finding can be marked **Patched /
+Mitigated / Accepted / False positive** with a note; remediated findings drop out of the active counts
+and severity tiles (and move under a "show resolved" toggle), with a running `resolved` tally.
+Decisions persist across rescans and restarts (`vuln-remediation.json`, keyed by a version-independent
+finding signature). **"Patched" auto-verifies**: it stays suppressed until the next scan, which either
+confirms it (the finding is gone) or **re-opens it as a conflict** if the fix is still missing. A new
+`POST /api/vulns` (`?sig&status&note`) records the decision and applies it live; the Mesh can drive it
+fleet-wide over the management relay (Scouter Mesh 0.7.37). The compact mesh rollup now carries each
+finding's signature + remediation state.
+
 ## Linux agent 1.3.0 — 2026-10-09
 
 ### Added

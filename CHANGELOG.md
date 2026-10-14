@@ -6,7 +6,7 @@ agents, versioned independently.
 
 ## [Unreleased]
 
-## macOS agent 1.6.0 — 2026-10-14
+## macOS agent 1.6.0 / Linux agent 1.6.0 — 2026-10-14
 
 ### Added
 

@@ -9182,9 +9182,16 @@ class ShodanExposure:
                 for cve, meta in src.items():
                     meta = meta if isinstance(meta, dict) else {}
                     cvss = meta.get("cvss")
-                    vulns[cve] = {"cve": cve, "cvss": cvss, "severity": _shodan_sev_from_cvss(cvss),
-                                  "summary": (meta.get("summary") or "")[:400],
-                                  "verified": bool(meta.get("verified"))}
+                    cur = vulns.get(cve) or {"cve": cve, "cvss": None, "severity": "unknown",
+                                             "summary": "", "verified": False}
+                    # Merge, preferring the richer data: a top-level entry carries cvss/summary while
+                    # the same CVE under a service is often bare — don't let the bare one clobber it.
+                    if cvss is not None:
+                        cur["cvss"], cur["severity"] = cvss, _shodan_sev_from_cvss(cvss)
+                    if meta.get("summary"):
+                        cur["summary"] = (meta.get("summary") or "")[:400]
+                    cur["verified"] = cur["verified"] or bool(meta.get("verified"))
+                    vulns[cve] = cur
             elif isinstance(src, list):
                 for cve in src:
                     vulns.setdefault(str(cve), {"cve": str(cve), "cvss": None,

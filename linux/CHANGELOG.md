@@ -6,6 +6,16 @@ All notable changes to Linux Scouter are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **External attack surface via Shodan (opt-in, CTEM-Lite), 1.6.0** — a new
+  "External attack surface" panel on the Vulnerabilities tab shows what the
+  public internet sees of this host: it looks up the host's own public IP on
+  Shodan and surfaces open ports, exposed services/versions, known CVEs, tags,
+  and any screenshots, in-console. Two modes — Full (operator's own Shodan key,
+  incl. screenshots) and Lite (keyless InternetDB; ports/CVEs/CPEs/tags, no
+  screenshots, non-commercial). Off by default; outbound to Shodan only, local
+  inventory never leaves the host; key in the SecretStore (file;
+  `SHODAN_API_KEY` env fallback), never sent to the browser. Agent-only.
+  `GET/POST /api/shodan`, `--shodan-interval` (12h).
 - **EDR alerts for high-severity findings + RPM/Alpine support, 1.5.0** — a new
   critical (or vulnerable-and-running high) finding fires a notification + SIEM
   export (`--vuln-alert-severity`). The agent now detects the distro family and

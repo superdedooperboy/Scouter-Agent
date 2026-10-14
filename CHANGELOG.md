@@ -6,6 +6,26 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.6.0 — 2026-10-14
+
+### Added
+
+**External attack surface via Shodan (opt-in, CTEM-Lite).** The Vulnerabilities tab now has an
+**External attack surface** panel that shows what the public internet sees of this host — the
+outside-in view that OS currency and the local inventory can't give. It looks up this host's own
+public IP on Shodan and surfaces the open ports, exposed services and versions, known CVEs, tags, and
+any screenshots Shodan captured, all in the console so you don't have to pivot out to shodan.io.
+
+Two modes: **Full**, using the operator's own Shodan API key (a paid Membership) for the complete host
+view including screenshots; and **Lite**, the keyless InternetDB API (ports / CVEs / CPEs / tags only,
+no screenshots, refreshed weekly — free for non-commercial use). **Off by default**: enabling it is a
+deliberate choice, since it makes outbound requests to Shodan; nothing about the local inventory is
+sent, and the public IP is resolved with the same opt-in resolver the Authentications map uses. The
+API key is held in the SecretStore (Keychain/file), never written to settings and never sent to the
+browser (`SHODAN_API_KEY` is a read-only fallback). Agent-only — none of this rides the mesh check-in.
+Shodan's CVE list is inferred from service version strings, so findings are flagged as leads to verify.
+New `GET/POST /api/shodan` and `--shodan-interval` (default 12h).
+
 ## macOS agent 1.5.0 / Linux agent 1.5.0 — 2026-10-11
 
 ### Added

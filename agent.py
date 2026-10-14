@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -9021,6 +9021,293 @@ def external_ip(geo=None):
     return _EXTERNAL_IP
 
 
+# --- External attack surface via Shodan (opt-in, agent-only) ---------------------------------------
+# What does the public internet see of THIS host? Shodan continuously scans the IPv4 space and records
+# the open ports, service banners, CPEs, known CVEs, tags and (where it captured one) a screenshot for
+# every reachable IP. We look up this host's own public IP so the operator sees their external attack
+# surface — the outside-in view that OS currency and the local inventory can't give — without leaving
+# the console. OFF by default; a deliberate opt-in, because it makes outbound requests to Shodan and
+# reveals (to Shodan, which already knows it) the public IP being queried.
+#
+# Two modes:
+#   key        — the full Shodan host API, needs the user's OWN Shodan API key (a paid Membership).
+#                Ports + services + versions + CPEs + CVEs + tags AND screenshots.
+#   internetdb — the keyless InternetDB API. FREE but NON-COMMERCIAL use only, refreshed weekly, and
+#                limited to ports / CVEs / CPEs / hostnames / tags (no banners, no screenshots).
+#
+# The key lives in the SecretStore (keychain/file), never in the settings file, never sent to the
+# browser. Agent-only: none of this rides the mesh check-in. Shodan's CVE list is inferred from
+# service *metadata* (version strings), so findings are leads to verify, not confirmed exploitable.
+SHODAN_SETTINGS_FILE = os.path.join(HERE, "shodan-settings.json")
+SHODAN_HOST_API = "https://api.shodan.io/shodan/host/"
+SHODAN_INTERNETDB = "https://internetdb.shodan.io/"
+SHODAN_MAX_SCREENSHOTS = 8
+
+
+def _shodan_sev_from_cvss(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "unknown"
+    if v >= 9:
+        return "critical"
+    if v >= 7:
+        return "high"
+    if v >= 4:
+        return "medium"
+    if v > 0:
+        return "low"
+    return "unknown"
+
+
+class ShodanExposure:
+    """Opt-in external attack-surface posture for this host's own public IP, via Shodan. See the
+    header note above. Reuses the agent's external-IP services to learn which IP to look up; the key
+    is held in the SecretStore. All state persists to shodan-settings.json (minus the key)."""
+
+    SECRET_ID = "shodan"
+    KEY_ENV = "SHODAN_API_KEY"
+    MODES = ("key", "internetdb")
+
+    def __init__(self, secrets=None, path=SHODAN_SETTINGS_FILE, interval=12 * 3600):
+        self.secrets = secrets or SecretStore()
+        self.path = path
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.enabled = False
+        self.mode = "key"
+        self.ip = None
+        self.data = None            # normalized result dict (or {"__none": True} when Shodan has nothing)
+        self.ts = 0
+        self.error = None
+        self._load()
+
+    # ---- persistence (never stores the key) ----
+    def _load(self):
+        try:
+            with open(self.path) as f:
+                d = json.load(f) or {}
+        except (OSError, ValueError):
+            return
+        self.enabled = bool(d.get("enabled"))
+        if d.get("mode") in self.MODES:
+            self.mode = d["mode"]
+        self.ip = d.get("ip")
+        self.data = d.get("data")
+        self.ts = int(d.get("ts") or 0)
+
+    def _save(self):
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"enabled": self.enabled, "mode": self.mode, "ip": self.ip,
+                           "data": self.data, "ts": self.ts}, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    # ---- key handling (GUI-settable; env is a read-only fallback) ----
+    def has_key(self):
+        return bool(self.secrets.get(self.SECRET_ID) or os.environ.get(self.KEY_ENV, "").strip())
+
+    def _key(self):
+        return self.secrets.get(self.SECRET_ID) or os.environ.get(self.KEY_ENV, "").strip() or None
+
+    def key_source(self):
+        if self.secrets.get(self.SECRET_ID):
+            return self.secrets.backend_for(self.SECRET_ID)
+        return "env" if os.environ.get(self.KEY_ENV, "").strip() else None
+
+    def set_key(self, key):
+        if self.key_source() == "env":
+            return {"ok": False, "error": f"key comes from ${self.KEY_ENV} — unset the "
+                                          f"environment variable to manage it in the GUI"}
+        backend = self.secrets.set(self.SECRET_ID, key)
+        return {"ok": True, "stored": bool((key or "").strip()), "backend": backend}
+
+    def set_mode(self, mode):
+        if mode not in self.MODES:
+            return {"ok": False, "error": "mode must be 'key' or 'internetdb'"}
+        with self.lock:
+            changed = (mode != self.mode)
+            self.mode = mode
+            if changed:
+                self.data, self.ts, self.error = None, 0, None
+            self._save()
+        if self.enabled and changed:
+            threading.Thread(target=lambda: self.refresh(force=True), daemon=True).start()
+        return self.status()
+
+    def set_enabled(self, on):
+        with self.lock:
+            self.enabled = bool(on)
+            if not self.enabled:
+                self.data, self.ts, self.error = None, 0, None
+            self._save()
+        if self.enabled:
+            threading.Thread(target=lambda: self.refresh(force=True), daemon=True).start()
+        return self.status()
+
+    # ---- public IP (reuse the auth-map resolver's services; reuse an already-known IP if we have one) ----
+    def _public_ip(self):
+        ext = _EXTERNAL_IP
+        if ext is not None and ext.ip:
+            return ext.ip
+        for url in EXTIP_SERVICES:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Scouter-agent"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    txt = r.read(64).decode("utf-8", "replace").strip()
+                ipaddress.ip_address(txt)
+                return txt
+            except Exception:       # noqa: BLE001 — try the next service
+                continue
+        return None
+
+    # ---- HTTP ----
+    def _get_json(self, url, timeout=20):
+        req = urllib.request.Request(url, headers={"User-Agent": "Scouter-agent",
+                                                   "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+
+    # ---- normalization ----
+    def _norm_host(self, j, ip):
+        """Shodan host API → our compact shape (ports/services/vulns/tags/screenshots/summary)."""
+        services, screenshots = [], []
+        vulns = {}
+
+        def add_vulns(src):
+            if isinstance(src, dict):
+                for cve, meta in src.items():
+                    meta = meta if isinstance(meta, dict) else {}
+                    cvss = meta.get("cvss")
+                    vulns[cve] = {"cve": cve, "cvss": cvss, "severity": _shodan_sev_from_cvss(cvss),
+                                  "summary": (meta.get("summary") or "")[:400],
+                                  "verified": bool(meta.get("verified"))}
+            elif isinstance(src, list):
+                for cve in src:
+                    vulns.setdefault(str(cve), {"cve": str(cve), "cvss": None,
+                                                "severity": "unknown", "summary": "", "verified": False})
+
+        add_vulns(j.get("vulns"))
+        for b in (j.get("data") or []):
+            if not isinstance(b, dict):
+                continue
+            svc_vulns = b.get("vulns") or {}
+            add_vulns(svc_vulns)
+            cpes = b.get("cpe23") or b.get("cpe") or []
+            services.append({
+                "port": b.get("port"), "transport": b.get("transport") or "tcp",
+                "product": (b.get("product") or "")[:60], "version": (b.get("version") or "")[:40],
+                "module": ((b.get("_shodan") or {}).get("module") or "")[:40],
+                "cpe": [str(c) for c in cpes][:4],
+                "vulns": sorted(svc_vulns.keys()) if isinstance(svc_vulns, dict) else [str(x) for x in svc_vulns]})
+            shot = (b.get("opts") or {}).get("screenshot")
+            if isinstance(shot, dict) and shot.get("data") and len(screenshots) < SHODAN_MAX_SCREENSHOTS:
+                screenshots.append({"data": shot["data"], "mime": shot.get("mime") or "image/jpeg",
+                                    "port": b.get("port"), "labels": shot.get("labels") or []})
+        services.sort(key=lambda s: (s["port"] is None, s["port"] or 0))
+        vuln_list = sorted(vulns.values(),
+                           key=lambda v: (-(float(v["cvss"]) if v["cvss"] is not None else -1), v["cve"]))
+        sev_counts = {}
+        for v in vuln_list:
+            sev_counts[v["severity"]] = sev_counts.get(v["severity"], 0) + 1
+        return {
+            "source": "shodan", "ip": ip,
+            "summary": {"ip": ip, "org": j.get("org") or "", "isp": j.get("isp") or "",
+                        "asn": j.get("asn") or "", "os": j.get("os") or "",
+                        "country": j.get("country_name") or "", "city": j.get("city") or "",
+                        "hostnames": (j.get("hostnames") or [])[:8], "tags": j.get("tags") or [],
+                        "last_update": j.get("last_update") or "",
+                        "ports": len(services), "vulns": len(vuln_list),
+                        "screenshots": len(screenshots), "by_severity": sev_counts},
+            "services": services, "vulns": vuln_list, "screenshots": screenshots}
+
+    def _norm_internetdb(self, j, ip):
+        cves = [str(c) for c in (j.get("vulns") or [])]
+        cpes = [str(c) for c in (j.get("cpes") or [])]
+        ports = sorted({int(p) for p in (j.get("ports") or []) if isinstance(p, int)})
+        services = [{"port": p, "transport": "tcp", "product": "", "version": "",
+                     "module": "", "cpe": [], "vulns": []} for p in ports]
+        vuln_list = [{"cve": c, "cvss": None, "severity": "unknown", "summary": "", "verified": False}
+                     for c in sorted(cves)]
+        return {
+            "source": "internetdb", "ip": ip,
+            "summary": {"ip": ip, "org": "", "isp": "", "asn": "", "os": "", "country": "", "city": "",
+                        "hostnames": (j.get("hostnames") or [])[:8], "tags": j.get("tags") or [],
+                        "last_update": "", "ports": len(services), "vulns": len(vuln_list),
+                        "screenshots": 0, "by_severity": {"unknown": len(vuln_list)} if vuln_list else {},
+                        "cpes": cpes[:12]},
+            "services": services, "vulns": vuln_list, "screenshots": []}
+
+    # ---- refresh ----
+    def refresh(self, force=False):
+        if not self.enabled:
+            return
+        now = int(time.time())
+        if not force and self.data is not None and (now - self.ts) < self.interval:
+            return
+        ip = self._public_ip()
+        if not ip:
+            with self.lock:
+                self.error = "could not resolve this host's public IP"
+                self._save()
+            return
+        mode = self.mode
+        try:
+            if mode == "key":
+                key = self._key()
+                if not key:
+                    with self.lock:
+                        self.ip, self.error = ip, "no Shodan API key set (add one, or switch to Lite / InternetDB mode)"
+                        self._save()
+                    return
+                j = self._get_json(SHODAN_HOST_API + ip + "?key=" + urllib.parse.quote(key) + "&minify=false")
+                data, err = self._norm_host(j, ip), None
+            else:
+                j = self._get_json(SHODAN_INTERNETDB + ip)
+                data, err = self._norm_internetdb(j, ip), None
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                data, err = {"__none": True, "ip": ip}, None          # Shodan has nothing on this IP (good)
+            elif e.code in (401, 403):
+                data, err = None, "Shodan rejected the API key (401/403) — check it in the GUI"
+            elif e.code == 429:
+                data, err = None, "Shodan rate limit hit (429) — try again later"
+            else:
+                data, err = None, f"Shodan HTTP {e.code}"
+        except (urllib.error.URLError, ValueError, TimeoutError, OSError) as e:
+            data, err = None, f"could not reach Shodan: {e}"
+        with self.lock:
+            self.ip = ip
+            if data is not None:
+                self.data, self.ts, self.error = data, now, None
+            else:
+                self.error = err
+            self._save()
+
+    def maybe_refresh(self):
+        if self.enabled and (self.data is None or (int(time.time()) - self.ts) >= self.interval):
+            threading.Thread(target=self.refresh, daemon=True).start()
+
+    # ---- views ----
+    def status(self):
+        d = self.data or {}
+        summ = d.get("summary") if isinstance(d, dict) else None
+        return {"enabled": self.enabled, "mode": self.mode, "has_key": self.has_key(),
+                "key_source": self.key_source(), "ip": self.ip, "ts": self.ts, "error": self.error,
+                "none": bool(isinstance(d, dict) and d.get("__none")),
+                "ports": (summ or {}).get("ports", 0), "vulns": (summ or {}).get("vulns", 0),
+                "screenshots": (summ or {}).get("screenshots", 0)}
+
+    def result(self):
+        """Full view for the GUI: status + the normalized data (ports/vulns/tags/screenshots)."""
+        out = self.status()
+        out["data"] = self.data if isinstance(self.data, dict) else None
+        return out
+
+
 # Local-login source tokens (console / terminal / sudo / loopback) — these map to the DEVICE layer
 # (plotted at the machine's own external IP), as opposed to a remote source address.
 _LOCAL_AUTH_SOURCES = {"console", "sudo", "localhost", "", "127.0.0.1", "::1"}
@@ -17404,6 +17691,16 @@ def make_handler(cache):
             elif path == "/api/extip":
                 geo = cache.enrich.geo if cache.enrich else None
                 self._send_json(external_ip(geo).status())
+            elif path == "/api/shodan":
+                sh = getattr(cache, "shodan", None)
+                if not sh:
+                    self._send_json({"enabled": False, "available": False})
+                else:
+                    if "refresh=1" in self.path:
+                        sh.refresh(force=True)
+                    else:
+                        sh.maybe_refresh()
+                    self._send_json(sh.result())
             elif path == "/api/ai":
                 self._send_json(cache.ai.status() if cache.ai
                                 else {"enabled": False, "configured": False, "available": False})
@@ -17615,6 +17912,30 @@ def make_handler(cache):
                     payload = {}
                 geo = cache.enrich.geo if cache.enrich else None
                 self._send_json(external_ip(geo).set_enabled(bool(payload.get("enabled"))))
+            elif u.path == "/api/shodan":
+                # Opt-in external attack surface (agent-only). op=enable|key|mode.
+                length = int(self.headers.get("Content-Length") or 0)
+                raw_b = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+                try:
+                    payload = json.loads(raw_b) if raw_b else {}
+                except ValueError:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                sh = getattr(cache, "shodan", None)
+                op = (payload.get("op") or "").strip()
+                if not sh:
+                    self._send_json({"ok": False, "error": "shodan integration unavailable"}, status=400)
+                elif op == "key":
+                    res = sh.set_key(payload.get("api_key") or "")
+                    self._send_json(dict(res, **sh.status()) if res.get("ok") else res,
+                                    status=200 if res.get("ok") else 400)
+                elif op == "mode":
+                    self._send_json(sh.set_mode((payload.get("mode") or "").strip()))
+                elif op == "enable":
+                    self._send_json(sh.set_enabled(bool(payload.get("enabled"))))
+                else:
+                    self._send_json({"ok": False, "error": "op must be enable|key|mode"}, status=400)
             elif u.path == "/api/decoys":
                 # op=set (enable/disable — disabling removes what was planted), op=replant,
                 # op=fleet-bait (the mesh syncing the fleet's bait usernames to this host).
@@ -19474,6 +19795,10 @@ def main():
                     help="raise an EDR alert (phone/chat notification + SIEM export) when a NEW finding at "
                          "or above this severity appears; a vulnerable-AND-running 'high' always alerts. "
                          "'off' disables vuln alerting (the Vulnerabilities tab still shows everything).")
+    ap.add_argument("--shodan-interval", type=int, default=12 * 3600,
+                    help="seconds between external attack-surface refreshes via Shodan (default 12h). "
+                         "Off until enabled in the GUI; set your Shodan API key there (or $SHODAN_API_KEY) "
+                         "for the full host view, or use the keyless InternetDB 'Lite' mode.")
     args = ap.parse_args()
     if args.break_glass is not None:
         # Arm or end a window and exit — this does not start an agent. The running agent notices the
@@ -19639,6 +19964,7 @@ def main():
                               feed_url=args.vuln_feed_url, history=history, osv=args.vuln_osv,
                               alert_severity=args.vuln_alert_severity, on_alert=_vuln_on_alert)
     cache.vulns.start()
+    cache.shodan = ShodanExposure(interval=args.shodan_interval)   # opt-in external attack surface (agent-only)
     cache.local_control = bool(args.local_control)
     cache.autohunts = AutoHuntStore()      # hunts raised by validated-malicious alerts
     cache.chat = chat                      # chat alerting (unmanaged hosts only)

@@ -1206,7 +1206,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <div id="sensors"></div>
     <div id="timeline"></div>
     <div id="metrics"></div>
-    <div id="vulns"></div>
+    <div id="vulns"><div id="shodanBox"></div><div id="vulnMain"></div></div>
     <div id="auth"></div>
     <div id="incidents"></div>
     <div id="attack"></div>
@@ -2893,11 +2893,12 @@ function vAgo(ts){ if(!ts) return 'never'; const d=Date.now()/1000-ts; if(d<3600
 var VHOST=null, VSEL=null, VSHOWRES=false;
 var VREM_LABEL={patched:'Patched',mitigated:'Mitigated',accepted:'Risk accepted',false_positive:'False positive'};
 function renderVulns(){
-  const box=document.getElementById('vulns'); if(!box) return;
+  renderShodanExposure();
+  const box=document.getElementById('vulnMain'); if(!box) return;
   if(!VHOST) box.innerHTML='<div class="hint">Scanning posture…</div>';
   fetch('/api/vulns').then(r=>r.json()).then(d=>{ VHOST=d; vulnDrawHost(); }).catch(e=>{ box.innerHTML='<div class="hint">Error: '+esc(''+e)+'</div>'; });
 }
-function vulnRescan(){ const b=document.getElementById('vulns'); if(b) b.innerHTML='<div class="hint">Rescanning… (OS update check + inventory can take a moment)</div>'; VHOST=null; fetch('/api/vulns?rescan=1').then(r=>r.json()).then(()=>{ setTimeout(renderVulns,1500); }).catch(()=>{}); }
+function vulnRescan(){ const b=document.getElementById('vulnMain'); if(b) b.innerHTML='<div class="hint">Rescanning… (OS update check + inventory can take a moment)</div>'; VHOST=null; fetch('/api/vulns?rescan=1').then(r=>r.json()).then(()=>{ setTimeout(renderVulns,1500); }).catch(()=>{}); }
 function vulnToggleResolved(){ VSHOWRES=!VSHOWRES; vulnDrawHost(); }
 function vulnSelectFinding(sig){ VSEL=(VSEL===sig?null:sig); vulnDrawHost(); }
 function vIsActive(f){ var r=f.remediation; if(!r) return true; return r.status==='patched' && r.conflict; }
@@ -2908,7 +2909,7 @@ function vulnRemediate(sig,status){
   fetch(url,{method:'POST'}).then(r=>r.json()).then(function(){ setTimeout(renderVulns,250); }).catch(()=>{});
 }
 function vulnDrawHost(){
-  const d=VHOST, box=document.getElementById('vulns'); if(!box) return;
+  const d=VHOST, box=document.getElementById('vulnMain'); if(!box) return;
   if(d && d.enabled===false){ box.innerHTML='<div class="empty-big">Vulnerability scanning is disabled on this host (<code>--no-vuln</code>).</div>'; return; }
   const os=(d&&d.os)||{}, sum=(d&&d.summary)||{}, bysev=sum.by_severity||{}, feed=(d&&d.feed)||{}, osv=(d&&d.osv)||{}, cnt=(d&&d.counts)||{};
   const findings=(d&&d.findings)||[];
@@ -3011,6 +3012,138 @@ function vulnDetailPanel(findings){
   h+='<div class="hint" style="margin-top:6px">“Patched” auto-verifies on the next scan — it re-opens if the fix is still missing.</div>';
   h+='</div></div>';
   return h;
+}
+// ---- External attack surface via Shodan (opt-in, agent-only) ----
+let SHO=null;
+function shoSev(s){ return SEV_COLOR[s] || 'var(--muted)'; }
+function renderShodanExposure(){
+  const box=document.getElementById('shodanBox'); if(!box) return;
+  fetch('/api/shodan').then(r=>r.json()).then(d=>{ SHO=d; shoDraw(); })
+    .catch(()=>{ box.innerHTML=''; });
+}
+function shoToggle(on){ fetch('/api/shodan',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({op:'enable',enabled:on})}).then(r=>r.json()).then(d=>{ SHO=Object.assign(SHO||{},d); shoDraw(); if(on) setTimeout(renderShodanExposure,1800); }).catch(()=>{}); }
+function shoSetMode(m){ fetch('/api/shodan',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({op:'mode',mode:m})}).then(r=>r.json()).then(d=>{ SHO=Object.assign(SHO||{},d); shoDraw(); setTimeout(renderShodanExposure,1800); }).catch(()=>{}); }
+function shoSaveKey(){ const el=document.getElementById('shoKey'); const k=el?el.value.trim():'';
+  fetch('/api/shodan',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({op:'key',api_key:k})}).then(r=>r.json()).then(d=>{ if(d&&d.ok===false){ const m=document.getElementById('shoMsg'); if(m) m.textContent=d.error||'failed'; return; } if(el) el.value=''; renderShodanExposure(); setTimeout(renderShodanExposure,1500); }).catch(()=>{}); }
+function shoClearKey(){ fetch('/api/shodan',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({op:'key',api_key:''})}).then(r=>r.json()).then(()=>{ renderShodanExposure(); }).catch(()=>{}); }
+function shoRefresh(){ const m=document.getElementById('shoMsg'); if(m) m.textContent='Querying Shodan…';
+  fetch('/api/shodan?refresh=1').then(r=>r.json()).then(d=>{ SHO=d; shoDraw(); }).catch(()=>{}); }
+function shoDraw(){
+  const box=document.getElementById('shodanBox'), d=SHO; if(!box) return;
+  if(!d){ box.innerHTML=''; return; }
+  let h='<div style="border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px 14px;margin:2px 0 14px">';
+  h+='<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+  h+='<div style="font-size:15px;font-weight:600">External attack surface</div>';
+  h+='<span class="hint" style="margin:0">— what the public internet sees of this host, via Shodan</span>';
+  h+='<span style="flex:1"></span>';
+  h+='<label class="hint" style="margin:0;cursor:pointer;display:inline-flex;align-items:center;gap:6px"><input type="checkbox" '+(d.enabled?'checked':'')+' onchange="shoToggle(this.checked)"> enabled</label>';
+  h+='</div>';
+  if(!d.enabled){
+    h+='<div class="hint" style="margin-top:8px">Off by default. When enabled, Scouter looks up this host’s own public IP on Shodan to show its outside-in exposure — open ports, exposed services, known CVEs, and screenshots — so you can see what an attacker sees without leaving the console. It makes outbound requests to Shodan; nothing about your local inventory is sent.</div>';
+    h+='<div style="margin-top:8px"><button class="btn" onclick="shoToggle(true)">Enable external exposure</button></div>';
+    box.innerHTML=h+'</div>'; return;
+  }
+  // mode + key controls
+  h+='<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">';
+  h+='<span class="hint" style="margin:0">Mode:</span>';
+  [['key','Full (your Shodan key)'],['internetdb','Lite (keyless InternetDB)']].forEach(function(m){
+    const on=(d.mode===m[0]);
+    h+='<button class="btn" style="'+(on?'border-color:var(--accent);color:var(--accent)':'')+'" onclick="shoSetMode(\''+m[0]+'\')">'+m[1]+'</button>';
+  });
+  h+='<span style="flex:1"></span><button class="btn" onclick="shoRefresh()">Refresh</button>';
+  h+='<span class="hint" style="margin:0">'+(d.ts?('updated '+vAgo(d.ts)):'not yet queried')+'</span>';
+  h+='</div>';
+  if(d.mode==='key'){
+    h+='<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">';
+    if(d.key_source==='env'){
+      h+='<span class="hint" style="margin:0">API key: <b style="color:var(--good)">set from $SHODAN_API_KEY</b></span>';
+    } else if(d.has_key){
+      h+='<span class="hint" style="margin:0">API key: <b style="color:var(--good)">stored</b> ('+esc(d.key_source||'')+')</span>';
+      h+='<button class="btn" onclick="shoClearKey()">Clear key</button>';
+    } else {
+      h+='<input id="shoKey" type="password" placeholder="Your Shodan API key" autocomplete="off" style="flex:1;min-width:220px;font-size:12px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:5px 8px">';
+      h+='<button class="btn" onclick="shoSaveKey()">Save key</button>';
+    }
+    h+='</div>';
+    if(!d.has_key) h+='<div class="hint" style="margin-top:4px">A Shodan paid Membership key enables the full host view incl. screenshots. No key? Switch to <b>Lite</b> for a keyless (non-commercial) view.</div>';
+  } else {
+    h+='<div class="hint" style="margin-top:6px">Keyless <b>InternetDB</b>: ports, CVEs, CPEs and tags only (no screenshots), refreshed weekly. <b>Free for non-commercial use only</b> — use the Full mode with your own key for business use.</div>';
+  }
+  h+='<div class="hint" id="shoMsg" style="margin-top:6px;min-height:0">'+(d.error?('<span style="color:var(--sev-high)">'+esc(d.error)+'</span>'):'')+'</div>';
+  const data=d.data;
+  if(d.none){ h+='<div class="empty-big" style="color:var(--good);margin-top:6px">Shodan has no record of open services on '+esc(d.ip||'this IP')+' — nothing is exposed to its scanners.</div>'; box.innerHTML=h+'</div>'; return; }
+  if(data && data.summary){
+    const s=data.summary, bysev=s.by_severity||{};
+    h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 8px">';
+    function tile(big,lbl,col){ return '<div style="flex:1;min-width:120px;border:1px solid var(--line);border-radius:10px;background:var(--bg);padding:9px 11px"><div style="font-size:16px;font-weight:700;'+(col?('color:'+col):'')+'">'+big+'</div><div class="hint" style="margin:0;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em">'+lbl+'</div></div>'; }
+    h+=tile(esc(s.ip||'?'),'Public IP');
+    h+=tile(esc(s.org||s.isp||'—'),'Org / ISP');
+    h+=tile(s.ports||0,'Open ports', s.ports?'var(--sev-medium)':'');
+    h+=tile(s.vulns||0,'Known CVEs', s.vulns?'var(--sev-high)':'');
+    if(s.screenshots) h+=tile(s.screenshots,'Screenshots');
+    h+='</div>';
+    // severity pills (host mode has cvss)
+    const sevs=['critical','high','medium','low','unknown'].filter(x=>bysev[x]);
+    if(sevs.length){ h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">';
+      sevs.forEach(x=>{ h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:20px;padding:2px 10px;font-size:12px"><span style="width:8px;height:8px;border-radius:50%;background:'+shoSev(x)+'"></span>'+x+' <b>'+bysev[x]+'</b></span>'; });
+      h+='</div>'; }
+    // tags + meta
+    if((s.tags||[]).length){ h+='<div style="margin:2px 0 8px">'+s.tags.map(t=>'<span style="display:inline-block;border:1px solid var(--line);border-radius:5px;padding:1px 7px;margin:0 4px 4px 0;font-size:11px">'+esc(t)+'</span>').join('')+'</div>'; }
+    const meta=[]; if(s.os) meta.push('OS: '+esc(s.os)); if(s.asn) meta.push(esc(s.asn)); if((s.hostnames||[]).length) meta.push(esc(s.hostnames.join(', ')));
+    if(s.last_update) meta.push('Shodan last saw it '+esc((''+s.last_update).slice(0,10)));
+    if(meta.length) h+='<div class="hint" style="margin:0 0 8px">'+meta.join(' · ')+'</div>';
+    // screenshots
+    if((data.screenshots||[]).length){
+      h+='<div class="hint" style="margin:8px 0 4px;text-transform:uppercase;letter-spacing:.04em">Screenshots</div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">';
+      data.screenshots.forEach(function(sc,i){ h+='<img src="data:'+esc(sc.mime||'image/jpeg')+';base64,'+sc.data+'" title="port '+esc(''+(sc.port||''))+'" onclick="shoShot('+i+')" style="width:132px;height:92px;object-fit:cover;border:1px solid var(--line);border-radius:7px;cursor:zoom-in">'; });
+      h+='</div>';
+    }
+    // services
+    if((data.services||[]).length){
+      h+='<div class="hint" style="margin:8px 0 4px;text-transform:uppercase;letter-spacing:.04em">Exposed services ('+data.services.length+')</div>';
+      h+='<table class="vtbl" style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--line)"><th style="padding:5px 8px">Port</th><th style="padding:5px 8px">Service</th><th style="padding:5px 8px">Version</th><th style="padding:5px 8px">CVEs</th></tr></thead><tbody>';
+      data.services.forEach(function(sv){
+        const cves=(sv.vulns||[]);
+        h+='<tr style="border-bottom:1px solid var(--line)"><td style="padding:5px 8px;font-variant-numeric:tabular-nums">'+esc(''+(sv.port||'?'))+'/'+esc(sv.transport||'tcp')+'</td>'+
+           '<td style="padding:5px 8px">'+esc(sv.product||sv.module||'—')+'</td>'+
+           '<td style="padding:5px 8px;font-variant-numeric:tabular-nums">'+esc(sv.version||'—')+'</td>'+
+           '<td style="padding:5px 8px">'+(cves.length?('<span style="color:var(--sev-high)">'+cves.length+'</span>'):'<span class="hint" style="margin:0">—</span>')+'</td></tr>';
+      });
+      h+='</tbody></table>';
+    }
+    // CVE list
+    if((data.vulns||[]).length){
+      h+='<div class="hint" style="margin:10px 0 4px;text-transform:uppercase;letter-spacing:.04em">Known CVEs ('+data.vulns.length+')</div>';
+      h+='<div style="max-height:220px;overflow:auto">';
+      data.vulns.slice(0,60).forEach(function(v){
+        h+='<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px solid var(--line)">'+
+           '<span style="display:inline-block;min-width:54px;text-align:center;background:'+shoSev(v.severity)+';color:#0b0e14;border-radius:5px;padding:0 6px;font-size:10.5px;font-weight:600">'+esc(v.severity||'')+'</span>'+
+           '<a href="https://nvd.nist.gov/vuln/detail/'+esc(v.cve)+'" target="_blank" rel="noopener" style="color:var(--accent);font-variant-numeric:tabular-nums">'+esc(v.cve)+'</a>'+
+           (v.cvss!=null?'<span class="hint" style="margin:0">CVSS '+esc(''+v.cvss)+'</span>':'')+
+           (v.verified?'<span style="color:var(--good);font-size:11px">verified</span>':'')+
+           (v.summary?'<span class="hint" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(v.summary)+'</span>':'')+
+           '</div>';
+      });
+      h+='</div>';
+    }
+  } else if(!d.error){
+    h+='<div class="hint" style="margin-top:8px">Querying Shodan… <span class="spin">◍</span></div>';
+  }
+  // honesty footer
+  h+='<div class="hint" style="margin-top:10px;font-size:11px">Shodan scans on its own schedule, so this is a recent snapshot, not live. Its CVE list is inferred from service version strings — treat findings as leads to verify. '+(d.mode==='internetdb'?'InternetDB is updated weekly and is free for non-commercial use only.':'')+'</div>';
+  box.innerHTML=h+'</div>';
+}
+function shoShot(i){
+  const sc=((SHO&&SHO.data&&SHO.data.screenshots)||[])[i]; if(!sc) return;
+  let lb=document.getElementById('shoLightbox');
+  if(!lb){ lb=document.createElement('div'); lb.id='shoLightbox';
+    lb.style.cssText='position:fixed;inset:0;background:#000c;display:flex;align-items:center;justify-content:center;z-index:9999;cursor:zoom-out';
+    lb.onclick=function(){ lb.remove(); }; document.body.appendChild(lb); }
+  lb.innerHTML='<img src="data:'+(sc.mime||'image/jpeg')+';base64,'+sc.data+'" style="max-width:92vw;max-height:92vh;border:1px solid #333;border-radius:8px">';
 }
 function renderMetrics(){
   const box=document.getElementById('metrics'); if(!box) return;

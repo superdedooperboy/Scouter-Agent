@@ -4178,8 +4178,12 @@ function shoDraw(){
     if(sevs.length){ h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">';
       sevs.forEach(x=>{ h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:20px;padding:2px 10px;font-size:12px"><span style="width:8px;height:8px;border-radius:50%;background:'+shoSev(x)+'"></span>'+x+' <b>'+bysev[x]+'</b></span>'; });
       h+='</div>'; }
-    // tags + meta
+    // tags + location + meta
     if((s.tags||[]).length){ h+='<div style="margin:2px 0 8px">'+s.tags.map(t=>'<span style="display:inline-block;border:1px solid var(--line);border-radius:5px;padding:1px 7px;margin:0 4px 4px 0;font-size:11px">'+esc(t)+'</span>').join('')+'</div>'; }
+    // where this host's public IP geolocates — Shodan's own place (Full mode), else the host's resolved geo
+    var locPlace=(s.city&&s.country)?(s.city+', '+s.country):(s.country||((d.host_geo&&d.host_geo.place)||''));
+    var locOrg=s.org||s.isp||'';
+    if(locPlace||locOrg) h+='<div class="hint" style="margin:0 0 8px">📍 '+esc([locPlace,locOrg].filter(Boolean).join(' · '))+'</div>';
     const meta=[]; if(s.os) meta.push('OS: '+esc(s.os)); if(s.asn) meta.push(esc(s.asn)); if((s.hostnames||[]).length) meta.push(esc(s.hostnames.join(', ')));
     if(s.last_update) meta.push('Shodan last saw it '+esc((''+s.last_update).slice(0,10)));
     if(meta.length) h+='<div class="hint" style="margin:0 0 8px">'+meta.join(' · ')+'</div>';

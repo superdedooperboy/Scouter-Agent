@@ -6,6 +6,16 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.6.1 / Linux agent 1.6.1 — 2026-10-18
+
+### Added
+
+**Location line in the External attack surface section.** The Vulnerabilities tab's External section now
+shows where this host's public (egress) IP geolocates — e.g. "📍 Fremont, United States · Linode" — using
+Shodan's own location in Full mode, and falling back to the host's resolved geo (the opt-in auth-map
+resolver) otherwise. (The fleet-wide world-map view lives in the Mesh; for a single host this one line
+is the proportional treatment.)
+
 ## macOS agent 1.6.0 / Linux agent 1.6.0 — 2026-10-14
 
 ### Added

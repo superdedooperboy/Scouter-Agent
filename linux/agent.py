@@ -91,7 +91,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -8390,6 +8390,16 @@ class ShodanExposure:
         """Full view for the GUI: status + the normalized data (ports/vulns/tags/screenshots)."""
         out = self.status()
         out["data"] = self.data if isinstance(self.data, dict) else None
+        # Where this host's egress IP geolocates — a fallback for the External section's location line
+        # when Shodan itself returns no place (e.g. Lite/InternetDB mode). Reuses the opt-in auth-map
+        # resolver's result; nothing extra leaves the machine.
+        try:
+            ext = _EXTERNAL_IP
+            if ext is not None and self.ip and ext.ip == self.ip and ext.rec:
+                r = ext.rec
+                out["host_geo"] = {"place": r.get("summary") or r.get("country"), "country": r.get("country")}
+        except Exception:  # noqa: BLE001
+            pass
         return out
 
 

@@ -6,6 +6,21 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.7.0 / Linux agent 1.7.0 — 2026-10-19
+
+### Added
+
+**Exploitation-aware prioritization (KEV).** Vulnerability findings are now ranked by whether the CVE is
+**known exploited in the wild**, not just by CVSS — an exploited "medium" outranks a theoretical
+"critical". A new `KevFeed` pulls the **VulnCheck KEV** catalogue daily (community-tier API token, a
+superset of CISA KEV that carries exploitation evidence) and, with no token, falls back to the free
+**CISA KEV** — either way the full set is downloaded once a day and matched entirely locally (nothing
+about the inventory leaves the host). KEV flags apply to **both internal findings** (OS currency,
+inventory/OSV, advisory feed) **and external ones** (the Shodan attack-surface CVEs): each exploited CVE
+shows a **🛑 KEV** badge (with a ransomware note where applicable), floats to the top of its list, adds a
+"known exploited" tile, and — new in this release — **raises an EDR alert regardless of CVSS**. Set a
+VulnCheck token from the Vulnerabilities tab (or `$VULNCHECK_API_TOKEN`); `GET`/`POST /api/kev`.
+
 ## macOS agent 1.6.1 / Linux agent 1.6.1 — 2026-10-18
 
 ### Added

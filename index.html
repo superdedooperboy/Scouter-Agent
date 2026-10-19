@@ -2890,10 +2890,19 @@ function showTab(t){
   if(t==='groups') renderGroups();
 }
 function vAgo(ts){ if(!ts) return 'never'; const d=Date.now()/1000-ts; if(d<3600) return Math.round(d/60)+'m ago'; if(d<86400) return Math.round(d/3600)+'h ago'; return Math.round(d/86400)+'d ago'; }
-var VHOST=null, VSEL=null, VSHOWRES=false;
+var VHOST=null, VSEL=null, VSHOWRES=false, KEVSTAT=null;
 var VREM_LABEL={patched:'Patched',mitigated:'Mitigated',accepted:'Risk accepted',false_positive:'False positive'};
+function loadKev(cb){ fetch('/api/kev').then(r=>r.json()).then(d=>{ KEVSTAT=d; if(cb)cb(); }).catch(()=>{}); }
+function kevLineHTML(){ var k=KEVSTAT; if(!k||k.available===false) return '';
+  var src=k.source==='vulncheck'?'VulnCheck KEV':(k.source==='cisa'?'CISA KEV (free)':'—');
+  return '<div class="hint" style="margin-top:6px">Exploitation data (KEV): '+(k.count?('<b>'+k.count+'</b> known-exploited CVEs via '+esc(src)):'loading…')+
+    (k.has_token?' · <span style="color:var(--good)">VulnCheck token set</span>':' · <span class="clr" style="color:var(--accent);cursor:pointer;text-decoration:underline" onclick="kevSetToken()">add a VulnCheck community token</span> for the fuller, exploitation-enriched set')+
+    (k.error?(' · <span style="color:var(--sev-high)">'+esc(k.error)+'</span>'):'')+'. A CVE flagged 🛑 KEV is known-exploited in the wild and is prioritized above higher-CVSS-but-unexploited findings.</div>'; }
+function kevSetToken(){ var t=prompt('VulnCheck community API token (free at vulncheck.com/settings/tokens). Leave blank to clear and use the free CISA KEV:',''); if(t===null) return;
+  fetch('/api/kev',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t.trim()})}).then(r=>r.json()).then(d=>{ if(d&&d.ok===false){ alert(d.error||'failed'); return; } loadKev(function(){ if(VHOST) vulnDrawHost(); renderShodanExposure(); }); }).catch(()=>{}); }
 function renderVulns(){
   renderShodanExposure();
+  loadKev(function(){ if(VHOST) vulnDrawHost(); });
   const box=document.getElementById('vulnMain'); if(!box) return;
   if(!VHOST) box.innerHTML='<div class="hint">Scanning posture…</div>';
   fetch('/api/vulns').then(r=>r.json()).then(d=>{ VHOST=d; vulnDrawHost(); }).catch(e=>{ box.innerHTML='<div class="hint">Error: '+esc(''+e)+'</div>'; });
@@ -2936,6 +2945,7 @@ function vulnDrawHost(){
   const live=sum.live||0;
   h+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">';
   ['critical','high','medium','low'].forEach(s=>{ h+='<span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:20px;padding:3px 11px;font-size:12px"><span style="width:9px;height:9px;border-radius:50%;background:'+(SEV_COLOR[s]||'var(--chip)')+'"></span>'+s+' <b>'+(bysev[s]||0)+'</b></span>'; });
+  if(sum.kev) h+='<span title="known exploited in the wild (KEV) — top priority" style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--sev-critical);background:var(--sev-critical);color:#0b0e14;border-radius:20px;padding:3px 11px;font-size:12px;font-weight:700">🛑 '+sum.kev+' known exploited'+(sum.kev_ransomware?(' · '+sum.kev_ransomware+' ransomware'):'')+'</span>';
   if(live) h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--sev-high);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--sev-high)">⚡ '+live+' vulnerable &amp; running</span>';
   if(sum.resolved) h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--good)">✓ '+sum.resolved+' resolved</span>';
   h+='<span class="hint" style="align-self:center">'+(cnt.apps||0)+' apps · '+(cnt.brew||0)+' brew · '+(cnt.packages||0)+' pkgs scanned</span>';
@@ -2955,6 +2965,7 @@ function vulnDrawHost(){
      (osv.mode&&osv.mode!=='off'?(' · OSV '+esc(osv.mode)+(ecoBits?(' ['+esc(ecoBits)+']'):'')):'')+
      '. '+(sum.example?('Rows tagged <b>example</b> are demonstration advisories, not confirmed CVEs — point <code>--vuln-feed-url</code> at a live feed. '):'')+
      'Everything is computed on this machine; no inventory leaves the host.</div>';
+  h+=kevLineHTML();
   box.innerHTML=h;
 }
 function vulnTable(rows, kind){
@@ -2969,7 +2980,7 @@ function vulnTable(rows, kind){
     else if(r) state='<span style="color:var(--good)">'+esc(VREM_LABEL[r.status]||r.status)+'</span>';
     h+='<tr onclick="vulnSelectFinding(\''+esc(f.sig)+'\')" style="border-bottom:1px solid var(--line);cursor:pointer'+(selq?';background:var(--chip)':'')+'">'+
        '<td style="padding:6px 8px"><span style="display:inline-block;min-width:58px;text-align:center;background:'+col+';color:#0b0e14;border-radius:5px;padding:1px 7px;font-size:11px;font-weight:600">'+esc(f.severity||'')+'</span></td>'+
-       '<td style="padding:6px 8px">'+esc(f.component||'?')+(f.live?' <span title="a process from this software is running now" style="color:var(--sev-high)">⚡</span>':'')+(f.example?' <span class="hint" style="margin:0;border:1px solid var(--line);border-radius:4px;padding:0 4px">example</span>':'')+'<div class="hint" style="margin:0;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(f.title||f.cve||'')+'</div></td>'+
+       '<td style="padding:6px 8px">'+esc(f.component||'?')+(f.kev?' <span title="known exploited in the wild (KEV)'+(f.kev_ransomware?' — used in ransomware':'')+'" style="background:var(--sev-critical);color:#0b0e14;border-radius:4px;padding:0 5px;font-size:10px;font-weight:700">🛑 KEV</span>':'')+(f.live?' <span title="a process from this software is running now" style="color:var(--sev-high)">⚡</span>':'')+(f.example?' <span class="hint" style="margin:0;border:1px solid var(--line);border-radius:4px;padding:0 4px">example</span>':'')+'<div class="hint" style="margin:0;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(f.title||f.cve||'')+'</div></td>'+
        '<td style="padding:6px 8px;font-variant-numeric:tabular-nums">'+esc(f.installed_version||'—')+'</td>'+
        '<td style="padding:6px 8px;font-variant-numeric:tabular-nums;color:var(--good)">'+esc(f.fixed||'—')+'</td>'+
        '<td style="padding:6px 8px">'+state+'</td></tr>';
@@ -2984,11 +2995,13 @@ function vulnDetailPanel(findings){
   h+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="background:'+col+';color:#0b0e14;border-radius:5px;padding:1px 8px;font-size:11px;font-weight:700">'+esc(f.severity||'')+'</span>'+
      '<b style="font-size:14px">'+esc(f.component||'?')+'</b>'+(f.live?' <span style="color:var(--sev-high)" title="running now">⚡ live</span>':'')+(f.example?' <span class="hint" style="border:1px solid var(--line);border-radius:4px;padding:0 4px">example</span>':'')+'</div>';
   if(f.title) h+='<div style="margin:6px 0 8px;font-size:13px">'+esc(f.title)+'</div>';
+  if(f.kev) h+='<div style="margin:4px 0 8px;padding:7px 10px;border-radius:8px;background:var(--sev-critical);color:#0b0e14;font-size:12px;font-weight:600">🛑 Known exploited in the wild'+(f.kev_ransomware?' · used in ransomware campaigns':'')+' <span style="font-weight:400;opacity:.8">— prioritize this ('+esc((f.kev_source||'kev')==='vulncheck'?'VulnCheck KEV':(f.kev_source==='cisa'?'CISA KEV':'KEV'))+')</span></div>';
   // key/value grid
   function kv(k,v){ return v?('<div style="display:flex;gap:8px;font-size:12px;margin:2px 0"><span class="hint" style="margin:0;width:88px;flex:none">'+k+'</span><span style="font-variant-numeric:tabular-nums">'+v+'</span></div>'):''; }
   h+='<div style="margin:8px 0;padding:8px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)">';
   h+=kv('Installed', esc(f.installed_version||'—'));
   h+=kv('Fixed in', f.fixed?('<span style="color:var(--good)">'+esc(f.fixed)+'</span>'):'—');
+  if(f.kev && f.kev_due) h+=kv('KEV due', '<span style="color:var(--sev-high)">'+esc((''+f.kev_due).slice(0,10))+'</span>');
   h+=kv('Advisory', esc(f.cve||f.id||'—'));
   h+=kv('CVSS', f.cvss?esc(f.cvss):'');
   h+=kv('Published', f.published?esc((''+f.published).slice(0,10)):'');
@@ -3084,6 +3097,7 @@ function shoDraw(){
     h+=tile(esc(s.org||s.isp||'—'),'Org / ISP');
     h+=tile(s.ports||0,'Open ports', s.ports?'var(--sev-medium)':'');
     h+=tile(s.vulns||0,'Known CVEs', s.vulns?'var(--sev-high)':'');
+    if(s.kev) h+=tile('<span style="color:var(--sev-critical)">🛑 '+s.kev+'</span>','Known exploited');
     if(s.screenshots) h+=tile(s.screenshots,'Screenshots');
     h+='</div>';
     // severity pills (host mode has cvss)
@@ -3127,6 +3141,7 @@ function shoDraw(){
         h+='<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px solid var(--line)">'+
            '<span style="display:inline-block;min-width:54px;text-align:center;background:'+shoSev(v.severity)+';color:#0b0e14;border-radius:5px;padding:0 6px;font-size:10.5px;font-weight:600">'+esc(v.severity||'')+'</span>'+
            '<a href="https://nvd.nist.gov/vuln/detail/'+esc(v.cve)+'" target="_blank" rel="noopener" style="color:var(--accent);font-variant-numeric:tabular-nums">'+esc(v.cve)+'</a>'+
+           (v.kev?'<span title="known exploited in the wild'+(v.kev_ransomware?' — ransomware':'')+'" style="background:var(--sev-critical);color:#0b0e14;border-radius:4px;padding:0 5px;font-size:10px;font-weight:700">🛑 KEV</span>':'')+
            (v.cvss!=null?'<span class="hint" style="margin:0">CVSS '+esc(''+v.cvss)+'</span>':'')+
            (v.verified?'<span style="color:var(--good);font-size:11px">verified</span>':'')+
            (v.summary?'<span class="hint" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(v.summary)+'</span>':'')+

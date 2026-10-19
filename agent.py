@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.6.1"
+__version__ = "1.7.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -4274,6 +4274,182 @@ class VulnRemediationStore:
             return {k: dict(v) for k, v in self.data.items()}
 
 
+class KevFeed:
+    """Known-Exploited-Vulnerabilities feed, for exploitation-aware prioritization. A CVE that is
+    *known exploited in the wild* is more urgent than one that only has a high CVSS, so KEV membership
+    floats a finding to the top of the queue and (new KEV findings) raises an EDR alert regardless of
+    severity.
+
+    Prefers **VulnCheck KEV** (community-tier API token — a superset of CISA KEV that also carries
+    exploitation evidence); with no token it falls back to the free **CISA KEV**. Either way it
+    downloads the full catalogue on a daily timer and matches CVEs entirely locally — nothing about the
+    host's inventory leaves the machine. The VulnCheck pull is one backup request + one S3 download per
+    day, far under the community rate limit."""
+
+    SECRET_ID = "vulncheck"
+    KEY_ENV = "VULNCHECK_API_TOKEN"
+    VC_BACKUP = "https://api.vulncheck.com/v3/backup/vulncheck-kev"
+    CISA_URL = ("https://www.cisa.gov/sites/default/files/feeds/"
+                "known_exploited_vulnerabilities.json")
+
+    def __init__(self, enabled=True, interval=86400, secrets=None, cache_file=None):
+        self.enabled = enabled
+        self.interval = max(3600, interval)
+        self.secrets = secrets or SecretStore()
+        self.cache_file = cache_file or os.path.join(HERE, "kev-cache.json")
+        self.lock = threading.Lock()
+        self.kev = {}            # CVE (upper) -> {ransomware, cisa, due, added, name, source, refs}
+        self.source = None       # 'vulncheck' | 'cisa' | None
+        self.last = 0
+        self.error = None
+        self._load_cache()
+        if enabled:
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    # ---- token (GUI-settable, SecretStore; env is a read-only fallback) ----
+    def has_token(self):
+        return bool(self.secrets.get(self.SECRET_ID) or os.environ.get(self.KEY_ENV, "").strip())
+
+    def _token(self):
+        return self.secrets.get(self.SECRET_ID) or os.environ.get(self.KEY_ENV, "").strip() or None
+
+    def token_source(self):
+        if self.secrets.get(self.SECRET_ID):
+            return self.secrets.backend_for(self.SECRET_ID)
+        return "env" if os.environ.get(self.KEY_ENV, "").strip() else None
+
+    def set_token(self, token):
+        if self.token_source() == "env":
+            return {"ok": False, "error": "token comes from $%s — unset the env var to manage it here"
+                    % self.KEY_ENV}
+        backend = self.secrets.set(self.SECRET_ID, token)
+        threading.Thread(target=lambda: self.refresh(force=True), daemon=True).start()
+        return {"ok": True, "stored": bool((token or "").strip()), "backend": backend}
+
+    # ---- lookup / enrichment ----
+    def lookup(self, cve):
+        if not cve:
+            return None
+        with self.lock:
+            return self.kev.get(str(cve).upper())
+
+    def enrich(self, f):
+        """Stamp KEV fields onto a finding / Shodan-vuln dict that carries a 'cve'."""
+        rec = self.lookup(f.get("cve"))
+        f["kev"] = bool(rec)
+        if rec:
+            f["kev_ransomware"] = bool(rec.get("ransomware"))
+            f["kev_cisa"] = bool(rec.get("cisa"))
+            f["kev_due"] = rec.get("due")
+            f["kev_source"] = rec.get("source")
+        return f
+
+    # ---- persistence ----
+    def _load_cache(self):
+        try:
+            with open(self.cache_file) as f:
+                d = json.load(f) or {}
+        except (OSError, ValueError):
+            return
+        if isinstance(d.get("kev"), dict):
+            self.kev = {k.upper(): v for k, v in d["kev"].items() if isinstance(v, dict)}
+            self.source = d.get("source")
+            self.last = int(d.get("last") or 0)
+
+    def _save_cache(self):
+        try:
+            tmp = self.cache_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"kev": self.kev, "source": self.source, "last": self.last}, f)
+            os.replace(tmp, self.cache_file)
+        except OSError:
+            pass
+
+    # ---- download ----
+    def _http(self, url, headers=None, timeout=60):
+        req = urllib.request.Request(url, headers=headers or {"User-Agent": "Scouter-agent"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+
+    def _fetch_vulncheck(self, token):
+        meta = json.loads(self._http(self.VC_BACKUP, headers={
+            "User-Agent": "Scouter-agent", "Accept": "application/json",
+            "Authorization": "Bearer " + token}, timeout=30).decode("utf-8", "replace"))
+        rows = meta.get("data") or []
+        url = rows[0].get("url") if rows else None
+        if not url:
+            raise ValueError("no backup URL in VulnCheck response")
+        blob = self._http(url, timeout=120)                      # pre-signed S3 — NO auth header
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            name = next((n for n in z.namelist() if n.lower().endswith(".json")), None)
+            if not name:
+                raise ValueError("no JSON in VulnCheck KEV backup zip")
+            doc = json.loads(z.read(name).decode("utf-8", "replace"))
+        recs = doc.get("data") if isinstance(doc, dict) else doc
+        out = {}
+        for rec in (recs or []):
+            if not isinstance(rec, dict):
+                continue
+            cves = rec.get("cve") or []
+            if isinstance(cves, str):
+                cves = [cves]
+            info = {"ransomware": (rec.get("knownRansomwareCampaignUse") or "").lower() == "known",
+                    "cisa": bool(rec.get("cisa_date_added")),
+                    "due": rec.get("dueDate") or rec.get("cisa_date_added"),
+                    "added": rec.get("date_added"), "name": rec.get("vulnerabilityName"),
+                    "refs": len(rec.get("vulncheck_reported_exploitation") or []),
+                    "source": "vulncheck"}
+            for c in cves:
+                if c:
+                    out[str(c).upper()] = info
+        return out
+
+    def _fetch_cisa(self):
+        doc = json.loads(self._http(self.CISA_URL, timeout=60).decode("utf-8", "replace"))
+        out = {}
+        for rec in (doc.get("vulnerabilities") or []):
+            c = rec.get("cveID")
+            if not c:
+                continue
+            out[str(c).upper()] = {
+                "ransomware": (rec.get("knownRansomwareCampaignUse") or "").lower() == "known",
+                "cisa": True, "due": rec.get("dueDate"), "added": rec.get("dateAdded"),
+                "name": rec.get("vulnerabilityName"), "refs": 0, "source": "cisa"}
+        return out
+
+    def refresh(self, force=False):
+        if not self.enabled:
+            return
+        if not force and self.kev and (time.time() - self.last) < self.interval:
+            return
+        token = self._token()
+        try:
+            data = self._fetch_vulncheck(token) if token else self._fetch_cisa()
+            src = "vulncheck" if token else "cisa"
+            if data:
+                with self.lock:
+                    self.kev, self.source, self.last, self.error = data, src, int(time.time()), None
+                self._save_cache()
+            else:
+                self.error = "KEV feed returned no records"
+        except Exception as e:  # noqa: BLE001 — a feed hiccup must never break scanning
+            self.error = "could not refresh KEV (%s): %s" % (token and "VulnCheck" or "CISA", e)
+
+    def _loop(self):
+        time.sleep(10)
+        while True:
+            try:
+                self.refresh()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(1800)
+
+    def status(self):
+        return {"enabled": self.enabled, "has_token": self.has_token(),
+                "token_source": self.token_source(), "source": self.source,
+                "count": len(self.kev), "last": self.last, "error": self.error}
+
+
 class VulnScanner:
     """Orchestrates OS-currency + inventory + feed matching into prioritized findings.
 
@@ -4281,13 +4457,14 @@ class VulnScanner:
     reaches out to Apple, so this never runs on the per-snapshot path."""
 
     def __init__(self, enabled=True, interval=86400, feed_url=None, history=None,
-                 live_provider=None, osv="auto", alert_severity="critical", on_alert=None):
+                 live_provider=None, osv="auto", alert_severity="critical", on_alert=None, kev=None):
         self.enabled = enabled
         self.interval = max(3600, interval)
         self.history = history
         self.live_provider = live_provider      # () -> set of running exe paths (default: collect_processes)
         self.alert_severity = alert_severity    # raise an EDR alert at/above this severity ("off" to disable)
         self.on_alert = on_alert                 # callback(finding) -> notify + SIEM export; set by main
+        self.kev = kev                           # shared KevFeed: known-exploited prioritization (or None)
         self.os_currency = OSCurrency()
         self.inventory = SoftwareInventory(osv=osv)
         self.feed = VulnFeed(enabled=enabled, interval=interval, url=feed_url)
@@ -4373,6 +4550,10 @@ class VulnScanner:
         """Attach each finding's remediation decision and resolve 'patched' auto-verification, then
         prune decisions whose finding is no longer detected, and order active findings first."""
         for f in findings:
+            if self.kev:
+                self.kev.enrich(f)                      # known-exploited? (floats to the top + always alerts)
+            else:
+                f["kev"] = False
             f["sig"] = _finding_sig(f)                  # stable id the remediation UI sends back
             r = self.remediation.get(f["sig"])
             if not r:
@@ -4383,7 +4564,9 @@ class VulnScanner:
             f["remediation"] = {"status": r.get("status"), "note": r.get("note"),
                                 "by": r.get("by"), "ts": r.get("ts"), "conflict": conflict}
         self.remediation.prune({_finding_sig(f) for f in findings})
-        findings.sort(key=lambda f: (not self._active(f), -SEV_RANK.get(f.get("severity"), 0),
+        # Exploitation-aware order: active first, then KNOWN-EXPLOITED (KEV), then severity, then live.
+        findings.sort(key=lambda f: (not self._active(f), not f.get("kev"),
+                                     -SEV_RANK.get(f.get("severity"), 0),
                                      not f.get("live"), f.get("component") or ""))
         return findings
 
@@ -4431,6 +4614,8 @@ class VulnScanner:
         return {"total": len(active), "by_severity": counts,
                 "example": sum(1 for f in active if f.get("example")),
                 "live": sum(1 for f in active if f.get("live")),
+                "kev": sum(1 for f in active if f.get("kev")),
+                "kev_ransomware": sum(1 for f in active if f.get("kev_ransomware")),
                 "resolved": len(findings) - len(active)}
 
     def _load_alerted(self):
@@ -4455,6 +4640,8 @@ class VulnScanner:
         (vulnerable AND live is the urgent case), unless alerting is turned off."""
         if self.alert_severity == "off":
             return False
+        if f.get("kev"):
+            return True                              # known-exploited in the wild — always worth an alert
         sr = SEV_RANK.get(f.get("severity"), 0)
         if sr >= SEV_RANK.get(self.alert_severity, 4):
             return True
@@ -9069,10 +9256,11 @@ class ShodanExposure:
     KEY_ENV = "SHODAN_API_KEY"
     MODES = ("key", "internetdb")
 
-    def __init__(self, secrets=None, path=SHODAN_SETTINGS_FILE, interval=12 * 3600):
+    def __init__(self, secrets=None, path=SHODAN_SETTINGS_FILE, interval=12 * 3600, kev=None):
         self.secrets = secrets or SecretStore()
         self.path = path
         self.interval = interval
+        self.kev = kev                           # shared KevFeed: flag known-exploited external CVEs
         self.lock = threading.Lock()
         self.enabled = False
         self.mode = "key"
@@ -9215,8 +9403,8 @@ class ShodanExposure:
                 screenshots.append({"data": shot["data"], "mime": shot.get("mime") or "image/jpeg",
                                     "port": b.get("port"), "labels": shot.get("labels") or []})
         services.sort(key=lambda s: (s["port"] is None, s["port"] or 0))
-        vuln_list = sorted(vulns.values(),
-                           key=lambda v: (-(float(v["cvss"]) if v["cvss"] is not None else -1), v["cve"]))
+        vuln_list = list(vulns.values())
+        kev_n = self._enrich_kev(vuln_list)                       # flag known-exploited, sort them first
         sev_counts = {}
         for v in vuln_list:
             sev_counts[v["severity"]] = sev_counts.get(v["severity"], 0) + 1
@@ -9225,11 +9413,24 @@ class ShodanExposure:
             "summary": {"ip": ip, "org": j.get("org") or "", "isp": j.get("isp") or "",
                         "asn": j.get("asn") or "", "os": j.get("os") or "",
                         "country": j.get("country_name") or "", "city": j.get("city") or "",
+                        "country_code": j.get("country_code") or "",
+                        "lat": j.get("latitude"), "lng": j.get("longitude"),
                         "hostnames": (j.get("hostnames") or [])[:8], "tags": j.get("tags") or [],
                         "last_update": j.get("last_update") or "",
-                        "ports": len(services), "vulns": len(vuln_list),
+                        "ports": len(services), "vulns": len(vuln_list), "kev": kev_n,
                         "screenshots": len(screenshots), "by_severity": sev_counts},
             "services": services, "vulns": vuln_list, "screenshots": screenshots}
+
+    def _enrich_kev(self, vuln_list):
+        """Stamp KEV on each Shodan CVE and float known-exploited ones to the top. Returns the count."""
+        for v in vuln_list:
+            if self.kev:
+                self.kev.enrich(v)
+            else:
+                v["kev"] = False
+        vuln_list.sort(key=lambda v: (not v.get("kev"),
+                                      -(float(v["cvss"]) if v.get("cvss") is not None else -1), v["cve"]))
+        return sum(1 for v in vuln_list if v.get("kev"))
 
     def _norm_internetdb(self, j, ip):
         cves = [str(c) for c in (j.get("vulns") or [])]
@@ -9239,11 +9440,12 @@ class ShodanExposure:
                      "module": "", "cpe": [], "vulns": []} for p in ports]
         vuln_list = [{"cve": c, "cvss": None, "severity": "unknown", "summary": "", "verified": False}
                      for c in sorted(cves)]
+        kev_n = self._enrich_kev(vuln_list)
         return {
             "source": "internetdb", "ip": ip,
             "summary": {"ip": ip, "org": "", "isp": "", "asn": "", "os": "", "country": "", "city": "",
                         "hostnames": (j.get("hostnames") or [])[:8], "tags": j.get("tags") or [],
-                        "last_update": "", "ports": len(services), "vulns": len(vuln_list),
+                        "last_update": "", "ports": len(services), "vulns": len(vuln_list), "kev": kev_n,
                         "screenshots": 0, "by_severity": {"unknown": len(vuln_list)} if vuln_list else {},
                         "cpes": cpes[:12]},
             "services": services, "vulns": vuln_list, "screenshots": []}
@@ -17718,6 +17920,14 @@ def make_handler(cache):
                     else:
                         sh.maybe_refresh()
                     self._send_json(sh.result())
+            elif path == "/api/kev":
+                kv = getattr(cache, "kev", None)
+                if not kv:
+                    self._send_json({"enabled": False, "available": False})
+                else:
+                    if "refresh=1" in self.path:
+                        kv.refresh(force=True)
+                    self._send_json(kv.status())
             elif path == "/api/ai":
                 self._send_json(cache.ai.status() if cache.ai
                                 else {"enabled": False, "configured": False, "available": False})
@@ -17953,6 +18163,21 @@ def make_handler(cache):
                     self._send_json(sh.set_enabled(bool(payload.get("enabled"))))
                 else:
                     self._send_json({"ok": False, "error": "op must be enable|key|mode"}, status=400)
+            elif u.path == "/api/kev":
+                # Set the VulnCheck community API token (op=token). Empty token falls back to CISA KEV.
+                length = int(self.headers.get("Content-Length") or 0)
+                raw_b = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+                try:
+                    payload = json.loads(raw_b) if raw_b else {}
+                except ValueError:
+                    payload = {}
+                kv = getattr(cache, "kev", None)
+                if not kv:
+                    self._send_json({"ok": False, "error": "KEV feed unavailable"}, status=400)
+                else:
+                    res = kv.set_token((payload.get("token") or "") if isinstance(payload, dict) else "")
+                    self._send_json(dict(res, **kv.status()) if res.get("ok") else res,
+                                    status=200 if res.get("ok") else 400)
             elif u.path == "/api/decoys":
                 # op=set (enable/disable — disabling removes what was planted), op=replant,
                 # op=fleet-bait (the mesh syncing the fleet's bait usernames to this host).
@@ -19977,11 +20202,13 @@ def main():
             exporter.export_vuln(f, socket.gethostname())
         except Exception:  # noqa: BLE001
             pass
+    cache.kev = KevFeed(enabled=not args.no_vuln, interval=args.vuln_interval)   # known-exploited (VulnCheck/CISA)
     cache.vulns = VulnScanner(enabled=not args.no_vuln, interval=args.vuln_interval,
                               feed_url=args.vuln_feed_url, history=history, osv=args.vuln_osv,
-                              alert_severity=args.vuln_alert_severity, on_alert=_vuln_on_alert)
+                              alert_severity=args.vuln_alert_severity, on_alert=_vuln_on_alert,
+                              kev=cache.kev)
     cache.vulns.start()
-    cache.shodan = ShodanExposure(interval=args.shodan_interval)   # opt-in external attack surface (agent-only)
+    cache.shodan = ShodanExposure(interval=args.shodan_interval, kev=cache.kev)   # opt-in external attack surface
     cache.local_control = bool(args.local_control)
     cache.autohunts = AutoHuntStore()      # hunts raised by validated-malicious alerts
     cache.chat = chat                      # chat alerting (unmanaged hosts only)

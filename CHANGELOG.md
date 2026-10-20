@@ -6,6 +6,31 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.8.0 / Linux agent 1.8.0 — 2026-10-20
+
+### Added
+
+**Alerts are now cross-referenced with vulnerability data, and re-prioritized by it.** When an alert
+fires on a process, Scouter ties the process's binary back to any vulnerable software on the host and
+carries it on the alert — the implicated component(s), their CVEs, and whether any is known-exploited
+(KEV). The alert gains an **effective severity**: the worst of its own severity and the
+vulnerability's, with a KEV floor (known-exploited → at least high; ransomware-linked → at least
+critical). A flaw being exploited in the wild outranks a theoretical score, so a "medium" behavioural
+alert on a process running KEV software rises to the top of the queue. The detection's **base severity
+is preserved** (shown as "↑base") and stays authoritative for surfacing and auto-response — a
+vulnerability cross-reference re-prioritizes triage, it never by itself creates an alert or triggers
+containment. The alert list sorts and badges by effective severity (🛑 for KEV, ⚠ for vulnerable), the
+detail panel shows the implicated components, and the effective severity rides the fleet check-in so
+the Mesh orders by it too.
+
+**Pre-built threat hunts from recently-exploited CVEs.** The KEV feed is now read for CVEs added in the
+last 14 days and, where a usable product keyword can be derived, turns each into a ready-to-run,
+read-only hunt query over this host's process and execution history. They surface in two places: a
+**"Hunt from recent KEV"** panel in the Threat Hunt tab (queries whose software is present on this host
+are marked "on host" and sorted first, ransomware-linked next), and a **"▶ Hunt for this"** button on
+recent-KEV findings in the Vulnerabilities tab. New `GET /api/kev-hunts`. The KEV feed now also captures
+each entry's vendor/product.
+
 ## macOS agent 1.7.0 / Linux agent 1.7.0 — 2026-10-19
 
 ### Added

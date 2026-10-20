@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -1399,6 +1399,15 @@ SEV_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 def max_severity(a, b):
     """Return the stronger of two severity labels (by rank)."""
     return a if SEV_RANK.get(a, 0) >= SEV_RANK.get(b, 0) else b
+
+
+def vuln_boosted_severity(base, max_sev, kev=False, kev_ransomware=False):
+    """Effective severity for an alert whose process is tied to vulnerable software on the host: the
+    worst of the alert's own severity and the vulnerability's, with a known-exploited (KEV) floor —
+    a flaw being exploited in the wild outranks a theoretical score. Only ever raises, never lowers."""
+    floor = "critical" if kev_ransomware else ("high" if kev else "info")
+    eff = max_severity(base or "info", max_sev or "info")
+    return max_severity(eff, floor)
 
 
 def severity_for(score):
@@ -4396,7 +4405,10 @@ class KevFeed:
             info = {"ransomware": (rec.get("knownRansomwareCampaignUse") or "").lower() == "known",
                     "cisa": bool(rec.get("cisa_date_added")),
                     "due": rec.get("dueDate") or rec.get("cisa_date_added"),
-                    "added": rec.get("date_added"), "name": rec.get("vulnerabilityName"),
+                    "added": rec.get("date_added") or rec.get("cisa_date_added"),
+                    "name": rec.get("vulnerabilityName"),
+                    "vendor": rec.get("vendorProject") or rec.get("vendor"),
+                    "product": rec.get("product"),
                     "refs": len(rec.get("vulncheck_reported_exploitation") or []),
                     "source": "vulncheck"}
             for c in cves:
@@ -4414,7 +4426,9 @@ class KevFeed:
             out[str(c).upper()] = {
                 "ransomware": (rec.get("knownRansomwareCampaignUse") or "").lower() == "known",
                 "cisa": True, "due": rec.get("dueDate"), "added": rec.get("dateAdded"),
-                "name": rec.get("vulnerabilityName"), "refs": 0, "source": "cisa"}
+                "name": rec.get("vulnerabilityName"),
+                "vendor": rec.get("vendorProject"), "product": rec.get("product"),
+                "refs": 0, "source": "cisa"}
         return out
 
     def refresh(self, force=False):
@@ -4448,6 +4462,88 @@ class KevFeed:
         return {"enabled": self.enabled, "has_token": self.has_token(),
                 "token_source": self.token_source(), "source": self.source,
                 "count": len(self.kev), "last": self.last, "error": self.error}
+
+    # ---- recently-exploited → threat-hunt query generation ----
+    # Product/vendor words too generic to make a useful process-name hunt from.
+    _HUNT_STOP = {"the", "for", "and", "server", "client", "manager", "desktop", "edition",
+                  "enterprise", "windows", "microsoft", "apple", "google", "cisco", "adobe",
+                  "oracle", "system", "software", "products", "product", "multiple", "firewall",
+                  "router", "appliance", "gateway", "framework", "library", "plugin", "core",
+                  "service", "services", "agent", "suite", "platform", "mobile", "cloud", "online",
+                  "web", "application", "applications", "linux", "kernel", "driver", "network"}
+
+    @classmethod
+    def hunt_keyword(cls, product, vendor, name):
+        """A single conservative process-name token to hunt for, or None if nothing specific enough —
+        'Google Chrome' -> 'chrome', 'Apache Log4j2' -> 'log4j2', 'Windows' / 'Microsoft' -> None."""
+        for src in (product, name, vendor):
+            toks = [t.lower() for t in re.split(r"[^A-Za-z0-9]+", src or "") if t]
+            cand = [t for t in toks if len(t) >= 4 and t not in cls._HUNT_STOP and not t.isdigit()]
+            if cand:
+                return max(cand, key=len)
+        return None
+
+    @staticmethod
+    def hunt_sql(kw):
+        """Read-only hunt: running processes AND recent executions whose name/path/args mention kw."""
+        like = "%" + kw.replace("'", "''").lower() + "%"
+        return ("-- Running processes and recent executions mentioning '%s'\n" % kw
+                + "SELECT 'running' AS seen, name, exe, cmdline,\n"
+                  "       datetime(last_seen,'unixepoch','localtime') AS t\n"
+                  "FROM processes\n"
+                  "WHERE lower(name) LIKE '{l}' OR lower(exe) LIKE '{l}' OR lower(cmdline) LIKE '{l}'\n"
+                  "UNION ALL\n"
+                  "SELECT 'executed' AS seen, '' AS name, exe, cmdline,\n"
+                  "       datetime(ts,'unixepoch','localtime') AS t\n"
+                  "FROM exec_events\n"
+                  "WHERE lower(exe) LIKE '{l}' OR lower(cmdline) LIKE '{l}'\n"
+                  "ORDER BY t DESC".format(l=like))
+
+    def recent(self, days=14):
+        """KEV entries added within the last `days`, newest first. `added` is a date (CISA) or ISO
+        datetime (VulnCheck); we read the leading YYYY-MM-DD either way."""
+        cutoff = time.time() - days * 86400
+        out = []
+        with self.lock:
+            items = list(self.kev.items())
+        for cve, rec in items:
+            added = (rec.get("added") or "")[:10]
+            try:
+                ts = time.mktime(time.strptime(added, "%Y-%m-%d"))
+            except (ValueError, TypeError):
+                continue
+            if ts >= cutoff:
+                out.append((ts, cve, rec))
+        out.sort(key=lambda x: -x[0])
+        return [(cve, rec) for _ts, cve, rec in out]
+
+    def hunt_suggestions(self, days=14, host_tokens=None, limit=40):
+        """Pre-built threat-hunt queries for recently-exploited (KEV, last `days`) CVEs that map to a
+        usable product keyword. Entries whose keyword matches something already on this host are marked
+        on_host and sorted first, then ransomware-linked, then most-recent."""
+        host_tokens = {t.lower() for t in (host_tokens or set()) if t}
+        seen_kw, out = set(), []
+        for cve, rec in self.recent(days):
+            kw = self.hunt_keyword(rec.get("product"), rec.get("vendor"), rec.get("name"))
+            if not kw or kw in seen_kw:
+                continue
+            seen_kw.add(kw)
+            on_host = any(kw == t or kw in t or t in kw for t in host_tokens)
+            out.append({"cve": cve, "name": rec.get("name"), "vendor": rec.get("vendor"),
+                        "product": rec.get("product"), "keyword": kw, "sql": self.hunt_sql(kw),
+                        "ransomware": bool(rec.get("ransomware")), "added": (rec.get("added") or "")[:10],
+                        "source": rec.get("source"), "on_host": on_host})
+        # on_host first (False sorts before True), then ransomware-linked, then most-recent.
+        out.sort(key=lambda h: (not h["on_host"], not h["ransomware"], _neg_date(h["added"])))
+        return out[:limit]
+
+
+def _neg_date(d):
+    """Sort key so a more-recent YYYY-MM-DD comes first within a group."""
+    try:
+        return -time.mktime(time.strptime(d, "%Y-%m-%d"))
+    except (ValueError, TypeError):
+        return 0
 
 
 class VulnScanner:
@@ -4521,18 +4617,20 @@ class VulnScanner:
             live = self._app_live(app.get("path"), live_exes)
             for adv in hits:
                 out.append(self._finding(adv, "app", app.get("name") or app.get("bundle_id"),
-                                         app.get("version"), live=live))
+                                         app.get("version"), live=live,
+                                         match_path=app.get("path"), match_name=app.get("name")))
         for pkg in inv.get("brew", []):
             for adv in self.feed.match(name=pkg.get("name"), version=pkg.get("version"),
                                        ecosystem="Homebrew", package=pkg.get("name")):
-                out.append(self._finding(adv, "brew", pkg.get("name"), pkg.get("version")))
+                out.append(self._finding(adv, "brew", pkg.get("name"), pkg.get("version"),
+                                         match_name=pkg.get("name")))
         # language ecosystems (OSV): pip / npm / gem globals matched against OSV advisory data
         for pkg in inv.get("packages", []):
             eco = pkg.get("ecosystem")
             for adv in self.osv.match(eco, pkg.get("name"), pkg.get("version")):
                 out.append(self._finding(adv, "pkg:" + (eco or "").lower(),
                                          "%s (%s)" % (pkg.get("name"), eco),
-                                         pkg.get("version")))
+                                         pkg.get("version"), match_name=pkg.get("name")))
         out = self._dedupe(out)
         return out
 
@@ -4591,7 +4689,7 @@ class VulnScanner:
         return [best[k] for k in order]
 
     @staticmethod
-    def _finding(adv, kind, component, version, live=False):
+    def _finding(adv, kind, component, version, live=False, match_path=None, match_name=None):
         return {"source": "feed", "kind": kind,
                 "severity": adv.get("severity", "medium"),
                 "id": adv.get("id"), "cve": adv.get("cve") or adv.get("id"),
@@ -4602,6 +4700,8 @@ class VulnScanner:
                 "cvss": adv.get("cvss"), "aliases": adv.get("aliases") or [],
                 "published": adv.get("published"),
                 "url": adv.get("url"), "example": bool(adv.get("example")),
+                # correlation keys: tie a running process back to this vulnerable component
+                "match_path": match_path, "match_name": match_name,
                 "live": bool(live), "remediation": None}
 
     @classmethod
@@ -4711,6 +4811,48 @@ class VulnScanner:
         res.update({"enabled": self.enabled, "interval": self.interval,
                     "feed": self.feed.status(), "osv": self.osv.status()})
         return res
+
+    def correlate(self, exe, name=None):
+        """Tie a running process (its executable path, and name as a fallback) back to any vulnerable
+        software on this host, so an alert on that process can carry the vulnerability as context and be
+        re-prioritized. Returns an aggregate over the matched ACTIVE findings, worst-first, or None."""
+        if not self.enabled or not exe:
+            return None
+        exe_l = exe.lower()
+        base = os.path.basename(exe).lower()
+        with self.lock:
+            findings = list(self._result.get("findings") or [])
+        matched = []
+        for f in findings:
+            if not self._active(f):
+                continue
+            mp = f.get("match_path") or ""
+            if mp and (exe == mp or exe_l.startswith(mp.lower().rstrip("/") + "/")):
+                matched.append(f)
+                continue
+            mn = (f.get("match_name") or "").lower()
+            # Name matching is deliberately conservative: the component name must BE the process
+            # basename or a path segment of the executable, so 'git' can't match '/usr/bin/digest'.
+            if mn and len(mn) >= 3 and (base == mn or ("/" + mn + "/") in exe_l
+                                        or ("/" + mn + ".") in exe_l or base.startswith(mn + "-")):
+                matched.append(f)
+        if not matched:
+            return None
+        matched.sort(key=lambda f: (not f.get("kev"), -SEV_RANK.get(f.get("severity"), 0),
+                                    f.get("component") or ""))
+        max_sev = max((f.get("severity") or "info" for f in matched), key=lambda s: SEV_RANK.get(s, 0))
+        return {
+            "max_sev": max_sev,
+            "kev": any(f.get("kev") for f in matched),
+            "kev_ransomware": any(f.get("kev_ransomware") for f in matched),
+            "live": any(f.get("live") for f in matched),
+            "count": len(matched),
+            "findings": [{"component": f.get("component"), "cve": f.get("cve"),
+                          "severity": f.get("severity"), "kev": bool(f.get("kev")),
+                          "kev_ransomware": bool(f.get("kev_ransomware")),
+                          "fixed": f.get("fixed"), "sig": f.get("sig")}
+                         for f in matched[:6]],
+        }
 
     def fleet_summary(self, top=15):
         """A lean vuln summary for the mesh check-in: OS currency + severity counts +
@@ -12668,6 +12810,39 @@ class SnapshotCache:
                     data["nodes"] = [n for n in data["nodes"] if n["id"] not in drop]
                     data["edges"] = [e for e in data["edges"]
                                      if e.get("source") not in drop and e.get("target") not in drop]
+            # Cross-reference alerts with vulnerability data: tie a flagged process to vulnerable
+            # software on this host, carry it as context on the alert, and raise an EFFECTIVE severity
+            # (a flaw being exploited in the wild outranks a theoretical score). The base severity is
+            # preserved and authoritative for surfacing/auto-response; effective_severity drives operator
+            # prioritization. Only real alerts (severity != info) are considered, so benign processes
+            # that merely run vulnerable software are not turned into alerts.
+            vs = getattr(self, "vulns", None)
+            if vs is not None and getattr(vs, "enabled", False):
+                for n in data["nodes"]:
+                    if n.get("type") != "process" or n.get("severity") == "info":
+                        continue
+                    try:
+                        ctx = vs.correlate((n.get("detail") or {}).get("exe"), n.get("label"))
+                    except Exception:  # noqa: BLE001 — correlation is enrichment, never fatal
+                        ctx = None
+                    if not ctx:
+                        continue
+                    eff = vuln_boosted_severity(n.get("severity"), ctx["max_sev"],
+                                                ctx["kev"], ctx["kev_ransomware"])
+                    n["detail"]["vuln_context"] = ctx
+                    n["effective_severity"] = eff
+                    top = ctx["findings"][0] if ctx["findings"] else {}
+                    kevtag = ((" — known-exploited in the wild (KEV)"
+                               + (", used in ransomware" if ctx["kev_ransomware"] else ""))
+                              if ctx["kev"] else "")
+                    boost = ((" Effective severity raised %s → %s." % (n.get("severity"), eff))
+                             if SEV_RANK.get(eff, 0) > SEV_RANK.get(n.get("severity"), 0) else "")
+                    n["reasons"].append(reason(
+                        "Runs vulnerable software on this host: %s%s (%s)%s.%s"
+                        % (top.get("component") or "?",
+                           (" " + top.get("cve")) if top.get("cve") else "",
+                           ctx["max_sev"], kevtag, boost),
+                        mitre="T1203", weight=0))
             if self.lifecycle:
                 for n in data["nodes"]:
                     if n.get("severity") != "info" and n.get("triage", {}).get("status") != "closed":
@@ -15444,6 +15619,17 @@ class MeshReporter:
                 "reason": ((n.get("reasons") or [{}])[0] or {}).get("text", ""),
                 "status": (n.get("triage") or {}).get("status") or "open",
             }
+            # Vulnerability cross-reference: effective (vuln/KEV-boosted) severity for fleet triage
+            # ordering, plus a compact view of the vulnerable software the flagged process runs. The
+            # base `severity` above is preserved; the mesh sorts/badges by `effective_severity`.
+            eff = n.get("effective_severity")
+            vctx = (n.get("detail") or {}).get("vuln_context")
+            if vctx:
+                a["effective_severity"] = eff or sev
+                a["vuln"] = {"max_sev": vctx.get("max_sev"), "kev": bool(vctx.get("kev")),
+                             "kev_ransomware": bool(vctx.get("kev_ransomware")),
+                             "count": vctx.get("count"),
+                             "findings": (vctx.get("findings") or [])[:4]}
             ind = self._report_indicators(n)
             if ind:
                 a["indicators"] = ind      # so the mesh can see two hosts hitting the same thing
@@ -15491,7 +15677,10 @@ class MeshReporter:
         if node_info:
             sev_counts["info"] = int(node_info)
         rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-        alerts.sort(key=lambda a: (rank.get(a["severity"], 9), -(a.get("score") or 0)))
+        # Order by EFFECTIVE severity (vuln/KEV-boosted) so a re-prioritized alert rises in the feed;
+        # falls back to base severity for alerts with no vulnerability cross-reference.
+        alerts.sort(key=lambda a: (rank.get(a.get("effective_severity") or a["severity"], 9),
+                                   -(a.get("score") or 0)))
         # Send the whole open queue (most severe first) when the mesh can take it. Truncating to a short
         # preview here made the console's Alerts tab silently show a fraction of what was open: a host
         # with 242 open alerts appeared to have 25, and investigating alerts — mostly low severity —
@@ -17929,6 +18118,39 @@ def make_handler(cache):
                     if "refresh=1" in self.path:
                         kv.refresh(force=True)
                     self._send_json(kv.status())
+            elif path == "/api/kev-hunts":
+                # Pre-built threat-hunt queries for recently-exploited (KEV) CVEs, prioritized to the
+                # software actually present on this host (running processes + vulnerable components).
+                kv = getattr(cache, "kev", None)
+                if not kv or not kv.enabled:
+                    self._send_json({"available": False, "hunts": []})
+                else:
+                    days = 14
+                    m = re.search(r"[?&]days=(\d+)", self.path)
+                    if m:
+                        days = max(1, min(90, int(m.group(1))))
+                    toks = set()
+                    try:
+                        for p in collect_processes().values():
+                            if p.get("exe"):
+                                toks.add(os.path.basename(p["exe"]).lower())
+                            if p.get("name"):
+                                toks.add(p["name"].lower())
+                    except Exception:  # noqa: BLE001 — prioritization is best-effort
+                        pass
+                    vs = getattr(cache, "vulns", None)
+                    if vs is not None:
+                        try:
+                            for f in (vs.status().get("findings") or []):
+                                for t in re.split(r"[^A-Za-z0-9]+", f.get("component") or ""):
+                                    if len(t) >= 4:
+                                        toks.add(t.lower())
+                        except Exception:  # noqa: BLE001
+                            pass
+                    hunts = kv.hunt_suggestions(days=days, host_tokens=toks)
+                    self._send_json({"available": True, "days": days, "has_token": kv.has_token(),
+                                     "source": kv.source, "count": len(hunts), "hunts": hunts,
+                                     "on_host": sum(1 for h in hunts if h["on_host"])})
             elif path == "/api/ai":
                 self._send_json(cache.ai.status() if cache.ai
                                 else {"enabled": False, "configured": False, "available": False})

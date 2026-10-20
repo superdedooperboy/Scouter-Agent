@@ -1142,6 +1142,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
         <button class="btn pri" onclick="runHunt()">▶ Run Query</button>
         <span class="hint" id="huntMeta">history DB</span>
       </div>
+      <div id="kevHuntPanel" style="margin-top:10px"></div>
       </div>
       <div id="huntVqlPane" style="display:none">
         <div id="aiVqlBar" style="display:none;margin-bottom:6px">
@@ -1746,7 +1747,8 @@ function renderDetail(id){
   const liveN=id?R.get(id):null;
   let n,d,det,trv,historical=false,lastSeen=null,fromCase=false;
   if(liveN){
-    n={type:liveN.type,sev:liveN.sev,label:liveN.label,score:liveN.score};
+    n={type:liveN.type,sev:liveN.sev,label:liveN.label,score:liveN.score,
+       effSev:(liveN.data&&liveN.data.effective_severity)||null};
     d={reasons:(liveN.data&&liveN.data.reasons)||[]}; det=(liveN.data&&liveN.data.detail)||{};
     trv=triageOf(liveN);
   } else {
@@ -1765,6 +1767,19 @@ function renderDetail(id){
             <div class="dtype">${esc(n.type)} · score ${n.score}${historical?` · <span style="color:var(--muted)">${fromCase?'from the investigation record':'historical'} · last seen ${esc(timeAgo(lastSeen))}</span>`:''}</div>`;
   if(fromCase) html+='<div class="hint" style="margin:4px 0">\ud83d\uddc2 This alert is no longer live and has aged out of the alert store. '+
     'Shown from the snapshot the investigation kept when it was added.</div>';
+  if(det.vuln_context){
+    const vc=det.vuln_context;
+    const kevline = vc.kev ? `known-exploited in the wild (KEV)${vc.kev_ransomware?' \u00b7 used in ransomware':''}` : `vulnerable software (worst ${esc(vc.max_sev||'')})`;
+    const boosted = n.effSev && SEVS.indexOf(n.effSev) > SEVS.indexOf(n.sev);
+    const col = vc.kev ? 'var(--sev-critical)' : 'var(--sev-high)';
+    html += `<div style="margin:6px 0;padding:8px 10px;border-radius:8px;border:1px solid ${col};background:var(--panel)">`
+      + `<div style="font-weight:600;color:${col}">${vc.kev?'\ud83d\uded1':'\u26a0'} This process runs ${kevline} on this host.</div>`
+      + (boosted?`<div class="hint" style="margin:3px 0">Effective severity <b style="color:${SEV_COLOR[n.effSev]}">${esc(n.effSev)}</b> \u2014 raised from base <b>${esc(n.sev)}</b> because the implicated software is ${vc.kev?'being actively exploited':'vulnerable'}. (Base severity is preserved for audit.)</div>`:'')
+      + '<div style="margin-top:4px">' + (vc.findings||[]).map(f=>`<div style="font-size:12px;display:flex;gap:6px;align-items:baseline;padding:2px 0"><span class="sevtag" style="background:${SEV_COLOR[f.severity]||'var(--chip)'}">${esc(f.severity||'')}</span>${f.kev?'<span title="known-exploited in the wild" style="color:var(--sev-critical);font-weight:700">\ud83d\uded1</span>':''}<b>${esc(f.component||'?')}</b> ${f.cve?`<a href="https://nvd.nist.gov/vuln/detail/${esc(f.cve)}" target="_blank" rel="noopener" style="color:var(--accent)">${esc(f.cve)}</a>`:''} ${f.fixed?`<span class="hint" style="margin:0">fixed in ${esc(f.fixed)}</span>`:''}</div>`).join('')
+      + '</div>'
+      + `<div class="hint" style="margin-top:4px"><span class="clr" style="color:var(--accent);cursor:pointer;text-decoration:underline" onclick="showTab('vulns')">Open the Vulnerabilities tab \u2192</span> to patch or remediate.</div>`
+      + '</div>';
+  }
   const kv=[];
   if(n.type==='process'){
     kv.push(['pid',det.pid],['ppid',det.ppid],['user',det.user],['state',det.state],
@@ -2287,7 +2302,9 @@ function alertItems(){
   const fsMap=new Map((histAlerts||[]).map(a=>[a.node_id, a.first_seen]));
   const live=[...R.values()].filter(n=>n.sev!=='info').map(n=>({
     id:n.id, sev:n.sev, score:n.score, type:n.type, label:n.label,
-    reasons:n.data.reasons||[], triage:triageOf(n), historical:false, firstSeen:fsMap.get(n.id)}));
+    reasons:n.data.reasons||[], triage:triageOf(n), historical:false, firstSeen:fsMap.get(n.id),
+    effSev:(n.data&&n.data.effective_severity)||null,
+    vuln:(n.data&&n.data.detail&&n.data.detail.vuln_context)||null}));
   const liveIds=new Set(live.map(i=>i.id));
   const hist=(histAlerts||[]).filter(a=>!liveIds.has(a.node_id)).map(a=>({
     id:a.node_id, sev:a.severity, score:a.score, type:a.type, label:a.label,
@@ -2299,6 +2316,17 @@ function alertItems(){
 function fmtUTC(sec){
   if(!sec) return '—';
   return new Date(sec*1000).toISOString().slice(0,19).replace('T',' ')+' UTC';
+}
+function sevCell(i){
+  // Effective (vuln/KEV-boosted) severity for triage ordering; the base severity is preserved and
+  // shown as "↑<base>" when a vulnerability raised it, with a 🛑/⚠ marker for the cross-reference.
+  var boosted = i.effSev && SEVS.indexOf(i.effSev) > SEVS.indexOf(i.sev);
+  var shown = boosted ? i.effSev : i.sev;
+  var mark = i.vuln ? (i.vuln.kev
+      ? ' <span title="runs known-exploited (KEV) software on this host'+(i.vuln.kev_ransomware?' — used in ransomware':'')+'" style="color:var(--sev-critical);font-weight:700">🛑</span>'
+      : ' <span title="runs vulnerable software on this host (worst '+esc(i.vuln.max_sev||'')+')" style="color:var(--sev-high)">⚠</span>') : '';
+  var base = boosted ? ' <span class="hint" style="margin:0" title="base severity '+esc(i.sev)+', raised by vulnerability context">↑'+esc(i.sev)+'</span>' : '';
+  return '<span class="sevtag" style="background:'+SEV_COLOR[shown]+'">'+esc(shown)+'</span>'+mark+base;
 }
 function renderAlerts(){
   const host=document.getElementById('alerts');
@@ -2336,7 +2364,7 @@ function renderAlerts(){
   rows.sort((a,b)=>{
     let av,bv;
     if(key==='score'){av=a.score;bv=b.score;}
-    else if(key==='sev'){av=SEVS.indexOf(a.sev);bv=SEVS.indexOf(b.sev);}
+    else if(key==='sev'){av=SEVS.indexOf(a.effSev||a.sev);bv=SEVS.indexOf(b.effSev||b.sev);}
     else if(key==='type'){av=a.type;bv=b.type;}
     else if(key==='time'){av=a.firstSeen||0;bv=b.firstSeen||0;}
     else {av=a.label.toLowerCase();bv=b.label.toLowerCase();}
@@ -2353,7 +2381,7 @@ function renderAlerts(){
     const histBadge = i.historical ? `<span class="tbadge gone" title="This node is no longer live — last seen ${esc(timeAgo(i.lastSeen))}">⊘ inactive · ${esc(timeAgo(i.lastSeen))}</span>` : '';
     h+=`<tr class="arow${i.historical?' hist':''}${alertSel.has(i.id)?' rowsel':''}" onclick="selectAlert('${esc(i.id)}')">
       <td class="cbcol"><input type="checkbox" class="rsel" ${alertSel.has(i.id)?'checked':''} onclick="event.stopPropagation()" onchange="toggleAlertSel('${esc(i.id)}',this.checked)"></td>
-      <td><span class="sevtag" style="background:${SEV_COLOR[i.sev]}">${i.sev}</span></td>
+      <td>${sevCell(i)}</td>
       <td class="val">${i.score}</td>
       <td class="typetag">${esc(i.type)}</td>
       <td>${esc(i.label)} ${triageBadge(i.triage)}${histBadge}</td>
@@ -3993,6 +4021,7 @@ function kevSetToken(){ var t=prompt('VulnCheck community API token (free at vul
 function renderVulns(){
   renderShodanExposure();
   loadKev(function(){ if(VHOST) vulnDrawHost(); });
+  kevHuntLoad(function(){ if(VHOST) vulnDrawHost(); });   // so recent-KEV findings get a "hunt for this" link
   const box=document.getElementById('vulnMain'); if(!box) return;
   if(!VHOST) box.innerHTML='<div class="hint">Scanning posture…</div>';
   fetch('/api/vulns').then(r=>r.json()).then(d=>{ VHOST=d; vulnDrawHost(); }).catch(e=>{ box.innerHTML='<div class="hint">Error: '+esc(''+e)+'</div>'; });
@@ -4084,7 +4113,8 @@ function vulnDetailPanel(findings){
   h+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="background:'+col+';color:#0b0e14;border-radius:5px;padding:1px 8px;font-size:11px;font-weight:700">'+esc(f.severity||'')+'</span>'+
      '<b style="font-size:14px">'+esc(f.component||'?')+'</b>'+(f.live?' <span style="color:var(--sev-high)" title="running now">⚡ live</span>':'')+(f.example?' <span class="hint" style="border:1px solid var(--line);border-radius:4px;padding:0 4px">example</span>':'')+'</div>';
   if(f.title) h+='<div style="margin:6px 0 8px;font-size:13px">'+esc(f.title)+'</div>';
-  if(f.kev) h+='<div style="margin:4px 0 8px;padding:7px 10px;border-radius:8px;background:var(--sev-critical);color:#0b0e14;font-size:12px;font-weight:600">🛑 Known exploited in the wild'+(f.kev_ransomware?' · used in ransomware campaigns':'')+' <span style="font-weight:400;opacity:.8">— prioritize this ('+esc((f.kev_source||'kev')==='vulncheck'?'VulnCheck KEV':(f.kev_source==='cisa'?'CISA KEV':'KEV'))+')</span></div>';
+  if(f.kev){ var hunt=(f.cve && KEVHUNT_BYCVE[f.cve]) ? ' <button class="btn" style="font-size:10px;padding:1px 7px;vertical-align:middle" onclick="kevHuntByCve(\''+esc(f.cve)+'\')" title="Run the pre-built threat hunt for this recently-exploited CVE">▶ Hunt for this</button>' : '';
+    h+='<div style="margin:4px 0 8px;padding:7px 10px;border-radius:8px;background:var(--sev-critical);color:#0b0e14;font-size:12px;font-weight:600">🛑 Known exploited in the wild'+(f.kev_ransomware?' · used in ransomware campaigns':'')+' <span style="font-weight:400;opacity:.8">— prioritize this ('+esc((f.kev_source||'kev')==='vulncheck'?'VulnCheck KEV':(f.kev_source==='cisa'?'CISA KEV':'KEV'))+')</span>'+hunt+'</div>'; }
   function kv(k,v){ return v?('<div style="display:flex;gap:8px;font-size:12px;margin:2px 0"><span class="hint" style="margin:0;width:88px;flex:none">'+k+'</span><span style="font-variant-numeric:tabular-nums">'+v+'</span></div>'):''; }
   h+='<div style="margin:8px 0;padding:8px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)">';
   h+=kv('Installed', esc(f.installed_version||'—'));
@@ -4599,9 +4629,56 @@ function openHunt(){
     ta.value=HUNT_QUERIES[0][1];
     ta.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); runHunt(); } });
     runHunt();
+    kevHuntLoad();
   }
 }
 function setHuntSql(i){ document.getElementById('huntSql').value=HUNT_QUERIES[i][1]; runHunt(); }
+// ---- Pre-built threat hunts from recently-exploited (KEV) CVEs ----
+var KEVHUNTS=[], KEVHUNT_BYCVE={};
+function kevHuntLoad(cb){
+  fetch('/api/kev-hunts').then(r=>r.json()).then(function(d){
+    if(d&&d.available){ KEVHUNTS=d.hunts||[]; KEVHUNT_BYCVE={}; KEVHUNTS.forEach(function(x){ if(x.cve) KEVHUNT_BYCVE[x.cve]=x; }); }
+    var box=document.getElementById('kevHuntPanel');
+    if(box){ if(d&&d.available) kevHuntDraw(d); else box.innerHTML=''; }
+    if(cb) cb();
+  }).catch(function(){ var box=document.getElementById('kevHuntPanel'); if(box) box.innerHTML=''; if(cb) cb(); });
+}
+function kevHuntDraw(d){
+  var box=document.getElementById('kevHuntPanel'); if(!box) return;
+  var onhost=d.on_host||0;
+  var h='<div style="border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:9px 11px">';
+  h+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">🛑 Hunt from recent KEV</b>'+
+     '<span class="hint" style="margin:0">— ready-to-run queries for CVEs added to KEV in the last '+(d.days||14)+' days'+
+     (onhost?(' · <b style="color:var(--sev-high)">'+onhost+' match software on this host</b>'):'')+'</span></div>';
+  if(!KEVHUNTS.length){ box.innerHTML=h+'<div class="hint" style="margin-top:4px">No recently-exploited CVEs map to a hunt right now.</div></div>'; return; }
+  h+='<div style="display:flex;flex-direction:column;gap:4px;margin-top:7px">';
+  KEVHUNTS.slice(0,12).forEach(function(x,i){
+    h+='<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px solid var(--line)">'+
+       (x.on_host?'<span title="software matching this is present on this host" style="color:var(--sev-high);font-weight:700">● on host</span>':'<span class="hint" style="margin:0">○</span>')+
+       (x.ransomware?'<span title="used in ransomware" style="color:var(--sev-critical)">🛑</span>':'')+
+       '<a href="https://nvd.nist.gov/vuln/detail/'+esc(x.cve)+'" target="_blank" rel="noopener" style="color:var(--accent);font-variant-numeric:tabular-nums">'+esc(x.cve)+'</a>'+
+       '<b>'+esc(x.product||x.vendor||x.keyword)+'</b>'+
+       '<span class="hint" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">'+esc(x.name||'')+'</span>'+
+       '<span class="hint" style="margin:0">added '+esc(x.added||'')+'</span>'+
+       '<button class="btn" style="font-size:11px;padding:2px 8px" onclick="kevHuntRun('+i+')">▶ Hunt</button>'+
+       '</div>';
+  });
+  h+='</div><div class="hint" style="margin-top:5px">Each query looks for running processes and recent executions of the affected software (by name) — a starting point to confirm, then pivot.</div></div>';
+  box.innerHTML=h;
+}
+function kevHuntRun(i){
+  var x=KEVHUNTS[i]; if(!x) return;
+  var ta=document.getElementById('huntSql'); if(ta){ ta.value=x.sql; }
+  runHunt();
+  var meta=document.getElementById('huntMeta'); if(meta) meta.textContent='history DB · hunting '+(x.product||x.keyword)+' ('+x.cve+')';
+}
+function kevHuntByCve(cve){
+  var x=KEVHUNT_BYCVE[cve]; if(!x) return;
+  showTab('hunt');
+  setTimeout(function(){ var ta=document.getElementById('huntSql'); if(ta) ta.value=x.sql;
+    if(typeof runHunt==='function') runHunt();
+    var meta=document.getElementById('huntMeta'); if(meta) meta.textContent='history DB · hunting '+(x.product||x.keyword)+' ('+cve+')'; }, 70);
+}
 function runHunt(){
   const sql=document.getElementById('huntSql').value;
   const out=document.getElementById('huntResults');

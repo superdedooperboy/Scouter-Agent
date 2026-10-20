@@ -21,6 +21,9 @@ shows a **🛑 KEV** badge (with a ransomware note where applicable), floats to 
 "known exploited" tile, and — new in this release — **raises an EDR alert regardless of CVSS**. Set a
 VulnCheck token from the Vulnerabilities tab (or `$VULNCHECK_API_TOKEN`); `GET`/`POST /api/kev`.
 
+KEV flags also ride the compact vulnerability rollup pushed to the Mesh on check-in, so the fleet
+console (Mesh 0.7.45+) prioritizes known-exploited components the same way — fleet-wide.
+
 ## macOS agent 1.6.1 / Linux agent 1.6.1 — 2026-10-18
 
 ### Added

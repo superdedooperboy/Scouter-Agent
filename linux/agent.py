@@ -4939,6 +4939,7 @@ class VulnScanner:
                      "installed_version": f.get("installed_version"), "fixed": f.get("fixed"),
                      "cve": f.get("cve"), "kind": f.get("kind"), "title": f.get("title"),
                      "example": bool(f.get("example")), "live": bool(f.get("live")),
+                     "kev": bool(f.get("kev")), "kev_ransomware": bool(f.get("kev_ransomware")),
                      "sig": f.get("sig"),
                      "remediation": (f.get("remediation") or {}).get("status")}
                     for f in findings[:top]],

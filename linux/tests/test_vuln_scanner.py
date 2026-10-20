@@ -287,5 +287,40 @@ class TestEnrichment(unittest.TestCase):
         self.assertTrue(f["references"])
 
 
+class TestKevHuntKeyword(unittest.TestCase):
+    """KEV threat-hunt keyword extraction: prefer a specific product/model token over generic infra
+    or vulnerability-description words (regression for the 1.8.1 fix)."""
+
+    def kw(self, product, vendor, name=""):
+        return agent.KevFeed.hunt_keyword(product, vendor, name)
+
+    def test_prefers_model_over_generic_product_word(self):
+        self.assertEqual(self.kw("SMA1000 Appliances", "SonicWall",
+                                 "SonicWall SMA1000 Appliances server-side request forgery"), "sma1000")
+
+    def test_drops_generic_product_words(self):
+        # "Secure Email Gateway" / "Remote Support" are all generic -> no good keyword or the vendor
+        self.assertIsNone(self.kw("Secure Email Gateway", "Cisco",
+                                  "Cisco Secure Email Gateway relative path traversal vulnerability"))
+        self.assertEqual(self.kw("Remote Support", "BeyondTrust",
+                                 "BeyondTrust Remote Support authentication bypass by spoofing"), "beyondtrust")
+
+    def test_name_fallback_ignores_vuln_description_words(self):
+        # product/vendor generic; the name must not yield "elevation"/"privilege"/etc.
+        self.assertIsNone(self.kw("Windows", "Microsoft",
+                                  "Microsoft Windows kernel elevation of privilege vulnerability"))
+        self.assertEqual(self.kw("Multiple Products", "Atlassian",
+                                 "Atlassian Confluence Data Center deserialization"), "confluence")
+
+    def test_good_cases_unchanged(self):
+        self.assertEqual(self.kw("Chrome", "Google"), "chrome")
+        self.assertEqual(self.kw("Log4j2", "Apache"), "log4j2")       # digit-bearing model wins
+        self.assertEqual(self.kw("NetScaler", "Citrix"), "netscaler")
+        self.assertEqual(self.kw("Apache Tomcat", "Apache"), "tomcat")
+        self.assertEqual(self.kw("Connect Secure", "Ivanti",
+                                 "Ivanti Connect Secure authentication bypass"), "ivanti")
+
+
+
 if __name__ == "__main__":
     unittest.main()

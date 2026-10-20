@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -4465,23 +4465,50 @@ class KevFeed:
 
     # ---- recently-exploited → threat-hunt query generation ----
     # Product/vendor words too generic to make a useful process-name hunt from.
-    _HUNT_STOP = {"the", "for", "and", "server", "client", "manager", "desktop", "edition",
-                  "enterprise", "windows", "microsoft", "apple", "google", "cisco", "adobe",
-                  "oracle", "system", "software", "products", "product", "multiple", "firewall",
-                  "router", "appliance", "gateway", "framework", "library", "plugin", "core",
-                  "service", "services", "agent", "suite", "platform", "mobile", "cloud", "online",
-                  "web", "application", "applications", "linux", "kernel", "driver", "network"}
+    # Generic infrastructure, vendor, and vulnerability-description words that make a poor process-name
+    # hunt (they match far too much), so they never become a keyword. Specific product/model tokens
+    # (sma1000, netscaler, tomcat) and vendor names kept as a fallback (beyondtrust, ivanti) are NOT here.
+    _HUNT_STOP = {
+        "the", "for", "and", "server", "client", "manager", "manage", "management", "desktop",
+        "edition", "enterprise", "windows", "microsoft", "apple", "google", "cisco", "adobe",
+        "oracle", "system", "software", "products", "product", "multiple", "firewall", "router",
+        "appliance", "appliances", "gateway", "framework", "library", "plugin", "core", "service",
+        "services", "agent", "suite", "platform", "mobile", "cloud", "online", "web", "application",
+        "applications", "linux", "kernel", "driver", "network", "remote", "support", "secure",
+        "email", "access", "console", "portal", "central", "connect", "workplace", "side", "based",
+        # vulnerability-description words, so the name fallback can't grab them
+        "vulnerability", "vulnerabilities", "traversal", "injection", "overflow", "bypass",
+        "spoofing", "improper", "input", "validation", "execution", "arbitrary", "authentication",
+        "privilege", "escalation", "disclosure", "request", "forgery", "memory", "buffer", "bounds",
+        "path", "relative", "missing", "encryption", "sensitive", "deserialization", "command",
+        "restriction", "operations", "unauthenticated", "code", "within", "handling", "processing",
+        "data", "errors", "error", "elevation", "privileges", "confusion", "condition", "race",
+        "leak", "denial", "exposure", "hardcoded", "default", "credentials", "credential", "pointer",
+        "dereference", "heap", "stack", "integer", "underflow", "double", "inclusion", "upload",
+        "redirect", "scripting", "channel", "information", "uninitialized", "format", "string",
+        "null", "write", "read", "type", "cross", "local", "control", "flaw", "issue", "insecure",
+        "unrestricted", "unauthorized", "authorization", "session", "smuggling", "poisoning",
+        "tampering", "hijacking", "free", "after", "allocation", "function", "method", "parameter",
+    }
 
     @classmethod
-    def hunt_keyword(cls, product, vendor, name):
+    def hunt_keyword(cls, product, vendor, name=""):
         """A single conservative process-name token to hunt for, or None if nothing specific enough —
         'Google Chrome' -> 'chrome', 'Apache Log4j2' -> 'log4j2', 'Windows' / 'Microsoft' -> None."""
+        # Gather product/model noun candidates from all three fields, then prefer a token carrying a
+        # digit (a model/version like sma1000, log4j2) over a plain word, then the longest. Product
+        # tokens come first so they win ties over name/vendor.
+        cand = []
         for src in (product, name, vendor):
-            toks = [t.lower() for t in re.split(r"[^A-Za-z0-9]+", src or "") if t]
-            cand = [t for t in toks if len(t) >= 4 and t not in cls._HUNT_STOP and not t.isdigit()]
-            if cand:
-                return max(cand, key=len)
-        return None
+            for t in re.split(r"[^A-Za-z0-9]+", (src or "").lower()):
+                if len(t) >= 4 and t not in cls._HUNT_STOP and not t.isdigit():
+                    cand.append(t)
+        if not cand:
+            return None
+        vend = (vendor or "").strip().lower()
+        # prefer a model/version token (digit-bearing), then the product-specific noun over the vendor
+        # name (so "Apache Tomcat" hunts tomcat, not apache), then the longest.
+        return max(cand, key=lambda t: (any(c.isdigit() for c in t), t != vend, len(t)))
 
     @staticmethod
     def hunt_sql(kw):

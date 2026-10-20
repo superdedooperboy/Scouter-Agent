@@ -6,6 +6,18 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.8.1 / Linux agent 1.8.1 — 2026-10-20
+
+### Fixed
+
+**KEV threat-hunt keyword extraction.** The query generator picked the longest word from a KEV entry's
+product name, which for real CISA-KEV entries produced over-broad, near-useless hunts — "SMA1000
+Appliances" became a hunt for `appliances`, "Remote Support" for `support`, "Secure Email Gateway" for
+`secure`. It now gathers candidates from the product, name and vendor, drops generic infrastructure and
+vulnerability-description words, and prefers a specific model/version token (one carrying a digit, like
+`sma1000` or `log4j2`) before the longest — so "SMA1000 Appliances" hunts `sma1000`, and an entry with
+no specific token (e.g. "Windows") correctly yields no auto-hunt rather than a junk one.
+
 ## macOS agent 1.8.0 / Linux agent 1.8.0 — 2026-10-20
 
 ### Added

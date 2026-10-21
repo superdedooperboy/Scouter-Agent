@@ -1,6 +1,6 @@
 {
  "platform": "Linux",
- "count": 99,
+ "count": 101,
  "rules": [
   {
    "id": "b-revshell",
@@ -1665,7 +1665,7 @@
     {
      "field": "ancestry",
      "op": "regex",
-     "value": "\\b(httpd|nginx|apache2|tomcat|java|gunicorn|uwsgi|php-fpm|postgres|mysqld|redis-server)\\b"
+     "value": "\\b(httpd|nginx|apache2|tomcat|java|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|postgres|mysqld|redis-server)\\b"
     },
     {
      "field": "label",
@@ -1673,7 +1673,47 @@
      "value": "^(sh|bash|zsh|dash|ksh|python3?(\\.\\d+)?|perl|ruby|php|node|curl|wget|nc|ncat|socat)$"
     }
    ],
-   "description": "A shell or interpreter spawned by an internet-facing service (web server, app server, database). This is the signature of a webshell or successful remote code execution against that service, and is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells.",
+   "description": "A shell or interpreter spawned by an internet-facing service (web server, app server, database). This is the signature of a webshell or successful remote code execution against that service, and is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells. Covers the PHP web-worker set (php-fpm, php-cgi, FrankenPHP, LiteSpeed, and mod_php via apache), so a PHP2Shell (CVE-2026-109618 / CVE-2026-109619) RCE that lands a shell is caught here.",
+   "confidence": 4,
+   "confidence_label": "certain"
+  },
+  {
+   "id": "b-litellm-c2",
+   "name": "LiteLLM supply-chain C2 indicator in command line",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "critical",
+   "mitre": "T1195.002",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(letters9813/pythonclient-test|remote_code_loader\\.lock|/codepy(\\b|$)|www\\.litellm\\.dev)"
+    }
+   ],
+   "description": "A command line referencing the litellm 1.107.0 supply-chain backdoor's indicators \u2014 its GitHub dead-drop (letters9813/pythonclient-test), the /codepy payload endpoint, the /tmp/remote_code_loader.lock marker, or the lookalike exfiltration domain www.litellm.dev. The backdoor runs in-process at Python startup, so the vulnerability finding and the advisory hunts are the primary coverage; this catches it when an indicator reaches a command line.",
+   "confidence": 4,
+   "confidence_label": "certain"
+  },
+  {
+   "id": "b-litellm-artifact",
+   "name": "LiteLLM supply-chain malware artifact on disk",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "file",
+   "severity": "critical",
+   "mitre": "T1195.002",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "path",
+     "op": "regex",
+     "value": "(/remote_code_loader\\.lock$|/cook\\.pth$)"
+    }
+   ],
+   "description": "A file matching the litellm 1.107.0 backdoor's on-disk artifacts \u2014 the /tmp/remote_code_loader.lock daemon marker, or a cook.pth loader. Fires when such a path is under file monitoring; pair it with the advisory hunts to sweep site-packages and /tmp directly.",
    "confidence": 4,
    "confidence_label": "certain"
   },

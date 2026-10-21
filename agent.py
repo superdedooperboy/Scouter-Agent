@@ -89,7 +89,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.8.1"
+__version__ = "1.9.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -732,8 +732,12 @@ BUILTIN_RULES = [
        [_c("ancestry", "regex", r"(Safari|Google Chrome|Firefox|Microsoft Edge|Brave Browser|Opera|Preview|Mail|Microsoft Word|Microsoft Excel|Microsoft PowerPoint|Adobe Acrobat|Slack|Discord|zoom\.us)"),
         _c("label", "regex", r"^(sh|bash|zsh|dash|ksh|python3?(\.\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$")], match="all"),
     _b("b-lin-server-shell", "Shell spawned by an internet-facing service (possible webshell/RCE)", "critical", "T1505.003",
-       [_c("ancestry", "regex", r"(httpd|nginx|apache2?|tomcat|java|node|gunicorn|uwsgi|php-fpm|postgres|mysqld)"),
+       [_c("ancestry", "regex", r"(httpd|nginx|apache2?|tomcat|java|node|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|postgres|mysqld)"),
         _c("label", "regex", r"^(sh|bash|zsh|dash|ksh|python3?(\.\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$")], match="all"),
+    _b("b-litellm-c2", "LiteLLM supply-chain C2 indicator in command line", "critical", "T1195.002",
+       [_c("cmdline", "regex", r"(letters9813/pythonclient-test|remote_code_loader\.lock|/codepy(\b|$)|www\.litellm\.dev)")]),
+    _b("b-litellm-artifact", "LiteLLM supply-chain malware artifact on disk", "critical", "T1195.002",
+       [_c("path", "regex", r"(/remote_code_loader\.lock$|/cook\.pth$)")], nt="file"),
     _b("b-rare-exec-drop", "Never-before-seen binary executing from a drop location", "high", "T1204.002",
        [_c("exe_novel", "eq", "True"),
         _c("exe", "regex", r"^/(private/)?(tmp|var/tmp|var/folders)/|^/Users/[^/]+/(Downloads|Library/Caches|Public)/|^/Volumes/")], match="all"),
@@ -1124,7 +1128,17 @@ _BUILTIN_DESC = {
         "the command line says \u2014 renaming the payload doesn't help.",
     "b-lin-server-shell": "A shell or interpreter spawned by an internet-facing service (web server, app server, "
         "database). This is the signature of a webshell or successful remote code execution against that service, and "
-        "is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells.",
+        "is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells. Covers the "
+        "PHP web-worker set (php-fpm, php-cgi, FrankenPHP, LiteSpeed, and mod_php via apache/httpd), so a PHP2Shell "
+        "(CVE-2026-109618 / CVE-2026-109619) RCE that lands a shell is caught here.",
+    "b-litellm-c2": "A command line referencing the litellm 1.107.0 supply-chain backdoor's indicators \u2014 its "
+        "GitHub dead-drop (letters9813/pythonclient-test), the /codepy payload endpoint, the /tmp/remote_code_loader.lock "
+        "marker, or the lookalike exfiltration domain www.litellm.dev. The backdoor runs in-process at Python startup, so "
+        "the vulnerability finding and the advisory hunts are the primary coverage; this catches it when an indicator "
+        "reaches a command line.",
+    "b-litellm-artifact": "A file matching the litellm 1.107.0 backdoor's on-disk artifacts \u2014 the "
+        "/tmp/remote_code_loader.lock daemon marker, or a cook.pth loader. Fires when such a path is under file "
+        "monitoring; pair it with the advisory hunts to sweep site-packages and /tmp directly.",
     "b-lin-ssh-shell": "An interpreter or network tool running under an SSH session. On a workstation, remote "
         "hands-on-keyboard activity is itself notable. (Deliberately NOT shipped on Linux, where administrators drive "
         "servers over SSH constantly \u2014 there it is context, and the multi-stage SQL detections use it instead.)",
@@ -3784,6 +3798,40 @@ VULN_SEED_ADVISORIES = [
      "affected": [{"lt": "3.4.0"}], "fixed": "3.4.0",
      "title": "Homebrew openssl@3 behind a security release (example advisory)",
      "url": "https://www.openssl.org/news/vulnerabilities.html"},
+    # --- Real, non-example advisories for current high-profile threats -------------------------
+    # Malicious PyPI supply-chain release: litellm 1.107.0 (compromised wheels). Matched by name,
+    # so it flags an installed pip litellm==1.107.0 regardless of how the ecosystem is labelled.
+    {"id": "SCOUTER-LITELLM-1.107.0", "severity": "critical",
+     "match": {"name": "litellm"}, "affected": [{"eq": "1.107.0"}], "fixed": None,
+     "cve": "", "title": "litellm 1.107.0 on PyPI is a compromised supply-chain release",
+     "description": "The litellm 1.107.0 wheels on PyPI contain malicious code (cook.pth / cook.py / "
+         "sitecustomize.py) that runs at Python startup, fetches and executes attacker code, and steals "
+         "credentials (exfiltrated to the lookalike www.litellm.dev). Treat the host as potentially "
+         "compromised: remove 1.107.0, pin to a known-good release (not 1.107.0), and rotate any secrets "
+         "the environment could reach. The malicious code was injected into the build, so it is not in the "
+         "1.107.0 git tag.",
+     "references": ["https://github.com/BerriAI/litellm/issues/47826",
+                    "https://www.upwind.io/feed/litellm-1-107-0-supply-chain-attack-malicious-code-found-in-pypi-package"],
+     "url": "https://github.com/BerriAI/litellm/issues/47826"},
+] + [
+    # PHP2Shell: unauthenticated RCE (CVE-2026-109618 / CVE-2026-109619), CVSS 9.2, PHP <= 8.5.11.
+    # Homebrew PHP tracks upstream versions, so the per-branch ranges compare cleanly here. (Linux
+    # distro packages backport the fix without changing the upstream version, so they are covered by
+    # the apt-currency check, the exploitation detection and the advisory hunts instead.)
+    {"id": "SCOUTER-PHP2SHELL-" + _f.replace("@", "-"), "severity": "critical",
+     "match": {"ecosystem": "Homebrew", "package": _f},
+     "affected": [{"ge": "8.5.0", "lt": "8.5.12"}, {"ge": "8.4.0", "lt": "8.4.27"},
+                  {"ge": "8.3.0", "lt": "8.3.36"}, {"ge": "8.2.0", "lt": "8.2.35"}, {"lt": "8.2.0"}],
+     "fixed": "8.5.12 / 8.4.27 / 8.3.36 / 8.2.35",
+     "cve": "CVE-2026-109618", "aliases": ["CVE-2026-109619"],
+     "title": "PHP unauthenticated RCE — PHP2Shell (CVE-2026-109618 / CVE-2026-109619)",
+     "description": "Two critical flaws (CVSS 9.2) allow unauthenticated remote code execution as the "
+         "web-worker user, affecting PHP through 8.5.11. Update to 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35. "
+         "Internet-facing PHP (mod_php, PHP-FPM, php-cgi, FrankenPHP, LiteSpeed) is the highest priority.",
+     "references": ["https://www.php.net/", "https://www.cisa.gov/news-events/alerts/2026/10/21/"
+                    "critical-vulnerabilities-php-require-immediate-patching"],
+     "url": "https://www.php.net/"}
+    for _f in ("php", "php@8.2", "php@8.3", "php@8.4", "php@8.5")
 ]
 
 
@@ -4573,6 +4621,152 @@ def _neg_date(d):
         return 0
 
 
+# --- Curated advisory hunts: operator-dismissable, pinned to the top of the Hunt tab --------------
+# Each advisory bundles ready-to-run, read-only hunts for a specific emerging threat. They surface at
+# the top of the Hunt tab; an operator runs them on demand and can clear (dismiss) any advisory they
+# don't need — the dismissal persists per host, and dismissed advisories can be restored.
+ADVISORY_HUNTS = [
+    {
+        "id": "php2shell-2026-10", "severity": "critical", "published": "2026-10-21",
+        "title": "PHP2Shell — unauthenticated RCE (CVE-2026-109618 / CVE-2026-109619)",
+        "summary": "Two CVSS-9.2 flaws allow unauthenticated remote code execution as the web-worker user, "
+            "in PHP through 8.5.11 (patched in 8.5.12 / 8.4.27 / 8.3.36 / 8.2.35). Find where PHP serves "
+            "requests, and hunt the post-exploitation signal: a PHP worker that spawned a shell.",
+        "references": ["https://www.php.net/",
+                       "https://www.cisa.gov/news-events/alerts/2026/10/21/critical-vulnerabilities-php-require-immediate-patching"],
+        "hunts": [
+            {"name": "PHP web workers running on this host",
+             "why": "Where the exposure is — internet-facing PHP (php-fpm, php-cgi, FrankenPHP, LiteSpeed) is the target.",
+             "sql": "SELECT name, exe, cmdline, user,\n"
+                    "       datetime(last_seen,'unixepoch','localtime') AS last_seen\n"
+                    "FROM processes\n"
+                    "WHERE lower(name) IN ('php','php-fpm','php-cgi','lsphp','frankenphp')\n"
+                    "   OR lower(exe) LIKE '%/php' OR lower(exe) LIKE '%/php-fpm%'\n"
+                    "   OR lower(exe) LIKE '%/php-cgi%' OR lower(exe) LIKE '%/frankenphp%' OR lower(exe) LIKE '%/lsphp%'\n"
+                    "ORDER BY last_seen DESC"},
+            {"name": "A PHP worker that spawned a shell (possible RCE)",
+             "why": "The highest-fidelity php2shell exploitation signal — a web worker should never spawn a shell or interpreter.",
+             "sql": "SELECT name, exe, cmdline, user, ppid_name,\n"
+                    "       datetime(last_seen,'unixepoch','localtime') AS last_seen\n"
+                    "FROM processes\n"
+                    "WHERE (lower(ppid_name) LIKE '%php-fpm%' OR lower(ppid_name) LIKE '%php-cgi%'\n"
+                    "       OR lower(ppid_name) IN ('php','lsphp','frankenphp','httpd','apache','apache2','nginx'))\n"
+                    "  AND lower(name) IN ('sh','bash','zsh','dash','ksh','python','python3','perl','ruby',\n"
+                    "                      'curl','wget','nc','ncat','socat','id','whoami','uname')\n"
+                    "ORDER BY last_seen DESC"},
+            {"name": "Outbound connections from PHP workers",
+             "why": "A webshell often calls out — a PHP worker talking to the public internet is worth a look.",
+             "sql": "SELECT proc_name, exe, raddr, rport, asorg, country,\n"
+                    "       datetime(last_seen,'unixepoch','localtime') AS last_seen\n"
+                    "FROM connections\n"
+                    "WHERE (lower(proc_name) LIKE '%php%' OR lower(exe) LIKE '%/php%') AND public=1\n"
+                    "ORDER BY last_seen DESC"},
+        ],
+    },
+    {
+        "id": "litellm-1.107.0-2026-10", "severity": "critical", "published": "2026-10-21",
+        "title": "LiteLLM 1.107.0 — PyPI supply-chain backdoor",
+        "summary": "The litellm 1.107.0 wheels on PyPI contain a backdoor that runs at Python startup, fetches "
+            "and executes attacker code, and steals credentials (exfiltrated to the lookalike www.litellm.dev). "
+            "Hunt for the package, its on-disk artifacts, and its C2 markers.",
+        "references": ["https://github.com/BerriAI/litellm/issues/47826",
+                       "https://www.upwind.io/feed/litellm-1-107-0-supply-chain-attack-malicious-code-found-in-pypi-package"],
+        "hunts": [
+            {"name": "Processes that loaded litellm",
+             "why": "Any Python that imported litellm 1.107.0 ran the backdoor at startup.",
+             "sql": "SELECT 'running' AS seen, name, exe, cmdline,\n"
+                    "       datetime(last_seen,'unixepoch','localtime') AS t\n"
+                    "FROM processes WHERE lower(cmdline) LIKE '%litellm%' OR lower(exe) LIKE '%litellm%'\n"
+                    "UNION ALL\n"
+                    "SELECT 'executed' AS seen, '' AS name, exe, cmdline,\n"
+                    "       datetime(ts,'unixepoch','localtime') AS t\n"
+                    "FROM exec_events WHERE lower(cmdline) LIKE '%litellm%' OR lower(exe) LIKE '%litellm%'\n"
+                    "ORDER BY t DESC"},
+            {"name": "Backdoor artifacts on disk (lock file, cook.pth)",
+             "why": "The /tmp/remote_code_loader.lock daemon marker and the cook.pth / cook.py / sitecustomize.py loaders.",
+             "sql": "SELECT 'on disk' AS seen, path,\n"
+                    "       datetime(first_seen,'unixepoch','localtime') AS t\n"
+                    "FROM files WHERE path LIKE '%/remote_code_loader.lock' OR path LIKE '%/cook.pth'\n"
+                    "   OR path LIKE '%/cook.py' OR path LIKE '%/sitecustomize.py'\n"
+                    "UNION ALL\n"
+                    "SELECT 'file event' AS seen, path,\n"
+                    "       datetime(ts,'unixepoch','localtime') AS t\n"
+                    "FROM file_events WHERE path LIKE '%remote_code_loader%' OR path LIKE '%/cook.pth'\n"
+                    "ORDER BY t DESC"},
+            {"name": "C2 / loader indicators in recent executions",
+             "why": "The GitHub dead-drop (letters9813/pythonclient-test), the /codepy payload endpoint, the lock file, the lookalike domain.",
+             "sql": "SELECT datetime(ts,'unixepoch','localtime') AS t, exe, cmdline\n"
+                    "FROM exec_events\n"
+                    "WHERE lower(cmdline) LIKE '%letters9813%' OR lower(cmdline) LIKE '%pythonclient-test%'\n"
+                    "   OR lower(cmdline) LIKE '%remote_code_loader%' OR lower(cmdline) LIKE '%litellm.dev%'\n"
+                    "   OR lower(cmdline) LIKE '%/codepy%'\n"
+                    "ORDER BY t DESC"},
+        ],
+    },
+]
+
+ADVISORY_DISMISS_FILE = os.path.join(HERE, "advisory-dismissed.json")
+
+
+class AdvisoryHunts:
+    """Curated, operator-dismissable advisory hunts pinned to the top of the Hunt tab. The advisory
+    definitions are code-maintained (ADVISORY_HUNTS); only the set of dismissed advisory ids persists
+    per host, so clearing one keeps it cleared across restarts, and dismissed advisories can be restored."""
+
+    def __init__(self, advisories=None, path=None):
+        self.advisories = advisories if advisories is not None else ADVISORY_HUNTS
+        self.path = path or ADVISORY_DISMISS_FILE
+        self.lock = threading.Lock()
+        self.dismissed = self._load()
+
+    def _load(self):
+        try:
+            with open(self.path) as f:
+                d = json.load(f) or {}
+            return set(d.get("dismissed") or [])
+        except (OSError, ValueError):
+            return set()
+
+    def _save(self):
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"dismissed": sorted(self.dismissed)}, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def _ids(self):
+        return {a["id"] for a in self.advisories}
+
+    def dismiss(self, aid):
+        with self.lock:
+            if aid in self._ids():
+                self.dismissed.add(aid)
+                self._save()
+        return self.status()
+
+    def restore(self, aid):
+        with self.lock:
+            self.dismissed.discard(aid)
+            self._save()
+        return self.status()
+
+    def restore_all(self):
+        with self.lock:
+            self.dismissed.clear()
+            self._save()
+        return self.status()
+
+    def status(self):
+        with self.lock:
+            dismissed = set(self.dismissed) & self._ids()
+        active = [a for a in self.advisories if a["id"] not in dismissed]
+        return {"available": True, "advisories": active,
+                "dismissed": sorted(dismissed), "dismissed_count": len(dismissed),
+                "total": len(self.advisories)}
+
+
 class VulnScanner:
     """Orchestrates OS-currency + inventory + feed matching into prioritized findings.
 
@@ -4651,13 +4845,18 @@ class VulnScanner:
                                        ecosystem="Homebrew", package=pkg.get("name")):
                 out.append(self._finding(adv, "brew", pkg.get("name"), pkg.get("version"),
                                          match_name=pkg.get("name")))
-        # language ecosystems (OSV): pip / npm / gem globals matched against OSV advisory data
+        # language ecosystems (OSV): pip / npm / gem globals matched against OSV advisory data,
+        # and also against the built-in / custom advisory feed by name (so a malicious-package
+        # advisory like the litellm supply-chain release flags an installed version directly).
         for pkg in inv.get("packages", []):
             eco = pkg.get("ecosystem")
-            for adv in self.osv.match(eco, pkg.get("name"), pkg.get("version")):
+            name, ver = pkg.get("name"), pkg.get("version")
+            for adv in self.osv.match(eco, name, ver):
                 out.append(self._finding(adv, "pkg:" + (eco or "").lower(),
-                                         "%s (%s)" % (pkg.get("name"), eco),
-                                         pkg.get("version"), match_name=pkg.get("name")))
+                                         "%s (%s)" % (name, eco), ver, match_name=name))
+            for adv in self.feed.match(name=name, version=ver, ecosystem=eco, package=name):
+                out.append(self._finding(adv, "pkg:" + (eco or "").lower(),
+                                         "%s (%s)" % (name, eco), ver, match_name=name))
         out = self._dedupe(out)
         return out
 
@@ -18178,6 +18377,9 @@ def make_handler(cache):
                     self._send_json({"available": True, "days": days, "has_token": kv.has_token(),
                                      "source": kv.source, "count": len(hunts), "hunts": hunts,
                                      "on_host": sum(1 for h in hunts if h["on_host"])})
+            elif path == "/api/advisory-hunts":
+                adv = getattr(cache, "advisories", None)
+                self._send_json(adv.status() if adv else {"available": False, "advisories": []})
             elif path == "/api/ai":
                 self._send_json(cache.ai.status() if cache.ai
                                 else {"enabled": False, "configured": False, "available": False})
@@ -18428,6 +18630,28 @@ def make_handler(cache):
                     res = kv.set_token((payload.get("token") or "") if isinstance(payload, dict) else "")
                     self._send_json(dict(res, **kv.status()) if res.get("ok") else res,
                                     status=200 if res.get("ok") else 400)
+            elif u.path == "/api/advisory-hunts":
+                # op=dismiss|restore (id), or op=restore-all. Dismissal persists per host.
+                length = int(self.headers.get("Content-Length") or 0)
+                raw_b = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+                try:
+                    payload = json.loads(raw_b) if raw_b else {}
+                except ValueError:
+                    payload = {}
+                adv = getattr(cache, "advisories", None)
+                if not adv:
+                    self._send_json({"ok": False, "error": "advisory hunts unavailable"}, status=400)
+                else:
+                    op = (payload.get("op") or "").strip()
+                    aid = (payload.get("id") or "").strip()
+                    if op == "dismiss":
+                        self._send_json(dict(adv.dismiss(aid), ok=True))
+                    elif op == "restore":
+                        self._send_json(dict(adv.restore(aid), ok=True))
+                    elif op == "restore-all":
+                        self._send_json(dict(adv.restore_all(), ok=True))
+                    else:
+                        self._send_json({"ok": False, "error": "op must be dismiss|restore|restore-all"}, status=400)
             elif u.path == "/api/decoys":
                 # op=set (enable/disable — disabling removes what was planted), op=replant,
                 # op=fleet-bait (the mesh syncing the fleet's bait usernames to this host).
@@ -20458,6 +20682,7 @@ def main():
                               alert_severity=args.vuln_alert_severity, on_alert=_vuln_on_alert,
                               kev=cache.kev)
     cache.vulns.start()
+    cache.advisories = AdvisoryHunts()   # curated, dismissable advisory hunts (top of the Hunt tab)
     cache.shodan = ShodanExposure(interval=args.shodan_interval, kev=cache.kev)   # opt-in external attack surface
     cache.local_control = bool(args.local_control)
     cache.autohunts = AutoHuntStore()      # hunts raised by validated-malicious alerts

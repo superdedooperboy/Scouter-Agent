@@ -6,6 +6,35 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.9.0 / Linux agent 1.9.0 — 2026-10-21
+
+### Added
+
+**Clearable advisory hunts, pinned to the top of the Hunt tab.** A new panel surfaces curated,
+ready-to-run hunts for specific emerging threats at the top of the Threat Hunt tab. An operator runs
+any hunt on demand, and can **clear** an advisory they don't need — the dismissal persists per host,
+and cleared advisories can be restored. Ships with two advisories (below). Code-maintained set
+(`ADVISORY_HUNTS`); new `GET`/`POST /api/advisory-hunts`.
+
+**Coverage for two current, high-profile threats:**
+
+- **PHP2Shell (CVE-2026-109618 / CVE-2026-109619)** — critical unauthenticated RCE in PHP ≤ 8.5.11.
+  *Vulnerability coverage:* built-in advisories flag a vulnerable Homebrew PHP (per-branch ranges, so
+  8.5.12 / 8.4.27 / 8.3.36 / 8.2.35 read as patched). *Detection:* the critical `b-lin-server-shell`
+  rule (a web worker spawning a shell) now covers the full PHP worker set — php-fpm, php-cgi,
+  FrankenPHP, LiteSpeed, and mod_php via apache — so a PHP2Shell RCE that lands a shell is caught.
+  *Hunts:* find PHP web workers, find a worker that spawned a shell, find outbound from workers.
+  (Linux distro PHP is covered by the detection, hunts and apt-currency rather than a version
+  advisory, since distros backport the fix without changing the upstream version.)
+- **LiteLLM 1.107.0 PyPI supply-chain backdoor** — *Vulnerability coverage:* a built-in
+  malicious-package advisory flags an installed `litellm==1.107.0` (pip/npm/gem packages are now
+  matched against the advisory feed too, not just OSV). *Detection:* new `b-litellm-c2` (C2
+  indicators — the GitHub dead-drop, `/codepy`, the lock file, the lookalike `www.litellm.dev`) and
+  `b-litellm-artifact` (the `/tmp/remote_code_loader.lock` marker, `cook.pth`). *Hunts:* find
+  processes that loaded litellm, find the on-disk artifacts, find C2/loader indicators.
+
+Both agents. The Mesh console gets the fleet-facing versions of these in a follow-up.
+
 ## macOS agent 1.8.1 / Linux agent 1.8.1 — 2026-10-20
 
 ### Fixed

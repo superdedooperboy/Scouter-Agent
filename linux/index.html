@@ -1130,6 +1130,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
         <span class="hchip vrchip" id="vrPill" title="" style="display:none" onclick="vrClick()"></span>
       </div>
       <div id="huntSqlPane">
+      <div id="advHuntPanel"></div>
       <div id="aiHuntBar" style="display:none;margin-bottom:6px">
         <div style="display:flex;gap:6px">
           <input type="text" id="aiHuntQ" placeholder="Ask in plain English → AI writes a read-only SQL query…" style="flex:1;font-size:12px;padding:5px 8px;background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px" onkeydown="if(event.key==='Enter'){event.preventDefault();aiHuntGenerate()}">
@@ -4630,8 +4631,59 @@ function openHunt(){
     ta.addEventListener('keydown',e=>{ if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); runHunt(); } });
     runHunt();
     kevHuntLoad();
+    advHuntLoad();
   }
 }
+// ---- Curated advisory hunts: pinned to the top of the Hunt tab, runnable + clearable ----
+var ADVHUNTS={advisories:[],dismissed_count:0};
+function advHuntLoad(){
+  var box=document.getElementById('advHuntPanel'); if(!box) return;
+  fetch('/api/advisory-hunts').then(r=>r.json()).then(function(d){
+    if(!d||d.available===false){ box.innerHTML=''; return; }
+    ADVHUNTS=d; advHuntDraw();
+  }).catch(function(){ box.innerHTML=''; });
+}
+function advSev(s){ return s==='critical'?'var(--sev-critical)':s==='high'?'var(--sev-high)':s==='medium'?'var(--sev-medium)':'var(--sev-low)'; }
+function advHuntDraw(){
+  var box=document.getElementById('advHuntPanel'); if(!box) return;
+  var advs=ADVHUNTS.advisories||[];
+  var h='';
+  advs.forEach(function(a){
+    h+='<div style="border:1px solid '+advSev(a.severity)+';border-radius:9px;background:var(--panel);padding:10px 12px;margin:0 0 8px">';
+    h+='<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">'+
+       '<span class="sevtag" style="background:'+advSev(a.severity)+'">'+esc(a.severity)+'</span>'+
+       '<b style="font-size:13.5px">'+esc(a.title)+'</b>'+
+       '<span class="hint" style="margin:0">published '+esc(a.published||'')+'</span>'+
+       '<span style="flex:1"></span>'+
+       '<span class="clr" style="color:var(--muted);cursor:pointer;text-decoration:underline;font-size:12px" title="Clear this advisory — it won’t show again until restored" onclick="advHuntDismiss(\''+esc(a.id)+'\')">✕ Clear</span></div>';
+    h+='<div class="hint" style="margin:4px 0 7px">'+esc(a.summary||'')+
+       (a.references&&a.references.length?(' <a href="'+esc(a.references[0])+'" target="_blank" rel="noopener" style="color:var(--accent)">advisory ↗</a>'):'')+'</div>';
+    (a.hunts||[]).forEach(function(hn,i){
+      h+='<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0;border-top:1px solid var(--line)">'+
+         '<button class="btn" style="font-size:11px;padding:2px 9px;flex:none" onclick="advHuntRun(\''+esc(a.id)+'\','+i+')">▶ Run</button>'+
+         '<div><div style="font-size:12.5px;font-weight:600">'+esc(hn.name)+'</div>'+
+         '<div class="hint" style="margin:0">'+esc(hn.why||'')+'</div></div></div>';
+    });
+    h+='</div>';
+  });
+  if(ADVHUNTS.dismissed_count){
+    h+='<div class="hint" style="margin:0 0 8px">'+ADVHUNTS.dismissed_count+' advisory'+(ADVHUNTS.dismissed_count===1?'':' advisories')+' cleared · <span class="clr" style="color:var(--accent);cursor:pointer;text-decoration:underline" onclick="advHuntRestoreAll()">restore</span></div>';
+  }
+  box.innerHTML=h;
+}
+function advHuntRun(aid,i){
+  var a=(ADVHUNTS.advisories||[]).filter(function(x){return x.id===aid;})[0]; if(!a) return;
+  var hn=(a.hunts||[])[i]; if(!hn) return;
+  var ta=document.getElementById('huntSql'); if(ta) ta.value=hn.sql;
+  runHunt();
+  var meta=document.getElementById('huntMeta'); if(meta) meta.textContent='history DB · '+a.title.split(' — ')[0]+': '+hn.name;
+}
+function advHuntPost(op,aid){
+  return fetch('/api/advisory-hunts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:op,id:aid||''})})
+    .then(r=>r.json()).then(function(d){ if(d&&d.available!==false){ ADVHUNTS=d; advHuntDraw(); } }).catch(function(){});
+}
+function advHuntDismiss(aid){ advHuntPost('dismiss',aid); }
+function advHuntRestoreAll(){ advHuntPost('restore-all'); }
 function setHuntSql(i){ document.getElementById('huntSql').value=HUNT_QUERIES[i][1]; runHunt(); }
 // ---- Pre-built threat hunts from recently-exploited (KEV) CVEs ----
 var KEVHUNTS=[], KEVHUNT_BYCVE={};

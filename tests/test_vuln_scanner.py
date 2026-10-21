@@ -435,5 +435,41 @@ class TestKevHuntKeyword(unittest.TestCase):
 
 
 
+class TestThreatCoverage(unittest.TestCase):
+    """PHP2Shell + litellm supply-chain: vuln coverage and the clearable advisory hunts (1.9.0)."""
+
+    def test_litellm_and_php_advisories(self):
+        f = agent.VulnFeed(enabled=False)                       # seed only, no remote fetch
+        ids = lambda ms: {m["id"] for m in ms}
+        self.assertIn("SCOUTER-LITELLM-1.107.0", ids(f.match(name="litellm", version="1.107.0")))
+        self.assertEqual(ids(f.match(name="litellm", version="1.106.0")), set())
+        self.assertTrue(any(i.startswith("SCOUTER-PHP2SHELL")
+                            for i in ids(f.match(name="php", version="8.5.11",
+                                                 ecosystem="Homebrew", package="php"))))
+        self.assertFalse(any(i.startswith("SCOUTER-PHP2SHELL")     # 8.5.12 is patched
+                             for i in ids(f.match(name="php", version="8.5.12",
+                                                  ecosystem="Homebrew", package="php"))))
+
+    def test_advisory_hunts_store_and_sql(self):
+        import sqlite3
+        import tempfile
+        store = agent.AdvisoryHunts(path=os.path.join(tempfile.mkdtemp(), "dismissed.json"))
+        st = store.status()
+        self.assertEqual(st["total"], len(agent.ADVISORY_HUNTS))
+        aid = st["advisories"][0]["id"]
+        store.dismiss(aid)
+        self.assertNotIn(aid, [a["id"] for a in store.status()["advisories"]])
+        self.assertEqual(store.status()["dismissed_count"], 1)
+        self.assertEqual(agent.AdvisoryHunts(path=store.path).status()["dismissed_count"], 1)  # persists
+        store.restore(aid)
+        self.assertEqual(store.status()["dismissed_count"], 0)
+        con = sqlite3.connect(":memory:")
+        con.executescript(agent.HISTORY_SCHEMA)
+        for adv in agent.ADVISORY_HUNTS:                          # every hunt query must parse vs the schema
+            for h in adv["hunts"]:
+                con.execute("EXPLAIN " + h["sql"])
+
+
+
 if __name__ == "__main__":
     unittest.main()

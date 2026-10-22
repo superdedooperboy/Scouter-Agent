@@ -6,6 +6,24 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.9.2 / Linux agent 1.9.2 — 2026-10-22
+
+### Fixed
+
+**Break-glass command broke on a spaced install path.** The copyable `sudo … --break-glass` line from
+the console embedded the interpreter and script paths unquoted, so a macOS install under
+`/Library/Application Support/Scouter/` split at the space in "Application Support" and the command
+failed. The paths are now shell-quoted (`shlex.quote`), so the line pastes and runs as-is; a path with
+no spaces is left unquoted.
+
+**"Check for updates" reported up to date when a newer version was out.** The update check compared the
+running version only against tagged **GitHub releases**, but versions ship as pushed commits that bump
+`__version__` on `main` (releases are cut rarely), so the newest release it could see (`*-v1.0.0`) was
+older than a running 1.9.x and it always said "up to date." The check now reads the authoritative
+version straight from `__version__` on the release branch, so a newer version is surfaced the moment it
+lands; a matching tagged release, when one exists, still enriches the notice with its notes and link,
+and otherwise the notice links to the repository.
+
 ## macOS agent 1.9.1 / Linux agent 1.9.1 — 2026-10-22
 
 ### Fixed

@@ -59,6 +59,7 @@ import grp
 import plistlib
 import pwd
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -88,16 +89,20 @@ HTML = os.path.join(HERE, "index.html")
 # ---------------------------------------------------------------------------
 # Product identity + version
 # ---------------------------------------------------------------------------
-# Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
-# `<platform>-v<version>` (e.g. linux-v0.1.0) so the launch update-check can find it. 1.0 is reserved
-# for the public open-source launch.
-__version__ = "1.9.1"
+# Mac and Linux Scouter version independently; bump on release. The update-check reads the
+# authoritative version straight from `__version__` on the release branch (that is how we ship -- a
+# pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
+# `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
+# link. 1.0 is reserved for the public open-source launch.
+__version__ = "1.9.2"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
 USER_AGENT = f"LinuxScouter/{__version__}"          # sent on every outbound HTTP request
 REPO_SLUG = "superdedooperboy/Scouter-Agent"    # GitHub repo the update-check queries
 RELEASE_TAG_PREFIX = "linux-v"                 # per-platform release tags in the shared repo
+RELEASE_BRANCH = "main"                        # branch the update-check reads the authoritative version from
+SOURCE_PATH = "linux/agent.py"                 # this agent's path within the repo (raw-source version check)
 UPDATE_CHECK_FILE = os.path.join(HERE, "update-check.json")
 
 # ---------------------------------------------------------------------------
@@ -7703,20 +7708,27 @@ TRIAGE_FILE = os.path.join(HERE, "triage.json")
 
 
 class UpdateChecker:
-    """Best-effort "is there a newer release?" check against GitHub Releases. Read-only and privacy-light:
-    only ever contacts api.github.com, sends nothing about this host, and never downloads or runs anything —
-    it just surfaces a version + link + notes in the UI. The result is cached (24h) so launches don't hammer
-    the API, and the whole thing is skipped with --no-update-check (air-gapped / privacy)."""
+    """Best-effort "is there a newer version?" check. Read-only and privacy-light: only ever contacts
+    raw.githubusercontent.com + api.github.com, sends nothing about this host, and never downloads or runs
+    anything — it just surfaces a version + link + notes in the UI. The authoritative "latest" is the
+    `__version__` string on the release branch (how we actually ship: a pushed commit), so a new version is
+    seen the moment it lands even before a release is tagged; a matching GitHub release, when one exists, only
+    enriches the notice with notes + a link. The result is cached (24h) so launches don't hammer the network,
+    and the whole thing is skipped with --no-update-check (air-gapped / privacy)."""
     API = "https://api.github.com/repos/{}/releases?per_page=30"
+    RAW = "https://raw.githubusercontent.com/{}/{}/{}"
     TTL = 24 * 3600
 
     def __init__(self, enabled=True, repo=REPO_SLUG, prefix=RELEASE_TAG_PREFIX,
-                 current=__version__, cache_file=UPDATE_CHECK_FILE):
+                 current=__version__, cache_file=UPDATE_CHECK_FILE,
+                 branch=RELEASE_BRANCH, source_path=SOURCE_PATH):
         self.enabled = enabled
         self.repo = repo
         self.prefix = prefix
         self.current = current
         self.cache_file = cache_file
+        self.branch = branch
+        self.source_path = source_path
         self.lock = threading.Lock()
         self.state = self._load()
 
@@ -7751,16 +7763,41 @@ class UpdateChecker:
             return
         threading.Thread(target=self._check, daemon=True).start()
 
-    def _check(self):
+    @staticmethod
+    def _parse_source_version(text):
+        """Pull `__version__ = "x.y.z"` out of a raw agent source file."""
+        m = re.search(r'''(?m)^__version__\s*=\s*['"]([0-9]+(?:\.[0-9]+){1,2})['"]''', text or "")
+        return m.group(1) if m else None
+
+    def _fetch_source_version(self):
+        """Authoritative latest: the `__version__` on the release branch. None on any failure
+        (offline / rate-limited / air-gapped) so the previous state is kept untouched."""
+        try:
+            req = urllib.request.Request(
+                self.RAW.format(self.repo, self.branch, self.source_path),
+                # __version__ sits in the file header; a small range keeps the probe cheap (raw
+                # serves the whole file if it ignores the header, and the regex still matches).
+                headers={"User-Agent": USER_AGENT, "Accept": "text/plain",
+                         "Range": "bytes=0-16383"})
+            with urllib.request.urlopen(req, timeout=20) as r:   # nosec - fixed GitHub host
+                text = r.read(65536).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            return None
+        return self._parse_source_version(text)
+
+    def _fetch_release(self, latest):
+        """Best-effort enrichment only: the published release whose tag matches `latest` (for its
+        notes + link). Never decides whether an update is available. When `latest` is unknown, falls
+        back to the newest matching release. None on failure or when no matching release exists yet."""
         try:
             req = urllib.request.Request(
                 self.API.format(self.repo),
                 headers={"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=20) as r:   # nosec - fixed GitHub host
                 rels = json.loads(r.read().decode("utf-8"))
-        except Exception:  # noqa: BLE001 (offline / rate-limited / air-gapped -> just skip)
-            return
-        best = None
+        except Exception:  # noqa: BLE001
+            return None
+        want, best = self._semver(latest), None
         for rel in rels if isinstance(rels, list) else []:
             if rel.get("draft") or rel.get("prerelease"):
                 continue
@@ -7768,18 +7805,38 @@ class UpdateChecker:
             if not tag.startswith(self.prefix):
                 continue
             ver = self._semver(tag[len(self.prefix):])
-            if ver and (best is None or ver > best[0]):
+            if not ver:
+                continue
+            if want is not None:
+                if ver == want:
+                    return rel                      # exact release for the latest version
+            elif best is None or ver > best[0]:
                 best = (ver, rel)
+        if want is not None:
+            return None                             # no tagged release for `latest` yet
+        return best[1] if best else None
+
+    def _check(self):
+        latest = self._fetch_source_version()       # authoritative signal
+        rel = self._fetch_release(latest)           # optional notes/link
+        if latest is None and rel is None:
+            return                                  # nothing learned -> keep last good state
         with self.lock:
+            prev = dict(self.state)
             self.state = {"checked_ts": int(time.time()), "current": self.current}
-            if best:
-                ver, rel = best
+            ver = latest or prev.get("latest")      # carry a prior reading if this probe was offline
+            if ver:
+                self.state["latest"] = ver
+            if rel:
                 self.state.update({
-                    "latest": ".".join(str(x) for x in ver),
                     "url": rel.get("html_url") or "",
                     "name": rel.get("name") or rel.get("tag_name") or "",
                     "notes": (rel.get("body") or "")[:4000],
                     "published": rel.get("published_at") or ""})
+            elif ver:
+                # Shipped as a commit without a tagged release: still give the UI a working link.
+                self.state["url"] = "https://github.com/%s" % self.repo
+                self.state["name"] = "%s%s" % (self.prefix, ver)
             self._save()
 
     def status(self):
@@ -15687,8 +15744,7 @@ def make_handler(cache):
                 # Hand back the command for THIS install, absolute. A service runs from a directory
                 # nobody has open in a terminal, so a copyable line that works from anywhere is the
                 # difference between using break-glass and hunting for where the agent lives.
-                cmd = "sudo %s %s --break-glass 60 --reason \"why you need it\"" % (
-                    sys.executable or "python3", os.path.abspath(__file__))
+                cmd = breakglass_command()   # paths shell-quoted, so a spaced install path still parses
                 self._send_json(dict(breakglass_report(), managed=self._managed(), command=cmd,
                                      scope=sorted(BREAKGLASS_PATHS), actions=sorted(BREAKGLASS_RESPOND_OPS)))
             elif path == "/api/metrics":
@@ -17141,6 +17197,16 @@ def breakglass_grant():
     except (TypeError, ValueError):
         return None
     return g
+
+
+def breakglass_command(python=None, script=None, minutes=60):
+    """The copyable `sudo … --break-glass` line for THIS install. The interpreter and script paths are
+    shell-quoted, so an install under a directory with a space still parses as two arguments instead of
+    splitting the command."""
+    python = python or sys.executable or "python3"
+    script = script if script is not None else os.path.abspath(__file__)
+    return "sudo %s %s --break-glass %d --reason \"why you need it\"" % (
+        shlex.quote(python), shlex.quote(script), minutes)
 
 
 def breakglass_report():

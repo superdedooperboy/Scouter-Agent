@@ -7,6 +7,7 @@ any platform (no live /proc or dpkg required) — useful while porting from macO
 """
 import hashlib
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -256,6 +257,84 @@ class BehavioralRuleTests(unittest.TestCase):
 def _rmtree(path):
     import shutil
     shutil.rmtree(path, ignore_errors=True)
+
+
+
+class TestBreakGlassCommand(unittest.TestCase):
+    """The copyable break-glass line must survive an install path with a space
+    (macOS installs under /Library/Application Support/Scouter/)."""
+
+    def test_spaced_path_is_shell_safe(self):
+        import shlex
+        script = "/Library/Application Support/Scouter/agent/agent.py"
+        python = "/Library/Application Support/Scouter/agent/.venv/bin/python3"
+        cmd = agent.breakglass_command(python=python, script=script)
+        argv = shlex.split(cmd)                       # how a shell parses the copied line
+        self.assertEqual(argv[0], "sudo")
+        self.assertIn(python, argv)                   # the interpreter path is ONE argument
+        self.assertIn(script, argv)                   # the script path is ONE argument, not split
+        self.assertIn("--break-glass", argv)
+
+    def test_plain_path_not_needlessly_quoted(self):
+        cmd = agent.breakglass_command(python="python3", script="/opt/scouter/agent.py")
+        self.assertIn("python3 /opt/scouter/agent.py --break-glass", cmd)
+
+
+class TestUpdateChecker(unittest.TestCase):
+    """The "check for updates" signal. We ship by pushing a commit that bumps __version__ on main,
+    not by cutting a GitHub release for every version -- so the authoritative "latest" is the source
+    __version__ on the release branch, and the release lookup is only for notes/link enrichment. The
+    regression guarded here: an old release (linux-v1.0.0) must NOT make a running 1.9.0 look current."""
+
+    def _checker(self, current, source_version, release=None):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        uc = agent.UpdateChecker(current=current,
+                                 cache_file=os.path.join(tmp, "update-check.json"))
+        uc._fetch_source_version = lambda: source_version
+        uc._fetch_release = lambda latest: release
+        return uc
+
+    def test_source_version_newer_than_running_reports_update(self):
+        uc = self._checker("1.9.0", "1.9.1")
+        uc._check()
+        st = uc.status()
+        self.assertEqual(st["latest"], "1.9.1")
+        self.assertTrue(st["update_available"])
+        self.assertTrue(st["url"])
+
+    def test_same_version_reports_up_to_date(self):
+        uc = self._checker("1.9.1", "1.9.1")
+        uc._check()
+        self.assertFalse(uc.status()["update_available"])
+
+    def test_old_release_cannot_mask_newer_source(self):
+        uc = self._checker("1.9.0", "1.9.1", release=None)
+        uc._check()
+        self.assertTrue(uc.status()["update_available"])
+        self.assertEqual(uc.status()["latest"], "1.9.1")
+
+    def test_matching_release_enriches_notes(self):
+        rel = {"tag_name": "linux-v1.9.1", "name": "Scouter 1.9.1",
+               "html_url": "https://example/rel", "body": "release notes here"}
+        uc = self._checker("1.9.0", "1.9.1", release=rel)
+        uc._check()
+        st = uc.status()
+        self.assertEqual(st["url"], "https://example/rel")
+        self.assertEqual(st["notes"], "release notes here")
+
+    def test_offline_probe_keeps_last_good_state(self):
+        uc = self._checker("1.9.0", "1.9.1")
+        uc._check()
+        uc._fetch_source_version = lambda: None
+        uc._fetch_release = lambda latest: None
+        uc._check()
+        self.assertEqual(uc.status()["latest"], "1.9.1")
+
+    def test_parse_source_version(self):
+        self.assertEqual(
+            agent.UpdateChecker._parse_source_version('x\n__version__ = "2.10.3"\ny'), "2.10.3")
+        self.assertIsNone(agent.UpdateChecker._parse_source_version("no version here"))
 
 
 if __name__ == "__main__":

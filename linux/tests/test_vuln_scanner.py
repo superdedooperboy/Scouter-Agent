@@ -321,6 +321,27 @@ class TestKevHuntKeyword(unittest.TestCase):
                                  "Ivanti Connect Secure authentication bypass"), "ivanti")
 
 
+    def test_on_host_matches_whole_words_only(self):
+        import threading, time
+        kf = agent.KevFeed.__new__(agent.KevFeed)
+        kf.enabled = True; kf.lock = threading.Lock(); kf.source = "cisa"; kf.last = 0; kf.error = None
+        today = time.strftime("%Y-%m-%d")
+        kf.kev = {
+            "CVE-PANOS": {"added": today, "vendor": "Palo Alto Networks", "product": "PAN-OS",
+                          "name": "Palo Alto Networks PAN-OS command injection", "source": "cisa"},
+            "CVE-PLEX": {"added": today, "vendor": "Plex", "product": "Plex Media Server",
+                         "name": "Plex Media Server remote code execution", "source": "cisa"},
+            "CVE-CHR": {"added": today, "vendor": "Google", "product": "Chrome",
+                        "name": "Google Chrome type confusion", "source": "cisa"},
+        }
+        # host has 'network'-ish and 'duplex' tokens but is NOT running PAN-OS or Plex
+        host = {"google chrome", "networkd", "com.apple.networkserviceproxy", "duplex scanner"}
+        by = {h["cve"]: h for h in kf.hunt_suggestions(days=7, host_tokens=host)}
+        self.assertTrue(by["CVE-CHR"]["on_host"])        # 'chrome' is a whole word of 'google chrome'
+        self.assertFalse(by["CVE-PANOS"]["on_host"])     # not a substring hit against 'networkd'
+        self.assertFalse(by["CVE-PLEX"]["on_host"])      # not a substring hit against 'duplex'
+
+
 
 class TestThreatCoverage(unittest.TestCase):
     """PHP2Shell + litellm supply-chain: vuln coverage and the clearable advisory hunts (1.9.0)."""

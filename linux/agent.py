@@ -91,7 +91,7 @@ HTML = os.path.join(HERE, "index.html")
 # Mac and Linux Scouter version independently; bump on release and publish a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) so the launch update-check can find it. 1.0 is reserved
 # for the public open-source launch.
-__version__ = "1.9.0"
+__version__ = "1.9.1"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -4710,7 +4710,8 @@ class KevFeed:
         "oracle", "system", "software", "products", "product", "multiple", "firewall", "router",
         "appliance", "appliances", "gateway", "framework", "library", "plugin", "core", "service",
         "services", "agent", "suite", "platform", "mobile", "cloud", "online", "web", "application",
-        "applications", "linux", "kernel", "driver", "network", "remote", "support", "secure",
+        "applications", "linux", "kernel", "driver", "network", "networks", "media", "remote",
+        "support", "secure",
         "email", "access", "console", "portal", "central", "connect", "workplace", "side", "based",
         # vulnerability-description words, so the name fallback can't grab them
         "vulnerability", "vulnerabilities", "traversal", "injection", "overflow", "bypass",
@@ -4782,13 +4783,19 @@ class KevFeed:
         """Pre-built threat-hunt queries for recently-exploited (KEV, last `days`) CVEs that map to a
         usable product keyword, on_host ones first, then ransomware-linked, then most-recent."""
         host_tokens = {t.lower() for t in (host_tokens or set()) if t}
+        # Match the keyword against WHOLE WORDS of the host's tokens, not arbitrary substrings — a
+        # substring test marks false "on host" hits (e.g. "networks" from PAN-OS against a host's
+        # "network", or "plex" inside "complex"/"duplex").
+        host_words = set()
+        for t in host_tokens:
+            host_words.update(w for w in re.split(r"[^a-z0-9]+", t) if w)
         seen_kw, out = set(), []
         for cve, rec in self.recent(days):
             kw = self.hunt_keyword(rec.get("product"), rec.get("vendor"), rec.get("name"))
             if not kw or kw in seen_kw:
                 continue
             seen_kw.add(kw)
-            on_host = any(kw == t or kw in t or t in kw for t in host_tokens)
+            on_host = kw in host_words
             out.append({"cve": cve, "name": rec.get("name"), "vendor": rec.get("vendor"),
                         "product": rec.get("product"), "keyword": kw, "sql": self.hunt_sql(kw),
                         "ransomware": bool(rec.get("ransomware")), "added": (rec.get("added") or "")[:10],

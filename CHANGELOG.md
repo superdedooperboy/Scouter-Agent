@@ -6,6 +6,16 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.9.1 / Linux agent 1.9.1 — 2026-10-22
+
+### Fixed
+
+**KEV hunt panel "on host" false positives.** The "Hunt from recent KEV" panel marked a CVE as present
+on this host using a loose two-way substring test, so a keyword like "networks" (from a PAN-OS entry)
+matched a host's "network" token, and "plex" matched inside "complex"/"duplex" — flagging software that
+isn't installed. It now matches the keyword against the host's **whole words**, and the keyword
+extractor drops "networks"/"media" so Plex derives the real keyword (`plex`) instead of `media`.
+
 ## macOS agent 1.9.0 / Linux agent 1.9.0 — 2026-10-21
 
 ### Added

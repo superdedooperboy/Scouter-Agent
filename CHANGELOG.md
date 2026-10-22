@@ -6,6 +6,34 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.9.3 / Linux agent 1.9.3 — 2026-10-22
+
+### Fixed
+
+**Investigation storm: the correlator minted a new investigation every snapshot for recurring
+activity.** `reconcile()` re-identified an incident by its member node ids, but those ids are
+ephemeral by construction — a `proc:<pid>` dies with each short-lived exec, and a
+`listen:<pid>:<proto>:<addr>:<port>` carries a port that rotates on every rebind. So a cluster that
+recurred each ~3s snapshot (a daemon rebinding dynamic ports, a parent respawning children) shared
+zero members between snapshots, reconcile saw a brand-new cluster, and it created a fresh
+investigation every cycle — hundreds per hour, pruned only after seven days. An incident now carries
+a **stable signature derived from the correlation keys that actually tie the cluster** (root process,
+file hash, public IP, URL, run payload, path) rather than from the volatile member ids, and reconcile
+matches on that first (member overlap remains the fallback). The same recurring cluster now stays a
+single investigation, and closing it sticks.
+
+**Listeners on ephemeral/dynamic ports were raised as network-reachable alerts.** A process listening
+on `0.0.0.0` on a dynamic port (≥ 49152) scored a full 40-point "reachable from the network" alert,
+so daemons that rebind dynamic ports constantly (NordVPN's content filter, browser helpers) produced
+an endless stream of them and fed the storm above. Such a bind is now informational (weight 0); a
+listener on a real service port still alerts.
+
+**`argv[0]` ≠ executable (T1036 masquerade) fired on legitimately-signed/packaged binaries.** Updaters
+(GoogleUpdater), Electron/Chrome helpers and multi-call tool launchers routinely set their own
+`argv[0]`. The mismatch is now a signal only when the binary is **not** validly signed (macOS:
+apple/developer-id) or **not** from an intact installed package (Linux: dpkg-verified) — where a
+renamed-to-hide binary actually lives.
+
 ## macOS agent 1.9.2 / Linux agent 1.9.2 — 2026-10-22
 
 ### Fixed

@@ -94,7 +94,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.9.2"
+__version__ = "1.9.3"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -136,6 +136,12 @@ COMMON_REMOTE_PORTS = {
     20, 21, 22, 25, 53, 80, 110, 123, 143, 443, 465, 587, 853, 993, 995,
     3478, 5223, 5228, 8080, 8443,
 }
+
+# Linux dynamic (ephemeral) port range (net.ipv4.ip_local_port_range defaults to 32768-60999; we use
+# the conservative 49152 IANA floor). A process LISTENing on 0.0.0.0 here is almost always a transient
+# client/helper socket rather than a standing service, and the port changes on every rebind — so
+# treating each as a fresh network-reachable finding both misfires and churns the correlation engine.
+EPHEMERAL_PORT_MIN = 49152
 
 # Command substrings that, in a cron/systemd job, strongly suggest a payload.
 JOB_PAYLOAD_PATTERNS = [
@@ -9768,9 +9774,14 @@ def score_process(p, sig, homes, conns):
     elif cat == "missing":
         reasons.append(reason("Executable path does not exist on disk", "T1070.004", 40))
 
-    # Masquerade: ps 'command' basename vs real executable basename.
+    # Masquerade: ps 'command' basename vs real executable basename. A binary that ships in an
+    # installed package (trusted) and sets its own argv[0] is not masquerading — updaters, browser
+    # helpers and multi-call/busybox-style launchers do this routinely — so the mismatch is only a
+    # signal when the binary is NOT a verified package file (unpackaged / modified / missing), which
+    # is where a renamed-to-hide binary actually lives.
     cmd_name = os.path.basename(cmd.split()[0]) if cmd.split() else ""
-    if exe and cmd_name and cmd_name != name and not cmd_name.startswith(name):
+    if (exe and cmd_name and cmd_name != name and not cmd_name.startswith(name)
+            and not sig.get("trusted")):
         reasons.append(reason(f"Process name '{cmd_name}' differs from executable '{name}'",
                               "T1036", 20))
 
@@ -9801,7 +9812,12 @@ def score_connection(c, owner_name):
     if state == "LISTEN" or (not raddr and lport):
         has_port = lport.isdigit()
         exposed = has_port and (laddr in ("*", "0.0.0.0", "::") or (laddr and not is_loopback_addr(laddr)))
-        if exposed:
+        if exposed and has_port and int(lport) >= EPHEMERAL_PORT_MIN:
+            # Transient dynamic/ephemeral port — reachable, but not a standing service and not stable
+            # enough to alert or correlate on. Informational only (see EPHEMERAL_PORT_MIN).
+            reasons.append(reason(
+                f"Listening on {laddr}:{lport} ({proto}) — ephemeral/dynamic port", None, 0))
+        elif exposed:
             common = lport.isdigit() and int(lport) in COMMON_REMOTE_PORTS
             w = 20 if common else 40
             reasons.append(reason(
@@ -10512,6 +10528,7 @@ def correlate_incidents(alerts, node_by_id, edges, proc_parent):
     # Map every correlation key to the alerts that carry it, in one pass.
     key_members = {}        # correlation key -> [alert ids]
     key_rank = {}           # correlation key -> specificity (1 = a hash, 9 = a bare path)
+    alert_keys = {}         # alert id -> set(keys)  (kept so a cluster can derive a STABLE identity)
     for a in alerts:
         d = a.get("detail") or {}
         keys = {}
@@ -10548,6 +10565,7 @@ def correlate_incidents(alerts, node_by_id, edges, proc_parent):
         pid = anchor_pid(a)
         if pid is not None:
             keys["root:%s" % _proc_root(pid, proc_parent)] = 0
+        alert_keys[a["id"]] = set(keys)
         for k, rank in keys.items():
             key_members.setdefault(k, []).append(a["id"])
             key_rank[k] = min(key_rank.get(k, 99), rank)
@@ -10587,8 +10605,26 @@ def correlate_incidents(alerts, node_by_id, edges, proc_parent):
                 if v:
                     indicators.add(v)
             types[m["type"]] = types.get(m["type"], 0) + 1
-        # a stable-ish signature from the durable member set (used to match across snapshots)
-        sig_src = "|".join(sorted(m["id"] for m in members))
+        # A signature that is STABLE across snapshots, so the same recurring cluster maps back to the
+        # same incident instead of minting a new one every cycle. The member node ids are the wrong
+        # basis for this: `proc:<pid>` dies with each exec and `listen:<pid>:<proto>:<addr>:<port>`
+        # carries an ephemeral port that rotates every snapshot, so a burst of short-lived execs or a
+        # daemon rebinding dynamic ports would share zero members between snapshots and reconcile would
+        # create a brand-new investigation each time. Instead derive identity from the correlation KEYS
+        # that actually tie the cluster together (the root process, a hash, a public IP, a URL, a run
+        # payload, a file path) — none of which embed the volatile port/pid. Prefer the most durable
+        # anchors (root ancestor / hash / IP) so a member's command line flapping in and out of the
+        # key set does not change the incident's identity.
+        mids = {m["id"] for m in members}
+        ckeys = {k for mid in mids for k in alert_keys.get(mid, ())
+                 if set(key_members.get(k, ())) <= mids}          # keys internal to this cluster only
+        anchors = sorted(k for k in ckeys if k.split(":", 1)[0] in ("root", "hash", "ip"))
+        if anchors:
+            sig_src = "|".join(anchors)
+        elif ckeys:
+            sig_src = "|".join(sorted(ckeys))
+        else:
+            sig_src = "|".join(sorted(mids))      # a lone alert with no shared key: node id is all we have
         incidents.append({
             "sig": hashlib.sha1(sig_src.encode()).hexdigest()[:16],
             "members": [m["id"] for m in members],
@@ -10803,23 +10839,41 @@ class IncidentStore:
         now = int(time.time())
         with self.lock:
             member_index = {}
+            sig_index = {}
             for iid, rec in self.data.items():
                 for m in (rec.get("members") or []):
                     member_index.setdefault(m, []).append(iid)
+                s = rec.get("sig")
+                if s:
+                    sig_index.setdefault(s, []).append(iid)
             out, used, member_to_incident = [], set(), {}
             for c in clusters:
-                cand = {}
-                for m in c["members"]:
-                    for iid in member_index.get(m, []):
-                        cand[iid] = cand.get(iid, 0) + 1
                 iid = None
-                if cand:                                    # reuse the best-overlap prior incident (tiebreak oldest)
-                    iid = sorted(cand.items(),
-                                 key=lambda kv: (-kv[1], self.data.get(kv[0], {}).get("created", now)))[0][0]
+                # First match on the cluster's STABLE signature (see correlate_incidents): this is what
+                # keeps a recurring cluster — a daemon churning ephemeral listen ports, a parent
+                # respawning short-lived children — on ONE investigation instead of minting a new one
+                # every snapshot. Member-overlap stays as the fallback for legacy incidents written
+                # before sigs were stable and for manually pinned membership.
+                csig = c.get("sig")
+                if csig:
+                    for cand_iid in sig_index.get(csig, []):
+                        if cand_iid not in used and cand_iid in self.data:
+                            iid = cand_iid
+                            break
+                if iid is None:
+                    cand = {}
+                    for m in c["members"]:
+                        for mi in member_index.get(m, []):
+                            cand[mi] = cand.get(mi, 0) + 1
+                    if cand:                                # reuse the best-overlap prior incident (tiebreak oldest)
+                        iid = sorted(cand.items(),
+                                     key=lambda kv: (-kv[1], self.data.get(kv[0], {}).get("created", now)))[0][0]
                 if iid is None or iid in used:              # new incident (or a split producing a fresh one)
                     iid = uuid.uuid4().hex[:12]
                     self.data[iid] = {"id": iid, "created": now, "status": "open"}
                     self._event(self.data[iid], "created", "Auto-created from correlated alerts")
+                if csig:
+                    self.data[iid]["sig"] = csig            # keep the incident's stable id current
                 used.add(iid)
                 self._emit(iid, self.data[iid], c, now, member_to_incident, out)
             # manual cases (or auto ones with pinned members) that no cluster matched this cycle still emit

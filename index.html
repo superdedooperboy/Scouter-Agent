@@ -2041,13 +2041,18 @@ function renderDetail(id){
             ['executable',det.path],
             ['embedded',(det.embedded&&det.embedded.length)?det.embedded.join('\n'):'']);
   } else if(n.type==='provenance'){
-    kv.push(['what',det.category==='install'?'installer-package receipt':('volume mount — '+(det.kind||''))],
+    const what=det.category==='install'?'installer-package receipt':(det.category==='download'?'download (quarantine log)':('volume mount — '+(det.kind||'')));
+    kv.push(['what',what],
             ['package id',det.pkgid],['version',det.version],
             ['installed',det.install_time?new Date(det.install_time*1000).toLocaleString():''],
             ['install path',det.install_path],['volume',det.volume],
             ['mount point',det.mountpoint],['volume name',det.volname||det.name],
             ['device',det.dev],['bus',det.bus],['filesystem',det.fstype],
             ['disk image',det.image_path],['uuid',det.uuid],['server',det.server],
+            ['downloaded by',det.agent],['source URL',det.data_url],['from page',det.origin_url],
+            ['sender',det.sender],
+            ['downloaded',det.download_time?new Date(det.download_time*1000).toLocaleString():''],
+            ['user',det.user],
             ['recent install.log',(det.log_evidence&&det.log_evidence.length)?det.log_evidence.join('\n'):'']);
   }
   html+='<div class="kv">'+kv.filter(([,v])=>v!==undefined&&v!==''&&v!==null)
@@ -3582,7 +3587,7 @@ function sensorCards(m){
   const pv=m.provenance||{};
   if(pv.enabled){
     push('Host inventory','Installs & media', 'ok', `${pv.flagged||0} flagged`,
-         `${pv.install||0} install receipt(s) · ${pv.mount||0} external mount(s) tracked`);
+         `${pv.install||0} install receipt(s) · ${pv.mount||0} external mount(s) · ${pv.download||0} download(s) tracked`);
   } else push('Host inventory','Installs & media','off','—','Disabled with --no-provenance.');
   const ra=m.raccess||{};
   if(ra.enabled){ const svc=(ra.services_on||[]).length;
@@ -3594,9 +3599,9 @@ function sensorCards(m){
        'Watching for new / hidden / uid-0 accounts.'+(root?'':' Visible users only without sudo.'));
   else push('Host inventory','Local accounts','off','—','Disabled with --no-accounts.');
   const cfg=m.config||{};
-  if(cfg.enabled){ const fw=cfg.firewall;
-    push('Host inventory','Security posture', fw==='off'?'warn':'ok', `${cfg.flagged||0} finding(s)`,
-         fw?('Firewall '+fw+(cfg.firewall_stealth?(' · stealth '+cfg.firewall_stealth):'')):'Firewall / SIP / Gatekeeper posture checks.');
+  if(cfg.enabled){ const fw=cfg.firewall; const alOn=cfg.autologin&&cfg.autologin!=='off';
+    push('Host inventory','Security posture', (fw==='off'||alOn)?'warn':'ok', `${cfg.flagged||0} finding(s)`,
+         (fw?('Firewall '+fw+(cfg.firewall_stealth?(' · stealth '+cfg.firewall_stealth):'')):'Firewall / SIP / Gatekeeper posture checks.')+(alOn?(' · auto-login '+cfg.autologin):''));
   } else push('Host inventory','Security posture','off','—','Disabled with --no-posture.');
   const sh=m.shell||{};
   if(sh.enabled) push('Host inventory','Shell history','ok', `${sh.flagged||0} flagged`,

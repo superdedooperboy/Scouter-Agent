@@ -3743,6 +3743,7 @@ function sensorCards(m){
     if(cfg.apparmor==='off') weak.push('AppArmor off');
     if(cfg.secure_boot==='off') weak.push('Secure Boot off');
     if(cfg.disk_encryption==='off') weak.push('no disk encryption');
+    if(cfg.autologin && cfg.autologin!=='off') weak.push('auto-login '+cfg.autologin);
     push('Host inventory','Security posture', weak.length?'warn':'ok', `${cfg.flagged||0} finding(s)`,
          weak.length ? ('Weakened: '+weak.join(' · '))
                      : `Firewall ${cfg.firewall||'?'}${cfg.firewall_backend?(' ('+cfg.firewall_backend+')'):''} · AppArmor ${cfg.apparmor||'?'} · Secure Boot ${cfg.secure_boot||'?'} · encryption ${cfg.disk_encryption||'?'}`);

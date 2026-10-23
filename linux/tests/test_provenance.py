@@ -142,5 +142,32 @@ class TestBaselineDiff(unittest.TestCase):
         self.assertEqual(len(pc.snapshot()), 1)
 
 
+class TestAutologin(unittest.TestCase):
+    """Automatic-login detection across GDM / LightDM / SDDM (commented defaults must not trip it)."""
+
+    def test_gdm_enabled(self):
+        conf = "[daemon]\nAutomaticLoginEnable=true\nAutomaticLogin=alice\n"
+        self.assertEqual(agent._parse_autologin_conf(conf, "GDM"), {"user": "alice"})
+
+    def test_gdm_commented_default_is_off(self):
+        conf = "[daemon]\n# AutomaticLoginEnable = true\n#  AutomaticLogin = user\n"
+        self.assertIsNone(agent._parse_autologin_conf(conf, "GDM"))
+
+    def test_lightdm_enabled(self):
+        self.assertEqual(agent._parse_autologin_conf("[Seat:*]\nautologin-user=bob\n", "LightDM"),
+                         {"user": "bob"})
+
+    def test_sddm_enabled_only_in_autologin_section(self):
+        self.assertEqual(agent._parse_autologin_conf("[Autologin]\nUser=carol\nSession=plasma\n", "SDDM"),
+                         {"user": "carol"})
+        # a User= in another section must NOT count as autologin
+        self.assertIsNone(agent._parse_autologin_conf("[X11]\nUser=notautologin\n", "SDDM"))
+
+    def test_get_autologin_disabled_without_config(self):
+        al = agent.get_autologin()          # no display-manager configs on the test host
+        self.assertIn("enabled", al)
+        self.assertFalse(al["enabled"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

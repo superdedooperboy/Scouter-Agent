@@ -94,7 +94,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.10.1"
+__version__ = "1.11.0"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -7137,10 +7137,77 @@ def get_disk_encryption_on():
     return None
 
 
+# Display-manager + console autologin config files, checked for an enabled automatic login.
+AUTOLOGIN_FILES = (
+    ("/etc/gdm3/custom.conf", "GDM"), ("/etc/gdm/custom.conf", "GDM"),
+    ("/etc/lightdm/lightdm.conf", "LightDM"), ("/etc/sddm.conf", "SDDM"),
+)
+AUTOLOGIN_DIRS = (("/etc/lightdm/lightdm.conf.d", "LightDM"), ("/etc/sddm.conf.d", "SDDM"))
+AUTOLOGIN_GETTY_DIRS = ("/etc/systemd/system/getty@tty1.service.d",
+                        "/etc/systemd/system/serial-getty@ttyS0.service.d")
+
+
+def _parse_autologin_conf(text, dm):
+    """Parse a GDM/LightDM/SDDM config for an ENABLED automatic login (commented defaults ignored).
+    Returns {user} when autologin is on, else None."""
+    if dm == "GDM":
+        if re.search(r"(?mi)^\s*AutomaticLoginEnable\s*=\s*(true|1|yes)\b", text):
+            m = re.search(r"(?mi)^\s*AutomaticLogin\s*=\s*(\S+)", text)
+            return {"user": m.group(1) if m else ""}
+    elif dm == "LightDM":
+        m = re.search(r"(?mi)^\s*autologin-user\s*=\s*(\S+)", text)
+        if m and m.group(1):
+            return {"user": m.group(1)}
+    elif dm == "SDDM":
+        section = None
+        for ln in text.splitlines():
+            s = ln.strip()
+            if s.startswith("[") and s.endswith("]"):
+                section = s[1:-1].strip().lower()
+            elif section == "autologin" and not s.startswith("#"):
+                m = re.match(r"User\s*=\s*(\S+)", s)
+                if m and m.group(1):
+                    return {"user": m.group(1)}
+    return None
+
+
+def get_autologin():
+    """Automatic-login status from the common display managers (GDM/LightDM/SDDM) and systemd getty
+    console autologin. When on, the box boots straight into a session with no password prompt,
+    weakening physical-access protection (T1552/weak auth). Returns {enabled, user, source}."""
+    files = list(AUTOLOGIN_FILES)
+    for d, dm in AUTOLOGIN_DIRS:
+        try:
+            files += [(os.path.join(d, f), dm) for f in sorted(os.listdir(d)) if f.endswith(".conf")]
+        except OSError:
+            pass
+    for path, dm in files:
+        try:
+            with open(path, "r", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        info = _parse_autologin_conf(text, dm)
+        if info:
+            return {"enabled": True, "user": info.get("user", ""), "source": dm}
+    for base in AUTOLOGIN_GETTY_DIRS:
+        try:
+            for f in sorted(os.listdir(base)):
+                if not f.endswith(".conf"):
+                    continue
+                with open(os.path.join(base, f), errors="replace") as fh:
+                    m = re.search(r"--autologin\s+(\S+)", fh.read())
+                if m:
+                    return {"enabled": True, "user": m.group(1), "source": "getty"}
+        except OSError:
+            pass
+    return {"enabled": False, "user": "", "source": ""}
+
+
 class SecurityPostureCollector:
     """Standing-state checks for disabled Linux defenses (host firewall / AppArmor /
-    Secure Boot / disk encryption). Emits a ⚙ `config` node for each weakness currently
-    present, re-evaluated each scan (no baseline — a persistent weakness keeps showing
+    Secure Boot / disk encryption / automatic login). Emits a ⚙ `config` node for each weakness
+    currently present, re-evaluated each scan (no baseline — a persistent weakness keeps showing
     until fixed or triaged closed). Full posture is exposed in `meta.config` even when
     nothing is weak."""
 
@@ -7223,6 +7290,19 @@ class SecurityPostureCollector:
                                "No LUKS/dm-crypt volume found — data at rest is not encrypted",
                                {"category": "disk_encryption", "state": "off"})
                 items[n["id"]] = n
+        al = get_autologin()
+        posture["autologin"] = ("on" + ((" (" + al["user"] + ")") if al["user"] else "")) if al["enabled"] else "off"
+        if al["enabled"]:
+            n = self._node("autologin",
+                           "Automatic login is enabled" + ((" for " + al["user"]) if al["user"] else "")
+                           + ((" (" + al["source"] + ")") if al["source"] else ""),
+                           30, "T1552.001",
+                           "Automatic login is enabled via %s — the system boots straight into a "
+                           "session without a password prompt, weakening physical-access and "
+                           "lock-screen protection" % (al["source"] or "the display manager"),
+                           {"category": "autologin", "state": "enabled", "user": al["user"],
+                            "dm": al["source"]})
+            items[n["id"]] = n
         with self.lock:
             self.items, self.posture = items, posture
 

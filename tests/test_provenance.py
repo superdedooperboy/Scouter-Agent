@@ -11,10 +11,23 @@ Run from the repo root:  python3 -m unittest discover -s tests -v
 import os
 import sys
 import tempfile
+import sqlite3
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import agent  # noqa: E402
+
+
+def make_quarantine_db(path, rows):
+    """rows: (id, mac_ts, agent_bundle, agent_name, data_url, origin_url, sender)."""
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE LSQuarantineEvent (LSQuarantineEventIdentifier TEXT PRIMARY KEY, "
+                "LSQuarantineTimeStamp REAL, LSQuarantineAgentBundleIdentifier TEXT, "
+                "LSQuarantineAgentName TEXT, LSQuarantineDataURLString TEXT, "
+                "LSQuarantineOriginURLString TEXT, LSQuarantineSenderName TEXT)")
+    con.executemany("INSERT INTO LSQuarantineEvent VALUES (?,?,?,?,?,?,?)", rows)
+    con.commit()
+    con.close()
 
 PKG_INFO = """<?xml version="1.0"?><!DOCTYPE plist><plist version="1.0"><dict>
 <key>pkg-version</key><string>3.1.4</string>
@@ -167,6 +180,72 @@ class TestBaselineDiff(unittest.TestCase):
         with _StubRun(pkgs=["com.acme.tool"], with_mounts=True):
             pc._collect()
         self.assertEqual(len(pc.snapshot()), before)
+
+
+class TestQuarantineDownloads(unittest.TestCase):
+    """Download provenance from QuarantineEventsV2: a non-browser download (malware staging) or an
+    executable from a raw-code/paste/IP source surfaces; ordinary browser downloads stay silent."""
+
+    def test_read_quarantine_events(self):
+        d = tempfile.mkdtemp(prefix="scouter-q-")
+        p = os.path.join(d, "q.sqlite")
+        make_quarantine_db(p, [("A", 0.0, "com.google.chrome", "Chrome", "https://x/y.pdf", "https://x", "")])
+        evs = agent.read_quarantine_events(p)
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0]["agent_bundle"], "com.google.chrome")
+        self.assertEqual(evs[0]["data_url"], "https://x/y.pdf")
+
+    def test_read_absent_or_bad_db_is_empty(self):
+        self.assertEqual(agent.read_quarantine_events("/no/such/path.sqlite"), [])
+        d = tempfile.mkdtemp(prefix="scouter-q-")
+        bad = os.path.join(d, "bad.sqlite")
+        open(bad, "w").write("not a database")
+        self.assertEqual(agent.read_quarantine_events(bad), [])
+
+    def _dl(self, **ev):
+        base = {"id": "i", "ts": 0, "agent_bundle": "", "agent_name": "", "data_url": "",
+                "origin_url": "", "sender": ""}
+        base.update(ev)
+        return collector()._download_node(base, "u")
+
+    def test_non_browser_download_is_medium(self):
+        n = self._dl(agent_name="osascript", data_url="http://1.2.3.4/stage.sh")
+        self.assertEqual(n["severity"], "medium")
+        self.assertTrue(any("non-browser" in r["text"] for r in n["reasons"]))
+
+    def test_browser_document_download_is_silent(self):
+        n = self._dl(agent_bundle="com.apple.safari", agent_name="Safari",
+                     data_url="https://site.example/report.pdf", origin_url="https://site.example")
+        self.assertEqual(n["severity"], "info")
+
+    def test_executable_from_raw_source_surfaces(self):
+        n = self._dl(agent_bundle="com.google.chrome", agent_name="Chrome",
+                     data_url="https://raw.githubusercontent.com/x/y/main/run.sh")
+        self.assertEqual(n["severity"], "low")       # suspicious source + executable → 30
+
+
+class TestAutologinPosture(unittest.TestCase):
+    def test_enabled_when_autologin_user_set(self):
+        orig = agent.run
+        agent.run = lambda cmd, timeout=6, env=None: (
+            (0, "alice\n", "") if cmd[:2] == ["defaults", "read"] else orig(cmd, timeout, env))
+        try:
+            al = agent.get_autologin()
+        finally:
+            agent.run = orig
+        self.assertTrue(al["enabled"])
+        self.assertEqual(al["user"], "alice")
+
+    def test_disabled_when_nothing_set(self):
+        orig = agent.run
+        agent.run = lambda cmd, timeout=6, env=None: (
+            (1, "", "") if cmd[:2] == ["defaults", "read"] else orig(cmd, timeout, env))
+        try:
+            al = agent.get_autologin()
+        finally:
+            agent.run = orig
+        # enabled only if /etc/kcpassword exists; on a normal host it does not
+        self.assertEqual(al["enabled"], os.path.exists("/etc/kcpassword"))
 
 
 if __name__ == "__main__":

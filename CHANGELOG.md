@@ -6,6 +6,25 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.11.0 / Linux agent 1.11.0 — 2026-10-23
+
+### Added
+
+**Automatic-login detection (both platforms).** A new standing-state Security-posture check flags a
+host configured for automatic login — it boots straight into a session with no password prompt
+(T1552.001 / weak physical-access posture). macOS reads `autoLoginUser` and `/etc/kcpassword` (where
+the login password is stored only XOR-obfuscated, recoverable by anyone who can read it). Linux reads
+GDM / LightDM / SDDM and systemd getty console-autologin configs (commented defaults don't trip it).
+Surfaces as a ⚙ Security-posture finding and in `meta.config`.
+
+**Download provenance from the system quarantine log (macOS).** The provenance collector now
+change-detects new entries in each user's `QuarantineEventsV2` database (a third `provenance`
+category, `download`). It surfaces the download events the Downloads-folder watcher can't: a file
+fetched by a **non-browser process** (curl / osascript / Terminal / a script — classic malware
+staging), or an executable/installer/archive pulled from a **raw-code / paste / IP-literal** source.
+Ordinary browser downloads of documents and images stay silent `info`; the stable per-event id is the
+baseline key, so re-reads never churn. (No Linux equivalent — Linux has no system quarantine log.)
+
 ## macOS agent 1.10.1 / Linux agent 1.10.1 — 2026-10-23
 
 ### Fixed

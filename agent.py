@@ -92,7 +92,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.10.1"
+__version__ = "1.11.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -319,6 +319,55 @@ INSTALL_LOG = "/var/log/install.log"                  # root-readable; best-effo
 # one from the OS — that is where a user-delivered payload enters the host.
 PROVENANCE_SUSPICIOUS_PATH_RE = re.compile(
     r"^/(tmp|private/tmp|private/var/folders|Users/[^/]+/(Downloads|Desktop|Library/Caches)|Users/Shared)(/|$)", re.I)
+# Download provenance, from the system quarantine log (QuarantineEventsV2). A new download is
+# noteworthy when it did NOT come from a normal browser (a file fetched by curl / osascript / Terminal /
+# python is a classic malware-staging step), or when it is an executable/installer/archive pulled from a
+# raw-code / paste / IP-literal source. Ordinary browser downloads of documents and images stay silent.
+QUARANTINE_DB_REL = "Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
+PROVENANCE_BROWSER_AGENTS = {
+    "com.apple.safari", "com.apple.safariviewservice", "com.google.chrome", "com.google.chrome.canary",
+    "org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "com.microsoft.edgemac",
+    "com.brave.browser", "company.thebrowser.browser", "com.operasoftware.opera", "com.vivaldi.vivaldi",
+    "org.chromium.chromium", "com.apple.appstore", "com.apple.commerce",
+}
+PROVENANCE_DL_SUSPICIOUS_URL_RE = re.compile(
+    r"(^https?://\d{1,3}(\.\d{1,3}){3}[:/]"                      # IP-literal host
+    r"|raw\.githubusercontent\.com|gist\.githubusercontent\.com"
+    r"|pastebin\.com/raw|0x0\.st|transfer\.sh|termbin\.com|file\.io|anonfiles)", re.I)
+PROVENANCE_DL_EXEC_RE = re.compile(
+    r"\.(dmg|pkg|mpkg|app|command|sh|bash|zsh|scpt|scptd|jar|pl|py|rb|php|zip|gz|tgz|bz2|xz|7z|rar"
+    r"|iso|mobileconfig|workflow|dylib|so)(\?|#|$)", re.I)
+
+
+def read_quarantine_events(path, limit=5000):
+    """Read LSQuarantineEvent rows from a QuarantineEventsV2 DB (read-only, immutable). Returns a list
+    of dicts (newest first); [] on any error (absent / locked / unreadable). Never raises."""
+    if not os.path.exists(path):
+        return []
+    con = None
+    try:
+        con = sqlite3.connect("file:%s?mode=ro&immutable=1" % path, uri=True, timeout=3)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(LSQuarantineEvent)")}
+        if "LSQuarantineEventIdentifier" not in cols:
+            return []
+        q = ("SELECT LSQuarantineEventIdentifier, LSQuarantineTimeStamp, "
+             "LSQuarantineAgentBundleIdentifier, LSQuarantineAgentName, LSQuarantineDataURLString, "
+             "LSQuarantineOriginURLString, LSQuarantineSenderName "
+             "FROM LSQuarantineEvent ORDER BY LSQuarantineTimeStamp DESC LIMIT ?")
+        out = []
+        for eid, ts, abid, aname, durl, ourl, sender in con.execute(q, (limit,)):
+            out.append({"id": eid or "", "ts": (float(ts) + 978307200) if ts else 0,
+                        "agent_bundle": (abid or "").lower(), "agent_name": aname or "",
+                        "data_url": durl or "", "origin_url": ourl or "", "sender": sender or ""})
+        return out
+    except (sqlite3.Error, ValueError):
+        return []
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except sqlite3.Error:
+                pass
 
 # Privacy permissions (Transparency, Consent & Control). A newly-*allowed* grant for
 # a sensitive service is a strong signal — malware self-authorizes Accessibility /
@@ -6222,7 +6271,7 @@ class ProvenanceCollector:
         self.baseline_file = baseline_file
         self.lock = threading.Lock()
         self.flagged = {}                 # nid -> (first_flagged_ts, node)
-        self.counts = {"install": 0, "mount": 0}
+        self.counts = {"install": 0, "mount": 0, "download": 0}
         self.baseline = set()
         self.learn_only = True
         self.started = False
@@ -6351,9 +6400,40 @@ class ProvenanceCollector:
         detail.update(extra)
         return key, self._node(key, "mount: %s" % name, sum(r["weight"] for r in reasons), reasons, detail)
 
+    # ---- downloads (system quarantine log) --------------------------------
+    def _download_node(self, ev, user):
+        agent_b, aname, url = ev["agent_bundle"], ev["agent_name"], ev["data_url"]
+        is_browser = agent_b in PROVENANCE_BROWSER_AGENTS or (
+            not agent_b and aname.lower() in ("safari", "google chrome", "chrome", "firefox",
+                                              "microsoft edge", "brave", "opera", "arc"))
+        exec_like = bool(PROVENANCE_DL_EXEC_RE.search(url))
+        susp_url = bool(PROVENANCE_DL_SUSPICIOUS_URL_RE.search(url))
+        reasons = []
+        if not is_browser and (aname or agent_b):
+            reasons.append(reason("File downloaded by a non-browser process (%s)%s" % (
+                aname or agent_b, (" — " + url[:120]) if url else ""), "T1105", 40))
+            if exec_like:
+                reasons.append(reason("Downloaded file is an executable / installer / archive",
+                                      "T1204.002", 15))
+        elif susp_url and exec_like:
+            reasons.append(reason("Executable/archive downloaded from a raw-code / paste / IP source: %s"
+                                  % url[:120], "T1105", 30))
+        elif susp_url:
+            reasons.append(reason("Download from a raw-code / paste / IP source: %s" % url[:120],
+                                  "T1105", 20))
+        else:
+            reasons.append(reason("Downloaded via %s" % (aname or "browser"), None, 0))   # benign → info
+        m = re.match(r"https?://([^/]+)", url)
+        host = m.group(1) if m else (url[:40] if url else (aname or "download"))
+        detail = {"category": "download", "agent": aname or agent_b, "agent_bundle": agent_b,
+                  "data_url": url, "origin_url": ev["origin_url"], "sender": ev["sender"],
+                  "download_time": int(ev["ts"]) or None, "user": user}
+        return self._node("download|%s" % ev["id"], "download: %s" % host,
+                          sum(r["weight"] for r in reasons), reasons, detail)
+
     # ---- discovery + main pass -------------------------------------------
     def _discover(self):
-        found, counts = {}, {"install": 0, "mount": 0}
+        found, counts = {}, {"install": 0, "mount": 0, "download": 0}
 
         rc, out, _ = run(["pkgutil", "--pkgs"], timeout=20)
         if rc == 0 and out:
@@ -6379,6 +6459,29 @@ class ProvenanceCollector:
                     continue
                 counts["mount"] += 1
                 found[key] = node
+
+        # Downloads from the system quarantine log, per user (root sees every home). The stable
+        # per-event id is the baseline key, so re-reads never churn.
+        homes = set()
+        try:
+            homes = {os.path.join("/Users", u) for u in os.listdir("/Users") if not u.startswith(".")}
+        except OSError:
+            pass
+        homes.add(os.path.expanduser("~"))
+        for home in sorted(homes):
+            db = os.path.join(home, QUARANTINE_DB_REL)
+            if not os.path.exists(db):
+                continue
+            user = os.path.basename(home.rstrip("/")) or home
+            for ev in read_quarantine_events(db):
+                if not ev["id"]:
+                    continue
+                key = "download|%s" % ev["id"]
+                counts["download"] += 1
+                if self.learn_only or key in self.baseline:
+                    found[key] = None
+                else:
+                    found[key] = self._download_node(ev, user)
 
         return found, counts, []
 
@@ -7001,6 +7104,19 @@ def get_filevault_on():
     return "off" not in out.lower()
 
 
+def get_autologin():
+    """Automatic-login status. When on, the Mac boots straight into a session with no login prompt,
+    and the account's login password is stored — only XOR-obfuscated — in /etc/kcpassword, where
+    anyone who can read the file can recover it (T1552.001). Returns {enabled, user, kcpassword}."""
+    user = ""
+    rc, out, _ = run(["defaults", "read", "/Library/Preferences/com.apple.loginwindow",
+                      "autoLoginUser"], timeout=6)
+    if rc == 0 and out.strip():
+        user = out.strip()
+    kc = os.path.exists("/etc/kcpassword")
+    return {"enabled": bool(user) or kc, "user": user, "kcpassword": kc}
+
+
 class SecurityPostureCollector:
     """Standing-state checks for disabled macOS defenses (firewall / SIP / Gatekeeper /
     FileVault). Emits a ⚙ `config` node for each weakness currently present, re-evaluated
@@ -7081,6 +7197,18 @@ class SecurityPostureCollector:
                                "FileVault is off — data at rest is not encrypted",
                                {"category": "filevault", "state": "off"})
                 items[n["id"]] = n
+        al = get_autologin()
+        posture["autologin"] = ("on" + ((" (" + al["user"] + ")") if al["user"] else "")) if al["enabled"] else "off"
+        if al["enabled"]:
+            n = self._node("autologin",
+                           "Automatic login is enabled" + ((" for " + al["user"]) if al["user"] else ""),
+                           35, "T1552.001",
+                           "Automatic login is enabled — the Mac boots straight into a session without "
+                           "the login password, and that password is stored (only XOR-obfuscated) in "
+                           "/etc/kcpassword, where anyone who can read the file can recover it",
+                           {"category": "autologin", "state": "enabled", "user": al["user"],
+                            "kcpassword": al["kcpassword"]})
+            items[n["id"]] = n
         with self.lock:
             self.items, self.posture = items, posture
 

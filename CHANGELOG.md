@@ -6,6 +6,20 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.9.4 / Linux agent 1.9.4 — 2026-10-23
+
+### Changed
+
+**`b-lin-server-shell` now covers the Node runtime family (node, deno, bun).** A shell spawned by an
+internet-facing service is one of the highest-fidelity RCE/webshell signals there is, but the two
+agents' ancestry lists had drifted — macOS already listed `node`, Linux did not, which is backwards
+from where Node web apps actually run. Both agents now include `node`, `deno` and `bun`, so a Node app
+RCE that lands a shell — Node2Shell (CVE-2026-111497, the out-of-bounds write in Node's bundled Brotli
+decoder) or any other — is caught exactly as a PHP2Shell shell is. The exploit itself is in-process
+memory corruption with no host-level IOCs; this catches the post-exploitation shell. No new collector,
+no network indicators. The Mesh refreshes the broadened rule automatically on its next reconcile via
+the stored `factory_sig` (unedited copies only; operator-tuned rules are left alone).
+
 ## macOS agent 1.9.3 / Linux agent 1.9.3 — 2026-10-22
 
 ### Fixed

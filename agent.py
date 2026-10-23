@@ -92,7 +92,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.9.3"
+__version__ = "1.9.4"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -743,7 +743,7 @@ BUILTIN_RULES = [
        [_c("ancestry", "regex", r"(Safari|Google Chrome|Firefox|Microsoft Edge|Brave Browser|Opera|Preview|Mail|Microsoft Word|Microsoft Excel|Microsoft PowerPoint|Adobe Acrobat|Slack|Discord|zoom\.us)"),
         _c("label", "regex", r"^(sh|bash|zsh|dash|ksh|python3?(\.\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$")], match="all"),
     _b("b-lin-server-shell", "Shell spawned by an internet-facing service (possible webshell/RCE)", "critical", "T1505.003",
-       [_c("ancestry", "regex", r"(httpd|nginx|apache2?|tomcat|java|node|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|postgres|mysqld)"),
+       [_c("ancestry", "regex", r"(httpd|nginx|apache2?|tomcat|java|node|deno|bun|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|postgres|mysqld)"),
         _c("label", "regex", r"^(sh|bash|zsh|dash|ksh|python3?(\.\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$")], match="all"),
     _b("b-litellm-c2", "LiteLLM supply-chain C2 indicator in command line", "critical", "T1195.002",
        [_c("cmdline", "regex", r"(letters9813/pythonclient-test|remote_code_loader\.lock|/codepy(\b|$)|www\.litellm\.dev)")]),
@@ -1141,7 +1141,9 @@ _BUILTIN_DESC = {
         "database). This is the signature of a webshell or successful remote code execution against that service, and "
         "is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells. Covers the "
         "PHP web-worker set (php-fpm, php-cgi, FrankenPHP, LiteSpeed, and mod_php via apache/httpd), so a PHP2Shell "
-        "(CVE-2026-109618 / CVE-2026-109619) RCE that lands a shell is caught here.",
+        "(CVE-2026-109618 / CVE-2026-109619) RCE that lands a shell is caught here. The Node runtime family (node, "
+        "deno, bun) is covered too, so a Node2Shell (CVE-2026-111497) or any Node app RCE that spawns a shell is "
+        "caught the same way.",
     "b-litellm-c2": "A command line referencing the litellm 1.107.0 supply-chain backdoor's indicators \u2014 its "
         "GitHub dead-drop (letters9813/pythonclient-test), the /codepy payload endpoint, the /tmp/remote_code_loader.lock "
         "marker, or the lookalike exfiltration domain www.litellm.dev. The backdoor runs in-process at Python startup, so "

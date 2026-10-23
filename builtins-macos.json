@@ -2220,7 +2220,7 @@
     {
      "field": "ancestry",
      "op": "regex",
-     "value": "(httpd|nginx|apache2?|tomcat|java|node|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|postgres|mysqld)"
+     "value": "(httpd|nginx|apache2?|tomcat|java|node|deno|bun|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|postgres|mysqld)"
     },
     {
      "field": "label",
@@ -2228,7 +2228,7 @@
      "value": "^(sh|bash|zsh|dash|ksh|python3?(\\.\\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$"
     }
    ],
-   "description": "A shell or interpreter spawned by an internet-facing service (web server, app server, database). This is the signature of a webshell or successful remote code execution against that service, and is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells. Covers the PHP web-worker set (php-fpm, php-cgi, FrankenPHP, LiteSpeed, and mod_php via apache/httpd), so a PHP2Shell (CVE-2026-109618 / CVE-2026-109619) RCE that lands a shell is caught here.",
+   "description": "A shell or interpreter spawned by an internet-facing service (web server, app server, database). This is the signature of a webshell or successful remote code execution against that service, and is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells. Covers the PHP web-worker set (php-fpm, php-cgi, FrankenPHP, LiteSpeed, and mod_php via apache/httpd), so a PHP2Shell (CVE-2026-109618 / CVE-2026-109619) RCE that lands a shell is caught here. The Node runtime family (node, deno, bun) is covered too, so a Node2Shell (CVE-2026-111497) or any Node app RCE that spawns a shell is caught the same way.",
    "confidence": 4,
    "confidence_label": "certain"
   },

@@ -4009,8 +4009,11 @@ function advHuntDraw(){
     h+='<div class="hint" style="margin:4px 0 7px">'+esc(a.summary||'')+
        (a.references&&a.references.length?(' <a href="'+esc(a.references[0])+'" target="_blank" rel="noopener" style="color:var(--accent)">advisory ↗</a>'):'')+'</div>';
     (a.hunts||[]).forEach(function(hn,i){
-      h+='<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0;border-top:1px solid var(--line)">'+
-         '<button class="btn" style="font-size:11px;padding:2px 9px;flex:none" onclick="advHuntRun(\''+esc(a.id)+'\','+i+')">▶ Run</button>'+
+      h+='<div style="display:flex;gap:6px;align-items:baseline;padding:3px 0;border-top:1px solid var(--line)">'+
+         '<span style="flex:none;display:flex;gap:4px">'+
+         '<button class="btn" style="font-size:11px;padding:2px 9px" title="Run against this host’s recorded history (SQL)" onclick="advHuntRun(\''+esc(a.id)+'\','+i+')">▶ SQL</button>'+
+         (hn.vql?'<button class="btn" style="font-size:11px;padding:2px 9px" title="Run live on this Mac through Velociraptor (VQL)" onclick="advHuntRunVql(\''+esc(a.id)+'\','+i+')">🦖 VQL</button>':'')+
+         '</span>'+
          '<div><div style="font-size:12.5px;font-weight:600">'+esc(hn.name)+'</div>'+
          '<div class="hint" style="margin:0">'+esc(hn.why||'')+'</div></div></div>';
     });
@@ -4024,9 +4027,17 @@ function advHuntDraw(){
 function advHuntRun(aid,i){
   var a=(ADVHUNTS.advisories||[]).filter(function(x){return x.id===aid;})[0]; if(!a) return;
   var hn=(a.hunts||[])[i]; if(!hn) return;
+  if(typeof huntMode==='function') huntMode('sql');
   var ta=document.getElementById('huntSql'); if(ta) ta.value=hn.sql;
   runHunt();
   var meta=document.getElementById('huntMeta'); if(meta) meta.textContent='history DB · '+a.title.split(' — ')[0]+': '+hn.name;
+}
+function advHuntRunVql(aid,i){
+  var a=(ADVHUNTS.advisories||[]).filter(function(x){return x.id===aid;})[0]; if(!a) return;
+  var hn=(a.hunts||[])[i]; if(!hn||!hn.vql) return;
+  if(typeof huntMode==='function') huntMode('vql');
+  var ta=document.getElementById('vqlText'); if(ta) ta.value=hn.vql;
+  runVql();
 }
 function advHuntPost(op,aid){
   return fetch('/api/advisory-hunts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:op,id:aid||''})})

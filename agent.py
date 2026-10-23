@@ -4727,7 +4727,11 @@ ADVISORY_HUNTS = [
                     "WHERE lower(name) IN ('php','php-fpm','php-cgi','lsphp','frankenphp')\n"
                     "   OR lower(exe) LIKE '%/php' OR lower(exe) LIKE '%/php-fpm%'\n"
                     "   OR lower(exe) LIKE '%/php-cgi%' OR lower(exe) LIKE '%/frankenphp%' OR lower(exe) LIKE '%/lsphp%'\n"
-                    "ORDER BY last_seen DESC"},
+                    "ORDER BY last_seen DESC",
+             "vql": "SELECT Pid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                    "WHERE Name =~ '(?i)^(php|php-fpm|php-cgi|lsphp|frankenphp)$'\n"
+                    "   OR Exe =~ '(?i)/(php|php-fpm|php-cgi|frankenphp|lsphp)'\n"
+                    "LIMIT 200"},
             {"name": "A PHP worker that spawned a shell (possible RCE)",
              "why": "The highest-fidelity php2shell exploitation signal — a web worker should never spawn a shell or interpreter.",
              "sql": "SELECT name, exe, cmdline, user, ppid_name,\n"
@@ -4737,14 +4741,27 @@ ADVISORY_HUNTS = [
                     "       OR lower(ppid_name) IN ('php','lsphp','frankenphp','httpd','apache','apache2','nginx'))\n"
                     "  AND lower(name) IN ('sh','bash','zsh','dash','ksh','python','python3','perl','ruby',\n"
                     "                      'curl','wget','nc','ncat','socat','id','whoami','uname')\n"
-                    "ORDER BY last_seen DESC"},
+                    "ORDER BY last_seen DESC",
+             "vql": "-- a web/app-server process (parent) that spawned a shell/interpreter (child)\n"
+                    "SELECT * FROM foreach(\n"
+                    "  row={ SELECT Pid AS ChildPid, Name AS ChildName, Username AS ChildUser,\n"
+                    "               CommandLine AS ChildCmd, Ppid AS ChildPpid FROM pslist()\n"
+                    "        WHERE Name =~ '(?i)^(sh|bash|zsh|dash|ksh|python3?|perl|ruby|curl|wget|nc|ncat|socat|id|whoami|uname)$' },\n"
+                    "  query={ SELECT ChildPid, ChildName, ChildUser, ChildCmd, Pid AS ParentPid, Name AS ParentName\n"
+                    "          FROM pslist()\n"
+                    "          WHERE Pid = ChildPpid\n"
+                    "            AND Name =~ '(?i)(php-fpm|php-cgi|php|lsphp|frankenphp|httpd|apache|nginx)' })\n"
+                    "LIMIT 200"},
             {"name": "Outbound connections from PHP workers",
              "why": "A webshell often calls out — a PHP worker talking to the public internet is worth a look.",
              "sql": "SELECT proc_name, exe, raddr, rport, asorg, country,\n"
                     "       datetime(last_seen,'unixepoch','localtime') AS last_seen\n"
                     "FROM connections\n"
                     "WHERE (lower(proc_name) LIKE '%php%' OR lower(exe) LIKE '%/php%') AND public=1\n"
-                    "ORDER BY last_seen DESC"},
+                    "ORDER BY last_seen DESC",
+             "vql": "SELECT Pid, Name, Username, Status, Laddr, Raddr FROM netstat()\n"
+                    "WHERE Name =~ '(?i)php' AND Status =~ '(?i)ESTAB'\n"
+                    "LIMIT 200"},
         ],
     },
     {
@@ -4765,7 +4782,10 @@ ADVISORY_HUNTS = [
                     "SELECT 'executed' AS seen, '' AS name, exe, cmdline,\n"
                     "       datetime(ts,'unixepoch','localtime') AS t\n"
                     "FROM exec_events WHERE lower(cmdline) LIKE '%litellm%' OR lower(exe) LIKE '%litellm%'\n"
-                    "ORDER BY t DESC"},
+                    "ORDER BY t DESC",
+             "vql": "SELECT Pid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                    "WHERE CommandLine =~ '(?i)litellm' OR Exe =~ '(?i)litellm'\n"
+                    "LIMIT 200"},
             {"name": "Backdoor artifacts on disk (lock file, cook.pth)",
              "why": "The /tmp/remote_code_loader.lock daemon marker and the cook.pth / cook.py / sitecustomize.py loaders.",
              "sql": "SELECT 'on disk' AS seen, path,\n"
@@ -4776,7 +4796,18 @@ ADVISORY_HUNTS = [
                     "SELECT 'file event' AS seen, path,\n"
                     "       datetime(ts,'unixepoch','localtime') AS t\n"
                     "FROM file_events WHERE path LIKE '%remote_code_loader%' OR path LIKE '%/cook.pth'\n"
-                    "ORDER BY t DESC"},
+                    "ORDER BY t DESC",
+             "vql": "-- the daemon lock marker (cheap) plus the loader files in the usual Python dirs\n"
+                    "SELECT OSPath, Name, Size, Mtime FROM glob(globs=[\n"
+                    "  '/tmp/remote_code_loader.lock', '/private/tmp/remote_code_loader.lock',\n"
+                    "  '/private/var/folders/**/remote_code_loader.lock',\n"
+                    "  '/Users/*/Library/Python/**/cook.pth', '/Users/*/Library/Python/**/cook.py',\n"
+                    "  '/Users/*/Library/Python/**/sitecustomize.py',\n"
+                    "  '/usr/local/lib/python*/site-packages/cook.pth',\n"
+                    "  '/opt/homebrew/lib/python*/site-packages/cook.pth',\n"
+                    "  '/Library/Python/*/site-packages/cook.pth'])\n"
+                    "WHERE NOT IsDir\n"
+                    "LIMIT 200"},
             {"name": "C2 / loader indicators in recent executions",
              "why": "The GitHub dead-drop (letters9813/pythonclient-test), the /codepy payload endpoint, the lock file, the lookalike domain.",
              "sql": "SELECT datetime(ts,'unixepoch','localtime') AS t, exe, cmdline\n"
@@ -4784,7 +4815,10 @@ ADVISORY_HUNTS = [
                     "WHERE lower(cmdline) LIKE '%letters9813%' OR lower(cmdline) LIKE '%pythonclient-test%'\n"
                     "   OR lower(cmdline) LIKE '%remote_code_loader%' OR lower(cmdline) LIKE '%litellm.dev%'\n"
                     "   OR lower(cmdline) LIKE '%/codepy%'\n"
-                    "ORDER BY t DESC"},
+                    "ORDER BY t DESC",
+             "vql": "SELECT Pid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                    "WHERE CommandLine =~ '(?i)(letters9813|pythonclient-test|remote_code_loader|litellm\\.dev|/codepy)'\n"
+                    "LIMIT 200"},
         ],
     },
 ]
@@ -15298,6 +15332,56 @@ def autohunt_sql(kind, value):
                 "ORDER BY last_seen DESC LIMIT %d" % (v, v, v, v, v, v, AUTOHUNT_ROWCAP))
     return None
 
+
+# --- VQL (Velociraptor) twins of the auto-hunts. The SQL asks Scouter's recorded HISTORY "where has
+#     this indicator been seen"; the VQL asks the LIVE system (via Velociraptor's own plugins) "is it
+#     here / running right now". Same indicator, the other lens — run locally on this Mac through
+#     `velociraptor query`, or wrapped to fan out across the fleet from the Mesh. ---
+def _vqlstr(s):
+    """A safe single-quoted VQL string literal (backslash + quote escaped)."""
+    return "'" + str(s).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _vqlrx(s):
+    """A case-insensitive VQL regex literal matching `s` as a LITERAL substring (metachars escaped)."""
+    return _vqlstr("(?i)" + re.escape(str(s)))
+
+
+# Live locations a dropped payload is likely to sit — a bounded glob for the hash sweep (macOS).
+VQL_DROP_GLOBS = ("/tmp/**", "/private/tmp/**", "/var/tmp/**", "/Users/*/Downloads/**",
+                  "/Users/*/Desktop/**", "/Users/*/Library/Caches/**", "/Users/Shared/**",
+                  "/private/var/folders/**")
+
+
+def _vql_globs_literal(globs):
+    return "[" + ", ".join(_vqlstr(g) for g in globs) + "]"
+
+
+def autohunt_vql(kind, value):
+    """The VQL twin of autohunt_sql(): hunt the LIVE host for one indicator with Velociraptor plugins.
+    None for an unknown kind, mirroring autohunt_sql."""
+    if kind in ("sha256", "md5"):
+        col = "SHA256" if kind == "sha256" else "MD5"
+        return ("SELECT OSPath, Name, Size, Mtime, hash(path=OSPath).%s AS %s\n"
+                "FROM glob(globs=%s)\n"
+                "WHERE NOT IsDir AND %s =~ %s\n"
+                "LIMIT %d" % (col, col, _vql_globs_literal(VQL_DROP_GLOBS), col,
+                              _vqlstr("(?i)" + re.escape(str(value))), AUTOHUNT_ROWCAP))
+    if kind == "ip":
+        return ("SELECT Pid, Name, Username, Status, Laddr, Raddr FROM netstat()\n"
+                "WHERE Raddr.IP = %s OR Laddr.IP = %s\n"
+                "LIMIT %d" % (_vqlstr(value), _vqlstr(value), AUTOHUNT_ROWCAP))
+    if kind in ("domain", "url", "cmdline"):
+        return ("SELECT Pid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                "WHERE CommandLine =~ %s\n"
+                "LIMIT %d" % (_vqlrx(value), AUTOHUNT_ROWCAP))
+    if kind == "path":
+        return ("SELECT Pid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                "WHERE Exe = %s\n"
+                "LIMIT %d" % (_vqlstr(value), AUTOHUNT_ROWCAP))
+    return None
+
+
 class AutoHuntStore:
     """The hunts raised by validated alerts, with what they found. Small on purpose: this is the
     analyst's follow-up list, and a list nobody can read to the bottom of is not a list."""
@@ -15387,7 +15471,8 @@ def autohunt_on_validated(cache, node_id, ntype, detail, label="", by="analyst")
             "kind": ioc["kind"], "value": ioc["value"], "why": ioc["label"],
             "title": ioc.get("title") or ("Where else has this %s been seen?" % ioc["kind"]),
             "rank": ioc.get("rank", 9),
-            "sql": sql, "ok": bool(res.get("ok")), "error": res.get("error"),
+            "sql": sql, "vql": autohunt_vql(ioc["kind"], ioc["value"]),
+            "ok": bool(res.get("ok")), "error": res.get("error"),
             "hits": len(rows), "columns": res.get("columns") or [],
             "rows": rows[:50],
         })

@@ -10,6 +10,19 @@ agents, versioned independently.
 
 ### Added
 
+**VQL (Velociraptor) twins for the auto-hunts and advisory hunts.** Both hunt families were
+SQL-only — they query Scouter's recorded history. Each now also carries a VQL query that hunts the
+**live** system through Velociraptor's own plugins (`pslist()`, `netstat()`, `glob()`+`hash()`), the
+complementary lens: the SQL asks "where has this been seen", the VQL asks "is it here / running now".
+- Advisory hunts (PHP2Shell, LiteLLM): every hunt gets a hand-written VQL twin; the Hunt-tab panel now
+  shows a **▶ SQL** and a **🦖 VQL** button per hunt (VQL runs locally via the existing Velociraptor
+  runner).
+- Auto-hunts (raised when an alert is validated malicious): a new `autohunt_vql(kind, value)` mirrors
+  `autohunt_sql` for every indicator kind (hash / ip / domain / url / cmdline / path), and the VQL is
+  stored on each hunt record alongside the SQL. IOC values are regex- and string-escaped so an
+  attacker-controlled value can't break out of the VQL literal.
+  (Fleet-wide VQL in the Mesh console — `foreach(clients())` — is a separate follow-up.)
+
 **Automatic-login detection (both platforms).** A new standing-state Security-posture check flags a
 host configured for automatic login — it boots straight into a session with no password prompt
 (T1552.001 / weak physical-access posture). macOS reads `autoLoginUser` and `/etc/kcpassword` (where

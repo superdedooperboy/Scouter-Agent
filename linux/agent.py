@@ -94,7 +94,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.9.4"
+__version__ = "1.10.0"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -310,6 +310,25 @@ PERSIST_BASELINE_FILE = os.path.join(HERE, "persist-baseline.json")
 PERSIST_SUSPICIOUS_PATH_RE = re.compile(
     r"^/tmp/|^/var/tmp/|^/dev/shm/|/\.[^/]+/|^/home/[^/]+/\.cache/", re.I)
 
+# Provenance — where software and volumes ENTER the host. Two change-detected surfaces: (1) installed
+# OS packages, i.e. install history (T1195) — a newly-appearing dpkg/rpm/apk package NAME (not an
+# upgrade), enriched best-effort from /var/log/dpkg.log; (2) removable / loop-backed (disk image) /
+# network volume mounts — USB (T1052/T1091), disk images, and network shares (T1021). Baseline-diff
+# like persistence: what is present on first run is silent; a new package or mount flags once.
+PROVENANCE_NODE_TTL = 24 * 3600
+PROVENANCE_BASELINE_FILE = os.path.join(HERE, "provenance-baseline.json")
+DPKG_LOG = "/var/log/dpkg.log"                        # world-readable; best-effort recent-event enrichment
+# A disk image or removable volume whose backing file sits in a user/temp area carries more weight.
+PROVENANCE_SUSPICIOUS_PATH_RE = re.compile(
+    r"^/(tmp|var/tmp|dev/shm|home/[^/]+/(Downloads|Desktop|\.cache)|root/(Downloads|Desktop))(/|$)", re.I)
+# Pseudo / virtual filesystems that are never "media entering the host".
+PROVENANCE_PSEUDO_FS = {
+    "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2", "pstore", "bpf", "tracefs",
+    "debugfs", "securityfs", "mqueue", "hugetlbfs", "fusectl", "configfs", "ramfs", "autofs",
+    "binfmt_misc", "rpc_pipefs", "nsfs", "overlay", "squashfs", "efivarfs", "selinuxfs"}
+PROVENANCE_NET_FS = {"nfs", "nfs4", "cifs", "smb3", "smbfs", "afs", "ceph", "glusterfs",
+                     "fuse.sshfs", "fuse.davfs", "9p"}
+
 # XDG autostart + shell-init + linker persistence loci.
 AUTOSTART_DIRS = [os.path.expanduser("~/.config/autostart"), "/etc/xdg/autostart"]
 LD_PRELOAD_FILE = "/etc/ld.so.preload"
@@ -456,6 +475,8 @@ RULE_FIELD_HINTS = {
     "account": ["category", "user", "uid", "shell", "home", "group", "rule", "nopasswd"],
     "config": ["category", "state"],
     "shell": ["user", "command", "matched", "file"],
+    "provenance": ["category", "pkgid", "version", "manager", "kind", "name", "mountpoint",
+                   "tran", "fstype", "image_path", "uuid", "label"],
 }
 # Starter rules seeded into rules.json on first run so the Detections tab isn't empty.
 # High-precision ones ship ENABLED; broader / parameterised ones ship DISABLED as
@@ -6272,6 +6293,265 @@ def read_tcc_db(path):
                 con.close()
             except sqlite3.Error:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Provenance: install history (dpkg/rpm/apk + /var/log/dpkg.log) and volume mounts
+# (removable/USB, loop-backed disk images, network shares). All read-only, no root required.
+# ---------------------------------------------------------------------------
+
+def _prov_truthy(v):
+    return v in (True, 1) or (isinstance(v, str) and v.strip().lower() in ("1", "true", "yes"))
+
+
+def parse_proc_mounts(text):
+    """Parse /proc/mounts into [{dev, mountpoint, fstype, opts}], un-escaping octal \\040 etc."""
+    def unesc(s):
+        return (s.replace("\\040", " ").replace("\\011", "\t")
+                 .replace("\\012", "\n").replace("\\134", "\\"))
+    out = []
+    for ln in (text or "").splitlines():
+        p = ln.split(" ")
+        if len(p) < 3:
+            continue
+        out.append({"dev": unesc(p[0]), "mountpoint": unesc(p[1]), "fstype": p[2],
+                    "opts": (p[3].split(",") if len(p) > 3 else [])})
+    return out
+
+
+def parse_lsblk_json(text):
+    """Map mountpoint -> {tran, rm, hotplug, uuid, label, type, fstype} from `lsblk -J`. A partition
+    inherits its parent disk's transport/removable/hotplug flags (lsblk reports them on the disk)."""
+    try:
+        d = json.loads(text or "")
+    except (ValueError, TypeError):
+        return {}
+    out = {}
+
+    def walk(node, inh):
+        tran = (node.get("tran") or inh.get("tran") or "").lower()
+        rm = _prov_truthy(node.get("rm")) or inh.get("rm", False)
+        hot = _prov_truthy(node.get("hotplug")) or inh.get("hotplug", False)
+        cur = {"tran": tran, "rm": rm, "hotplug": hot}
+        mps = node.get("mountpoints") or ([node.get("mountpoint")] if node.get("mountpoint") else [])
+        info = dict(cur, uuid=node.get("uuid") or "", label=node.get("label") or "",
+                    type=node.get("type") or "", fstype=node.get("fstype") or "")
+        for mp in mps:
+            if mp:
+                out[mp] = info
+        for c in (node.get("children") or []):
+            walk(c, cur)
+
+    for n in (d.get("blockdevices") or []) if isinstance(d, dict) else []:
+        walk(n, {})
+    return out
+
+
+def parse_losetup(text):
+    """Map loop device -> backing file from `losetup -nO NAME,BACK-FILE`."""
+    out = {}
+    for ln in (text or "").splitlines():
+        p = ln.split()
+        if len(p) >= 2 and p[0].startswith("/dev/loop"):
+            out[p[0]] = p[1]
+    return out
+
+
+def parse_dpkg_log(text, cap=25):
+    """Most recent install/upgrade event lines from /var/log/dpkg.log (best-effort enrichment)."""
+    hits = [ln.strip() for ln in (text or "").splitlines() if " install " in (" " + ln + " ")]
+    return hits[-cap:]
+
+
+class ProvenanceCollector:
+    """Baseline-diff over how software and volumes ENTER the host. First run records what's present
+    (silent → provenance-baseline.json); afterwards a newly-appearing installed package NAME (T1195) or
+    a removable / loop-backed / network mount (T1052 / T1091 / T1021) is flagged once and kept ~24h.
+    Deliberately keyed on package NAME, so routine `apt upgrade` version bumps (same name) stay silent
+    and only genuinely new software surfaces; snap squashfs loop mounts and internal fixed disks are
+    ignored. `summary()` exposes the surface size. Read-only, no root required."""
+
+    def __init__(self, enabled=True, interval=600, baseline_file=PROVENANCE_BASELINE_FILE):
+        self.enabled = enabled
+        self.interval = max(60, interval)
+        self.baseline_file = baseline_file
+        self.lock = threading.Lock()
+        self.flagged = {}                 # nid -> (first_flagged_ts, node)
+        self.counts = {"install": 0, "mount": 0}
+        self.baseline = set()
+        self.learn_only = True
+        self.started = False
+        self._load_baseline()
+
+    def _load_baseline(self):
+        try:
+            with open(self.baseline_file) as f:
+                d = json.load(f)
+            if isinstance(d, dict) and isinstance(d.get("keys"), list):
+                self.baseline = set(d["keys"])
+                self.learn_only = not self.baseline
+        except (OSError, ValueError):
+            self.baseline = set()
+
+    def _save_baseline(self):
+        try:
+            tmp = self.baseline_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"keys": sorted(self.baseline), "updated": int(time.time())}, f)
+            os.replace(tmp, self.baseline_file)
+        except OSError:
+            pass
+
+    def start(self):
+        if not self.enabled or self.started:
+            return
+        self.started = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                self._collect()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(self.interval)
+
+    def snapshot(self):
+        with self.lock:
+            return [item for _, item in self.flagged.values()]
+
+    def summary(self):
+        with self.lock:
+            return {"enabled": True, **self.counts, "flagged": len(self.flagged)}
+
+    @staticmethod
+    def _node(key, label, score, reasons, detail):
+        return {"id": "provenance:" + key, "type": "provenance", "label": label,
+                "score": min(score, 100), "severity": severity_for(min(score, 100)),
+                "reasons": reasons, "detail": detail}
+
+    # ---- install history ---------------------------------------------------
+    def _recent_dpkg_log(self):
+        try:
+            with open(DPKG_LOG, "r", errors="replace") as f:
+                try:
+                    f.seek(0, os.SEEK_END)
+                    f.seek(max(0, f.tell() - 200000))
+                except OSError:
+                    pass
+                text = f.read()
+        except OSError:
+            return []
+        return parse_dpkg_log(text)
+
+    def _install_node(self, key, pkg, kind, recent_log):
+        name = pkg.get("name") or ""
+        ver = pkg.get("version") or ""
+        base = 20
+        reasons = [reason("New %s package installed: %s%s" % (kind, name, (" " + ver) if ver else ""),
+                          "T1195", base)]
+        ev = [ln for ln in recent_log if name and name.lower() in ln.lower()][:3]
+        detail = {"category": "install", "pkgid": name, "version": ver, "manager": kind,
+                  "log_evidence": ev}
+        return self._node(key, "pkg: %s" % name, base, reasons, detail)
+
+    # ---- volume mounts -----------------------------------------------------
+    def _mount_node(self, mnt, lsblk, loops):
+        dev, mp, fstype = mnt["dev"], mnt["mountpoint"], (mnt["fstype"] or "")
+        if fstype in PROVENANCE_PSEUDO_FS:
+            return None, None
+        name = os.path.basename(mp.rstrip("/")) or mp
+        extra = {}
+        if fstype in PROVENANCE_NET_FS:
+            kind, mitre, base = "Network share", "T1021", 25
+            key = "mount|net|%s" % dev
+            extra = {"server": dev}
+        elif dev.startswith("/dev/loop"):
+            if mp.startswith(("/snap/", "/var/lib/snapd/")) or fstype == "squashfs":
+                return None, None                        # snap package loop, not media
+            back = loops.get(dev, "")
+            kind, mitre, base = "Disk image", "T1204.002", 25
+            key = "mount|img|%s" % (back or name)
+            extra = {"image_path": back}
+            if back and PROVENANCE_SUSPICIOUS_PATH_RE.search(back):
+                base += 15
+        elif dev.startswith("/dev/"):
+            info = lsblk.get(mp, {})
+            removable = info.get("rm") or info.get("hotplug") or (info.get("tran") == "usb")
+            under_media = mp.startswith(("/media/", "/run/media/", "/mnt/"))
+            if not (removable or under_media):
+                return None, None                        # internal fixed disk → ignore
+            if removable:
+                kind, mitre, base = "USB / removable volume", "T1091", 35
+            else:
+                kind, mitre, base = "External volume", "T1052", 30
+            key = "mount|blk|%s" % (info.get("uuid") or info.get("label") or name)
+            extra = {"tran": info.get("tran"), "uuid": info.get("uuid"),
+                     "label": info.get("label") or name}
+        else:
+            return None, None                            # not a block/network mount we care about
+        reasons = [reason("New volume mounted — %s: %s (%s)" % (kind, name, fstype or "?"), mitre, base)]
+        detail = {"category": "mount", "kind": kind, "mountpoint": mp, "dev": dev,
+                  "fstype": fstype, "name": name}
+        detail.update(extra)
+        return key, self._node(key, "mount: %s" % name, sum(r["weight"] for r in reasons), reasons, detail)
+
+    # ---- discovery + main pass --------------------------------------------
+    def _discover(self):
+        found, counts = {}, {"install": 0, "mount": 0}
+
+        try:
+            native, kind = LinuxSoftwareInventory._native(_distro_family(LinuxOSCurrency._os_release()))
+        except Exception:  # noqa: BLE001
+            native, kind = [], "dpkg"
+        if native:
+            recent = self._recent_dpkg_log() if kind == "dpkg" else []
+            for pkg in native:
+                key = "install|%s" % pkg.get("name")
+                counts["install"] += 1
+                if self.learn_only or key in self.baseline:
+                    found[key] = None
+                else:
+                    found[key] = self._install_node(key, pkg, kind, recent)
+
+        try:
+            with open("/proc/mounts") as f:
+                mtext = f.read()
+        except OSError:
+            mtext = ""
+        if mtext:
+            rc, out, _ = run(["lsblk", "-J", "-o",
+                              "NAME,MOUNTPOINT,MOUNTPOINTS,TRAN,RM,HOTPLUG,TYPE,FSTYPE,UUID,LABEL"],
+                             timeout=10)
+            lsblk = parse_lsblk_json(out) if rc == 0 else {}
+            rc2, lout, _ = run(["losetup", "-nO", "NAME,BACK-FILE"], timeout=10)
+            loops = parse_losetup(lout) if rc2 == 0 else {}
+            for mnt in parse_proc_mounts(mtext):
+                key, node = self._mount_node(mnt, lsblk, loops)
+                if key is None:
+                    continue
+                counts["mount"] += 1
+                found[key] = node
+
+        return found, counts, []
+
+    def _collect(self):
+        found, counts, _ = self._discover()
+        now = int(time.time())
+        new_keys = set() if self.learn_only else (set(found) - self.baseline)
+
+        with self.lock:
+            for key in new_keys:
+                item = found.get(key)
+                if item and item["severity"] != "info":
+                    self.flagged[item["id"]] = (now, item)
+            cutoff = now - PROVENANCE_NODE_TTL
+            self.flagged = {k: v for k, v in self.flagged.items() if v[0] >= cutoff}
+            self.counts = counts
+
+        self.baseline |= set(found)
+        self._save_baseline()
+        self.learn_only = False
 
 
 class TCCCollector:
@@ -12471,7 +12751,7 @@ class DecoyStore:
 def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downloads=None,
                 auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                 posture=None, shellhist=None, rules=None, sqldet=None, suppressions=None, incident_store=None,
-                realtime=None, history=None, decoys=None, responder=None):
+                realtime=None, history=None, decoys=None, responder=None, provenance=None):
     t0 = time.time()
     procs = collect_processes()
     net = collect_network()
@@ -12786,6 +13066,11 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         for item in shellhist.snapshot():
             add_node(item)
 
+    # --- provenance nodes (new installed packages / removable+image+network mounts) ---
+    if provenance:
+        for item in provenance.snapshot():
+            add_node(item)
+
     # --- real-time event nodes (ephemeral exec-and-exit processes + new files in watched dirs) ---
     if realtime:
         for item in realtime.snapshot():
@@ -12966,6 +13251,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         "accounts": accounts.summary() if accounts else {"enabled": False},
         "config": posture.summary() if posture else {"enabled": False},
         "shell": shellhist.summary() if shellhist else {"enabled": False},
+        "provenance": provenance.summary() if provenance else {"enabled": False},
         "realtime": realtime.summary() if realtime else {"enabled": False},
         "rules": {"enabled": bool(rules), "builtin": len(BUILTIN_RULES),
                   "node_rules": len(rules.snapshot_node_rules()) if rules else 0,
@@ -13415,7 +13701,7 @@ class SnapshotCache:
                  auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                  posture=None, shellhist=None, rules=None, sqldet=None, vr=None, responder=None,
                  lifecycle=None, ai=None, suppressions=None, incidents=None, attack=None, exporter=None,
-                 realtime=None, ntfy=None, decoys=None):
+                 realtime=None, ntfy=None, decoys=None, provenance=None):
         self.interval = interval
         self.no_sig = no_sig
         self.sig = SignatureChecker(enabled=not no_sig)
@@ -13443,6 +13729,7 @@ class SnapshotCache:
         self.decoys = decoys
         self.exporter = exporter
         self.realtime = realtime
+        self.provenance = provenance
         self.ntfy = ntfy
         self.lock = threading.Lock()
         self.data = None
@@ -13484,7 +13771,8 @@ class SnapshotCache:
                                posture=self.posture, shellhist=self.shellhist,
                                rules=self.rules, sqldet=self.sqldet, suppressions=self.suppressions,
                                incident_store=self.incidents, realtime=self.realtime,
-                               history=self.history, decoys=self.decoys, responder=self.responder)
+                               history=self.history, decoys=self.decoys, responder=self.responder,
+                               provenance=self.provenance)
             if self.history:
                 data["meta"]["history"] = self.history.stats()
             if self.decoys:
@@ -19857,6 +20145,10 @@ def main():
                     help="disable shell-history scanning for suspicious commands")
     ap.add_argument("--shell-history-interval", type=int, default=300,
                     help="seconds between shell-history scans (default 300)")
+    ap.add_argument("--no-provenance", action="store_true",
+                    help="disable install-history + volume-mount (USB/image/network) change detection")
+    ap.add_argument("--provenance-interval", type=int, default=600,
+                    help="seconds between install/mount provenance scans (default 600)")
     ap.add_argument("--no-realtime", action="store_true",
                     help="disable real-time events (cn_proc exec + inotify file watch)")
     ap.add_argument("--realtime-ephemeral-secs", type=float, default=RT_EPHEMERAL_MAX_LIFETIME,
@@ -20050,6 +20342,9 @@ def main():
     shellhist = ShellHistoryCollector(enabled=not args.no_shell_history,
                                       interval=args.shell_history_interval)
     shellhist.start()
+    provenance = ProvenanceCollector(enabled=not args.no_provenance,
+                                     interval=args.provenance_interval)
+    provenance.start()
     realtime = RealtimeEvents(history=history, enabled=not args.no_realtime,
                               ephemeral_lifetime=args.realtime_ephemeral_secs)
     realtime.start()
@@ -20094,7 +20389,8 @@ def main():
                           accounts=accounts, posture=posture, shellhist=shellhist,
                           rules=rules, sqldet=sqldet, vr=vr, responder=responder,
                           lifecycle=lifecycle, ai=ai, suppressions=suppressions, incidents=incidents,
-                          attack=attack, exporter=exporter, realtime=realtime, ntfy=ntfy)
+                          attack=attack, exporter=exporter, realtime=realtime, ntfy=ntfy,
+                          provenance=provenance)
     cache.analyses = analyses            # exposed to the ai-analyze writer + the /api/ai-analysis reader
     cache.updater = updater              # served by /api/health + /api/update
     updater.start()                      # background, cached 24h; no-op with --no-update-check
@@ -20205,6 +20501,11 @@ def main():
               f"— BTM + system/kernel extensions + profiles, diff every {args.persist_interval}s")
     else:
         print("│  Persist:    off")
+    if provenance.enabled:
+        print(f"│  Provenance: {'baseline exists' if not provenance.learn_only else 'building baseline…'} "
+              f"— install history + removable/image/network mounts, diff every {args.provenance_interval}s")
+    else:
+        print("│  Provenance: off")
     if tcc.enabled:
         ts = tcc.summary()
         access = ("reading TCC.db" if ts["accessible"]

@@ -6,6 +6,24 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## Linux agent 1.10.0 — 2026-10-23
+
+### Added
+
+**Provenance collector — Linux parity.** The counterpart to the macOS provenance collector, with
+Linux-native sources, same `provenance` node type (📦 "Installs & Media"), and the same near-zero-FP,
+baseline-diff + 24h TTL model. `--no-provenance` / `--provenance-interval` (default 600s).
+
+- **Install history (T1195).** Change-detects installed packages via dpkg/rpm/apk (reusing the
+  software-inventory parsers), enriched best-effort from `/var/log/dpkg.log`. Keyed on package **name**,
+  so routine `apt upgrade` version bumps stay silent and only genuinely new software surfaces.
+- **Volume mounts (T1052 / T1091 / T1021).** Reads `/proc/mounts` and classifies via `lsblk` (USB /
+  removable) and `losetup` (loop-backed disk images), plus network filesystems. A disk image mounted
+  from a Downloads/tmp path is elevated; snap squashfs loop mounts, pseudo filesystems and internal
+  fixed disks are ignored.
+
+No new rules/builtins, no network indicators, no Mesh change. (macOS shipped this in its own 1.10.0.)
+
 ## macOS agent 1.10.0 — 2026-10-23
 
 ### Added

@@ -6,6 +6,27 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.10.0 — 2026-10-23
+
+### Added
+
+**Provenance collector — install history and removable/disk-image/network mounts.** A new read-only
+collector (`--no-provenance` / `--provenance-interval`, default 600s) closes two FOR518 gaps the
+cron/launchd and FIM walks miss, surfaced as a new `provenance` node type (📦 "Installs & Media" in the
+tree, filters, graph, health card, and the rule editor):
+
+- **Install receipts (T1195).** Change-detects installer-package receipts via `pkgutil`, enriched
+  best-effort from `/var/log/install.log`. A newly-appearing third-party receipt surfaces once; Apple
+  OS-update receipts stay silent `info` unless the package installs from a user/temporary location.
+- **Volume mounts (T1052 / T1091 / T1021).** Change-detects volumes mounting under `/Volumes` via
+  `mount` + `diskutil` + `hdiutil`, classified as USB/removable, disk image (DMG), or network share. A
+  DMG mounted from Downloads/tmp — the usual macOS malware lure — is elevated; internal fixed volumes
+  are ignored.
+
+Baseline-diff like persistence: what is present on first run is silent, a new receipt or mount flags
+once and ages out after 24h. Calibrated for near-zero FP — benign OS installs and internal volumes are
+silent. No new network indicators. (macOS only this release; a Linux equivalent is separate work.)
+
 ## macOS agent 1.9.4 / Linux agent 1.9.4 — 2026-10-23
 
 ### Changed

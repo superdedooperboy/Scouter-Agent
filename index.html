@@ -1118,6 +1118,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,-6 1.47,-2.02 5.71,-1.85 2.38,0.77 3.53,4.85 0,2.5 -3.53,4.85 -2.38,0.77 -5.71,-1.85 -1.47,-2.02" fill="#5a6b80"/></svg> Account / privilege</div>
       <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,6 6,-5.1 -6,-5.1" fill="#5a6b80"/></svg> Security posture (config)</div>
       <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="-3.3,-4.8 6,-4.8 3.3,4.8 -6,4.8" fill="#5a6b80"/></svg> Shell-history command</div>
+      <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="-6,-3.6 6,-3.6 6,3.6 -6,3.6" fill="#5a6b80"/></svg> Install / mount</div>
       <div class="lr"><svg class="sw" viewBox="-7 -7 14 14"><polygon points="0,-6 1.5,-2.6 5.2,-3 3,0 5.2,3 1.5,2.6 0,6 -1.5,2.6 -5.2,3 -3,0 -5.2,-3 -1.5,-2.6" fill="#5a6b80"/></svg> Custom detection (SQL)</div>
       <div class="lr" style="margin-top:6px"><span class="sw" style="background:var(--accent2)"></span> outbound connection</div>
       <div class="lr"><span class="sw" style="background:#56d4dd"></span> listens on</div>
@@ -1143,6 +1144,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <label class="switch"><input type="checkbox" class="ftype" value="account" checked onchange="applyFilters()"> ★ Accounts / Privilege</label>
     <label class="switch"><input type="checkbox" class="ftype" value="config" checked onchange="applyFilters()"> ⚙ Security Posture</label>
     <label class="switch"><input type="checkbox" class="ftype" value="shell" checked onchange="applyFilters()"> $ Shell History</label>
+    <label class="switch"><input type="checkbox" class="ftype" value="provenance" checked onchange="applyFilters()"> 📦 Installs &amp; Media</label>
     <label class="switch"><input type="checkbox" class="ftype" value="detection" checked onchange="applyFilters()"> 🎯 Detections (SQL)</label>
     <label class="switch"><input type="checkbox" class="ftype" value="decoy" checked onchange="applyFilters()"> 🪤 Decoys (Bait)</label>
     </div>
@@ -1404,6 +1406,7 @@ function makeShape(type){
   else if(type==='account'){ s=document.createElementNS(SVGNS,'polygon'); }   // 5-point star
   else if(type==='config'){ s=document.createElementNS(SVGNS,'polygon'); }    // down-pointing triangle
   else if(type==='shell'){ s=document.createElementNS(SVGNS,'polygon'); }     // parallelogram
+  else if(type==='provenance'){ s=document.createElementNS(SVGNS,'polygon'); } // wide box (package / volume)
   else if(type==='detection'){ s=document.createElementNS(SVGNS,'polygon'); } // 6-point star (target)
   else { s=document.createElementNS(SVGNS,'rect'); } // job = rotated square (diamond)
   s.setAttribute('class','shape');
@@ -1422,6 +1425,7 @@ function sizeShape(s,type,r){
   else if(type==='account'){ let p=[]; for(let i=0;i<10;i++){ const a=(-90+i*36)*Math.PI/180, rad=(i%2?r*0.42:r); p.push((rad*Math.cos(a)).toFixed(2)+','+(rad*Math.sin(a)).toFixed(2)); } s.setAttribute('points',p.join(' ')); }
   else if(type==='config'){ s.setAttribute('points',`0,${r} ${r},${-r*0.85} ${-r},${-r*0.85}`); }
   else if(type==='shell'){ s.setAttribute('points',`${-r*0.55},${-r*0.8} ${r},${-r*0.8} ${r*0.55},${r*0.8} ${-r},${r*0.8}`); }
+  else if(type==='provenance'){ s.setAttribute('points',`${-r},${-r*0.6} ${r},${-r*0.6} ${r},${r*0.6} ${-r},${r*0.6}`); }
   else if(type==='detection'){ let p=[]; for(let i=0;i<12;i++){ const a=(-90+i*30)*Math.PI/180, rad=(i%2?r*0.5:r); p.push((rad*Math.cos(a)).toFixed(2)+','+(rad*Math.sin(a)).toFixed(2)); } s.setAttribute('points',p.join(' ')); }
   else { s.setAttribute('x',-r);s.setAttribute('y',-r);s.setAttribute('width',2*r);s.setAttribute('height',2*r);s.setAttribute('transform','rotate(45)'); }
 }
@@ -2036,6 +2040,15 @@ function renderDetail(id){
             ['payloads',(det.payloads&&det.payloads.length)?det.payloads.join(', '):''],
             ['executable',det.path],
             ['embedded',(det.embedded&&det.embedded.length)?det.embedded.join('\n'):'']);
+  } else if(n.type==='provenance'){
+    kv.push(['what',det.category==='install'?'installer-package receipt':('volume mount — '+(det.kind||''))],
+            ['package id',det.pkgid],['version',det.version],
+            ['installed',det.install_time?new Date(det.install_time*1000).toLocaleString():''],
+            ['install path',det.install_path],['volume',det.volume],
+            ['mount point',det.mountpoint],['volume name',det.volname||det.name],
+            ['device',det.dev],['bus',det.bus],['filesystem',det.fstype],
+            ['disk image',det.image_path],['uuid',det.uuid],['server',det.server],
+            ['recent install.log',(det.log_evidence&&det.log_evidence.length)?det.log_evidence.join('\n'):'']);
   }
   html+='<div class="kv">'+kv.filter(([,v])=>v!==undefined&&v!==''&&v!==null)
         .map(([k,v])=>`<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join('')+'</div>';
@@ -2724,6 +2737,20 @@ function renderTree(){
     if(!pcol) persistOut += persistNodes.map(n=>leafRow(n,1)).join('');
   }
 
+  // --- Provenance section (new installer-package receipts / removable+DMG+network mounts) ---
+  const provNodes=raw.nodes.filter(n=>n.type==='provenance' && filtFull(n))
+    .sort((a,b)=>SEVS.indexOf(b.severity)-SEVS.indexOf(a.severity) || (b.score-a.score) || (a.label<b.label?-1:1));
+  let provOut='';
+  if(provNodes.length){
+    const pvcol=treeCollapsed.has('provenance:section');
+    const flaggedPv=provNodes.filter(n=>n.severity!=='info').length;
+    provOut=`<div class="trow proc authhdr" style="padding-left:8px" onclick="treeToggle('provenance:section')">
+      <span class="tw">${pvcol?'▸':'▾'}</span><span class="tdot" style="background:${flaggedPv?SEV_COLOR[provNodes[0].severity]:'#5a6b80'}"></span><span class="ticon">📦</span>
+      <span class="tname">Installs &amp; media</span>
+      <span class="tcmd">${provNodes.length} new item${provNodes.length===1?'':'s'}${flaggedPv?` · ${flaggedPv} flagged`:''}</span></div>`;
+    if(!pvcol) provOut += provNodes.map(n=>leafRow(n,1)).join('');
+  }
+
   // --- Privacy permissions section (TCC — newly-allowed sensitive grants, not process-bound) ---
   const tccNodes=raw.nodes.filter(n=>n.type==='tcc' && filtFull(n))
     .sort((a,b)=>SEVS.indexOf(b.severity)-SEVS.indexOf(a.severity) || (b.score-a.score) || (a.label<b.label?-1:1));
@@ -2813,9 +2840,9 @@ function renderTree(){
   // auth / posture / TCC / accounts / config / shell / detection groups — so it's counted as
   // "items", not "processes". Counting the same universe in both numerator and denominator keeps
   // them consistent (the numerator can never exceed the total). Add new node types here too.
-  const TREE_ITEM_TYPES=new Set(['process','auth','persist','tcc','access','account','config','shell','detection']);
+  const TREE_ITEM_TYPES=new Set(['process','auth','persist','tcc','access','account','config','shell','provenance','detection']);
   const totalItems=raw.nodes.reduce((a,n)=>a+(TREE_ITEM_TYPES.has(n.type)?1:0),0);
-  const shownItems=shown+authNodes.length+persistNodes.length+tccNodes.length+accessNodes.length+acctNodes.length+cfgNodes.length+shNodes.length+detNodes.length;
+  const shownItems=shown+authNodes.length+persistNodes.length+tccNodes.length+accessNodes.length+acctNodes.length+cfgNodes.length+shNodes.length+provNodes.length+detNodes.length;
   const hidden = shownItems<totalItems;
   const action = treeShowAll
     ? ' · showing all routine items · <span class="va" onclick="hideRoutineNodes()">Hide Routine</span>'
@@ -2828,7 +2855,7 @@ function renderTree(){
       <span class="tname">Processes</span>
       <span class="tcmd">${shown} shown</span></div>` : '';
   const procBody = pcol ? '' : out.join('');
-  const body = (shown || authNodes.length || persistNodes.length || tccNodes.length || accessNodes.length || acctNodes.length || cfgNodes.length || shNodes.length || detNodes.length) ? '<div class="tbody">'+authOut+persistOut+tccOut+accessOut+acctOut+cfgOut+shOut+detOut+procHdr+procBody+'</div>'
+  const body = (shown || authNodes.length || persistNodes.length || tccNodes.length || accessNodes.length || acctNodes.length || cfgNodes.length || shNodes.length || provNodes.length || detNodes.length) ? '<div class="tbody">'+authOut+persistOut+tccOut+accessOut+acctOut+cfgOut+shOut+provOut+detOut+procHdr+procBody+'</div>'
     : `<div class="empty-big">No flagged processes right now.<br>
        <span class="va" onclick="showAllNodes()">Show All ${totalProcs} processes</span> to see the full tree.</div>`;
   host.innerHTML =
@@ -2853,7 +2880,7 @@ function procRow(n, depth, hasChildren, collapsed, muted){
 }
 function leafRow(e, depth){
   const pad=8+depth*16, col=SEV_COLOR[e.severity], d=e.detail||{};
-  const icon=e.type==='listen'?'▲':(e.type==='remote'?'■':(e.type==='download'?'⬡':(e.type==='auth'?'🔑':(e.type==='persist'?'✚':(e.type==='tcc'?'🛡':(e.type==='access'?'📡':(e.type==='account'?'★':(e.type==='config'?'⚙':(e.type==='shell'?'$':(e.type==='detection'?'🎯':'◆'))))))))));
+  const icon=e.type==='listen'?'▲':(e.type==='remote'?'■':(e.type==='download'?'⬡':(e.type==='auth'?'🔑':(e.type==='persist'?'✚':(e.type==='tcc'?'🛡':(e.type==='access'?'📡':(e.type==='account'?'★':(e.type==='config'?'⚙':(e.type==='shell'?'$':(e.type==='detection'?'🎯':(e.type==='provenance'?'📦':'◆')))))))))));
   let pre='', desc='';
   if(e.type==='remote'){ pre='→ '; desc=(d.public?'outbound · public':'outbound')+(d.proto?(' · '+d.proto):''); }
   else if(e.type==='listen'){ desc='listening'+(d.laddr?(' · '+d.laddr):''); }
@@ -2861,6 +2888,7 @@ function leafRow(e, depth){
   else if(e.type==='download'){ pre='⬇ downloaded '; desc='file'+(d.size!=null?(' · '+fmtBytes(d.size)):''); }
   else if(e.type==='auth'){ desc=(d.etype||'auth')+' · '+(d.method||d.source||'')+(d.success===false?' · FAILED':(d.active?' · active':'')); }
   else if(e.type==='persist'){ desc=(d.source||'persistence')+(d.team_id?(' · team '+d.team_id):'')+(d.enabled===false?' · disabled':''); }
+  else if(e.type==='provenance'){ desc=(d.category==='install'?('pkg'+(d.version?(' '+d.version):'')):((d.kind||'mount')+(d.fstype?(' · '+d.fstype):''))); }
   else if(e.type==='tcc'){ desc=(d.permission||'permission')+' · '+(d.auth||'')+(d.db?(' · '+d.db):''); }
   else if(e.type==='access'){ desc=(d.category==='sshkey'?('SSH key · '+(d.key_type||'')+(d.options?' · forced-cmd':'')):((d.name||'service')+' · enabled')); }
   else if(e.type==='account'){ desc=(d.category==='user'?('uid '+d.uid+(d.hidden?' · hidden':'')+(d.login_shell?' · login shell':'')):(d.category==='group'?(d.group+' member'):('sudoers'+(d.nopasswd?' · NOPASSWD':'')))); }
@@ -3551,6 +3579,11 @@ function sensorCards(m){
     push('Host inventory','Privacy grants (TCC)', acc?'ok':'warn', `${t.flagged||0} flagged`,
          acc?'Reading the TCC databases.':'Some TCC databases unreadable — grant Full Disk Access'+(root?'':' / run with sudo')+' for full coverage.');
   } else push('Host inventory','Privacy grants (TCC)','off','—','Disabled with --no-tcc.');
+  const pv=m.provenance||{};
+  if(pv.enabled){
+    push('Host inventory','Installs & media', 'ok', `${pv.flagged||0} flagged`,
+         `${pv.install||0} install receipt(s) · ${pv.mount||0} external mount(s) tracked`);
+  } else push('Host inventory','Installs & media','off','—','Disabled with --no-provenance.');
   const ra=m.raccess||{};
   if(ra.enabled){ const svc=(ra.services_on||[]).length;
     push('Host inventory','Remote access', svc?'warn':'ok', `${svc} service(s) on · ${ra.authorized_keys||0} authorized_keys`,
@@ -4308,7 +4341,7 @@ function applyRuleExpl(d){
 }
 function loadRuleExpl(){ fetch('/api/rules').then(r=>r.json()).then(applyRuleExpl).catch(()=>{}); }
 const DET_OPS=['eq','ne','contains','icontains','startswith','endswith','regex','gt','lt','ge','le','in','exists'];
-const DET_TYPES=['any','process','remote','listen','job','download','file','auth','persist','tcc','access','account','config','shell'];
+const DET_TYPES=['any','process','remote','listen','job','download','file','auth','persist','tcc','access','account','config','shell','provenance'];
 function openDetections(){ detLoad(); pbEnsureLoaded(()=>{ if(currentTab==='detections' && detSel) detViewRule(detSel.source, detSel.idx); }); }
 function detLoad(cb){
   fetch('/api/rules').then(r=>r.json()).then(d=>{ detData=Object.assign({node_rules:[],sql_rules:[],sql_status:{},fields:{},ops:[]},d); applyRuleExpl(d); renderDetections(); if(typeof cb==='function') cb(); })

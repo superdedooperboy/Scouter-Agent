@@ -92,7 +92,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.9.4"
+__version__ = "1.10.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -307,6 +307,19 @@ PERSIST_BASELINE_FILE = os.path.join(HERE, "persist-baseline.json")
 PERSIST_SUSPICIOUS_PATH_RE = re.compile(
     r"^/tmp/|^/var/tmp/|^/private/tmp/|/Users/Shared/|/Library/Caches/|/\.[^/]+/|^/Users/[^/]+/\.", re.I)
 
+# Provenance — where software and volumes ENTER the host. Two change-detected surfaces the walk
+# misses: (1) installer-package receipts (pkgutil), i.e. install history (T1195), optionally enriched
+# from /var/log/install.log; (2) removable/image-backed/network volume mounts — USB (T1052/T1091),
+# disk images (a common macOS malware-delivery vector), and network shares (T1021). Baseline-diff like
+# persistence: what's present on first run is silent; a newly-appearing receipt or mount flags once.
+PROVENANCE_NODE_TTL = 24 * 3600                       # keep a flagged install/mount node this long
+PROVENANCE_BASELINE_FILE = os.path.join(HERE, "provenance-baseline.json")
+INSTALL_LOG = "/var/log/install.log"                  # root-readable; best-effort recent-event enrichment
+# A receipt or a mounted volume whose backing path sits in a user/temp area carries more weight than
+# one from the OS — that is where a user-delivered payload enters the host.
+PROVENANCE_SUSPICIOUS_PATH_RE = re.compile(
+    r"^/(tmp|private/tmp|private/var/folders|Users/[^/]+/(Downloads|Desktop|Library/Caches)|Users/Shared)(/|$)", re.I)
+
 # Privacy permissions (Transparency, Consent & Control). A newly-*allowed* grant for
 # a sensitive service is a strong signal — malware self-authorizes Accessibility /
 # Full Disk Access / Screen Recording / Input Monitoring. Reading TCC.db requires the
@@ -443,6 +456,8 @@ RULE_FIELD_HINTS = {
     "account": ["category", "user", "uid", "shell", "home", "group", "rule", "nopasswd"],
     "config": ["category", "state"],
     "shell": ["user", "command", "matched", "file"],
+    "provenance": ["category", "pkgid", "version", "kind", "name", "mountpoint",
+                   "bus", "fstype", "image_path", "install_path", "volume"],
 }
 # Starter rules seeded into rules.json on first run so the Detections tab isn't empty.
 # High-precision ones ship ENABLED; broader / parameterised ones ship DISABLED as
@@ -6091,6 +6106,293 @@ class PersistenceCollector:
                 if item["severity"] != "info":
                     self.flagged[item["id"]] = (now, item)        # (re)flag newly-seen item
             cutoff = now - PERSIST_NODE_TTL
+            self.flagged = {k: v for k, v in self.flagged.items() if v[0] >= cutoff}
+            self.counts = counts
+
+        self.baseline |= set(found)
+        self._save_baseline()
+        self.learn_only = False
+
+
+# ---------------------------------------------------------------------------
+# Provenance: install receipts (pkgutil + install.log) and volume mounts (USB / disk image / network).
+# All sources are read-only and need no root (install.log enrichment is best-effort if readable).
+# ---------------------------------------------------------------------------
+
+def parse_pkg_info(plist_bytes):
+    """Parse one `pkgutil --pkg-info-plist <id>` plist into {version, install_time, location, volume}.
+    Empty dict on any failure — never raises."""
+    try:
+        d = plistlib.loads(plist_bytes if isinstance(plist_bytes, (bytes, bytearray))
+                           else (plist_bytes or "").encode())
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    return {"version": str(d.get("pkg-version") or ""),
+            "install_time": int(d.get("install-time") or 0),
+            "location": d.get("install-location") or "",
+            "volume": d.get("volume") or "/"}
+
+
+_INSTALL_LOG_EVENT_RE = re.compile(
+    r"(PackageKit: Installed|Install(ation)? (of|complete|succeeded)|Installed \")", re.I)
+
+
+def parse_install_log(text, cap=25):
+    """Pull the most recent install-event lines out of /var/log/install.log text. Best-effort
+    evidence enrichment only — not a detection in its own right. Newest `cap` lines kept."""
+    hits = [ln.strip() for ln in (text or "").splitlines() if _INSTALL_LOG_EVENT_RE.search(ln)]
+    return hits[-cap:]
+
+
+_MOUNT_RE = re.compile(r"^(?P<dev>\S+) on (?P<mp>.+?) \((?P<opts>[^)]*)\)\s*$")
+
+
+def parse_mount(text):
+    """Parse `mount` output into [{dev, mountpoint, fstype, opts}]. The first paren option is the
+    filesystem type (apfs/msdos/smbfs/…); the rest are flags."""
+    out = []
+    for ln in (text or "").splitlines():
+        m = _MOUNT_RE.match(ln.strip())
+        if not m:
+            continue
+        opts = [o.strip() for o in m.group("opts").split(",") if o.strip()]
+        out.append({"dev": m.group("dev"), "mountpoint": m.group("mp"),
+                    "fstype": opts[0] if opts else "", "opts": opts[1:]})
+    return out
+
+
+def _base_disk(dev):
+    """/dev/disk5s1 → /dev/disk5 (hdiutil keys the whole-disk node)."""
+    m = re.match(r"^(/dev/disk\d+)", dev or "")
+    return m.group(1) if m else (dev or "")
+
+
+def parse_hdiutil_images(plist_bytes):
+    """From `hdiutil info -plist`: map a mounted dev node → {image_path, mount_point} for every
+    disk-image-backed volume, so a mount can be recognised as a DMG and traced to its backing file."""
+    try:
+        d = plistlib.loads(plist_bytes if isinstance(plist_bytes, (bytes, bytearray))
+                           else (plist_bytes or "").encode())
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for img in (d.get("images") or []) if isinstance(d, dict) else []:
+        path = img.get("image-path") or ""
+        for ent in (img.get("system-entities") or []):
+            dev = ent.get("dev-entry") or ""
+            if dev:
+                out[dev] = {"image_path": path, "mount_point": ent.get("mount-point") or ""}
+    return out
+
+
+def parse_diskutil_info(plist_bytes):
+    """Parse `diskutil info -plist <dev>` into the few fields we classify on."""
+    try:
+        d = plistlib.loads(plist_bytes if isinstance(plist_bytes, (bytes, bytearray))
+                           else (plist_bytes or "").encode())
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    return {"bus": d.get("BusProtocol") or "",
+            "internal": bool(d.get("Internal")),
+            "removable": bool(d.get("RemovableMedia") or d.get("RemovableMediaOrExternalDevice")
+                              or d.get("Removable")),
+            "volname": d.get("VolumeName") or "",
+            "uuid": d.get("VolumeUUID") or d.get("DiskUUID") or "",
+            "devnode": d.get("DeviceNode") or ""}
+
+
+_MOUNT_NET_FS = {"smbfs", "afpfs", "nfs", "webdav", "ftp"}
+
+
+class ProvenanceCollector:
+    """Baseline-diff over how software and volumes ENTER the host — the two FOR518 surfaces the
+    cron+launchd/FIM walks miss. First run records what's present (silent → provenance-baseline.json);
+    afterwards a newly-appearing installer-package receipt (T1195) or removable / disk-image / network
+    mount (T1052 / T1091 / T1021) is flagged once and kept as a graph node for ~24h. Benign noise is
+    deliberately silent: Apple's own OS-update receipts and internal volumes score `info` unless they
+    enter from a user/temp location, so this stays near-zero-FP. `summary()` exposes the surface size."""
+
+    def __init__(self, enabled=True, interval=600, baseline_file=PROVENANCE_BASELINE_FILE):
+        self.enabled = enabled
+        self.interval = max(60, interval)
+        self.baseline_file = baseline_file
+        self.lock = threading.Lock()
+        self.flagged = {}                 # nid -> (first_flagged_ts, node)
+        self.counts = {"install": 0, "mount": 0}
+        self.baseline = set()
+        self.learn_only = True
+        self.started = False
+        self._load_baseline()
+
+    def _load_baseline(self):
+        try:
+            with open(self.baseline_file) as f:
+                d = json.load(f)
+            if isinstance(d, dict) and isinstance(d.get("keys"), list):
+                self.baseline = set(d["keys"])
+                self.learn_only = not self.baseline
+        except (OSError, ValueError):
+            self.baseline = set()
+
+    def _save_baseline(self):
+        try:
+            tmp = self.baseline_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"keys": sorted(self.baseline), "updated": int(time.time())}, f)
+            os.replace(tmp, self.baseline_file)
+        except OSError:
+            pass
+
+    def start(self):
+        if not self.enabled or self.started:
+            return
+        self.started = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                self._collect()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(self.interval)
+
+    def snapshot(self):
+        with self.lock:
+            return [item for _, item in self.flagged.values()]
+
+    def summary(self):
+        with self.lock:
+            return {"enabled": True, **self.counts, "flagged": len(self.flagged)}
+
+    @staticmethod
+    def _node(key, label, score, reasons, detail):
+        return {"id": "provenance:" + key, "type": "provenance", "label": label,
+                "score": min(score, 100), "severity": severity_for(min(score, 100)),
+                "reasons": reasons, "detail": detail}
+
+    # ---- install receipts -------------------------------------------------
+    def _recent_install_log(self):
+        """Tail /var/log/install.log for recent install events (best-effort; needs read access)."""
+        try:
+            with open(INSTALL_LOG, "r", errors="replace") as f:
+                try:
+                    f.seek(0, os.SEEK_END)
+                    f.seek(max(0, f.tell() - 200000))     # last ~200 KB is plenty for recent events
+                except OSError:
+                    pass
+                text = f.read()
+        except OSError:
+            return []
+        return parse_install_log(text)
+
+    def _install_node(self, key, pkgid, recent_log):
+        rc, out, _ = run(["pkgutil", "--pkg-info-plist", pkgid], timeout=10)
+        info = parse_pkg_info(out) if rc == 0 else {}
+        vol = info.get("volume") or "/"
+        loc = info.get("location") or ""
+        inst_path = os.path.normpath(os.path.join("/" + vol.strip("/"), loc.lstrip("/"))) if loc else vol
+        apple = pkgid.startswith(("com.apple.", "com.apple")) or pkgid.startswith("com.apple")
+        base = 10 if apple else 20            # Apple OS-update receipts are silent noise; 3rd-party surfaces
+        reasons = [reason("New installer-package receipt: %s%s" % (
+            pkgid, (" " + info["version"]) if info.get("version") else ""), "T1195", base)]
+        for p in (loc, vol):
+            if p and PROVENANCE_SUSPICIOUS_PATH_RE.search("/" + p.lstrip("/")):
+                reasons.append(reason("Package installs into a user/temporary location: %s" % inst_path,
+                                      "T1195", 25))
+                base += 25
+                break
+        tail = pkgid.rsplit(".", 1)[-1].lower()
+        evidence = [ln for ln in recent_log if tail and tail in ln.lower()][:3]
+        detail = {"category": "install", "pkgid": pkgid, "version": info.get("version"),
+                  "install_time": info.get("install_time"), "location": loc, "volume": vol,
+                  "install_path": inst_path, "apple": apple, "log_evidence": evidence}
+        return self._node(key, "pkg: %s" % pkgid, sum(r["weight"] for r in reasons), reasons, detail)
+
+    # ---- volume mounts ----------------------------------------------------
+    def _mount_node(self, mnt, dmg_map):
+        mp, dev, fstype = mnt["mountpoint"], mnt["dev"], (mnt["fstype"] or "").lower()
+        name = os.path.basename(mp.rstrip("/")) or mp
+        img = dmg_map.get(dev) or dmg_map.get(_base_disk(dev))
+        extra = {}
+        if fstype in _MOUNT_NET_FS:
+            kind, mitre, base = "Network share", "T1021", 25
+            key = "mount|net|%s" % dev
+            extra = {"server": dev}
+        elif img:
+            ipath = img.get("image_path") or ""
+            kind, mitre, base = "Disk image (DMG)", "T1204.002", 25
+            key = "mount|dmg|%s" % (ipath or name)
+            extra = {"image_path": ipath}
+            if ipath and PROVENANCE_SUSPICIOUS_PATH_RE.search(ipath):
+                base += 15                                   # a DMG mounted from Downloads/tmp is the lure
+        else:
+            info = {}
+            rc, out, _ = run(["diskutil", "info", "-plist", dev], timeout=10)
+            if rc == 0 and out:
+                info = parse_diskutil_info(out)
+            if info.get("internal") and not info.get("removable"):
+                return None, None                            # internal fixed disk mounted here → ignore
+            bus = (info.get("bus") or "").lower()
+            if "usb" in bus or info.get("removable"):
+                kind, mitre, base = "USB / removable volume", "T1091", 35
+            else:
+                kind, mitre, base = "External volume", "T1052", 30
+            key = "mount|ext|%s" % (info.get("uuid") or name)
+            extra = {"bus": info.get("bus"), "uuid": info.get("uuid"),
+                     "volname": info.get("volname") or name}
+        reasons = [reason("New volume mounted — %s: %s (%s)" % (kind, name, fstype or "?"), mitre, base)]
+        detail = {"category": "mount", "kind": kind, "mountpoint": mp, "dev": dev,
+                  "fstype": fstype, "name": name}
+        detail.update(extra)
+        return key, self._node(key, "mount: %s" % name, sum(r["weight"] for r in reasons), reasons, detail)
+
+    # ---- discovery + main pass -------------------------------------------
+    def _discover(self):
+        found, counts = {}, {"install": 0, "mount": 0}
+
+        rc, out, _ = run(["pkgutil", "--pkgs"], timeout=20)
+        if rc == 0 and out:
+            recent_log = self._recent_install_log()
+            for pkgid in (ln.strip() for ln in out.splitlines() if ln.strip()):
+                key = "install|%s" % pkgid
+                counts["install"] += 1
+                # Only build the (subprocess-heavy) node for NEW receipts; baselined ones need the key.
+                if self.learn_only or key in self.baseline:
+                    found[key] = None
+                else:
+                    found[key] = self._install_node(key, pkgid, recent_log)
+
+        rc, out, _ = run(["mount"], timeout=10)
+        if rc == 0 and out:
+            rc2, hout, _ = run(["hdiutil", "info", "-plist"], timeout=15)
+            dmg_map = parse_hdiutil_images(hout) if rc2 == 0 else {}
+            for mnt in parse_mount(out):
+                if not mnt["mountpoint"].startswith("/Volumes/"):
+                    continue                                 # only user-visible external mounts
+                key, node = self._mount_node(mnt, dmg_map)
+                if key is None:
+                    continue
+                counts["mount"] += 1
+                found[key] = node
+
+        return found, counts, []
+
+    def _collect(self):
+        found, counts, _ = self._discover()
+        now = int(time.time())
+        new_keys = set() if self.learn_only else (set(found) - self.baseline)
+
+        with self.lock:
+            for key in new_keys:
+                item = found.get(key)
+                if item and item["severity"] != "info":
+                    self.flagged[item["id"]] = (now, item)
+            cutoff = now - PROVENANCE_NODE_TTL
             self.flagged = {k: v for k, v in self.flagged.items() if v[0] >= cutoff}
             self.counts = counts
 
@@ -12521,7 +12823,8 @@ class DecoyStore:
 def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downloads=None,
                 auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                 posture=None, shellhist=None, rules=None, sqldet=None, suppressions=None,
-                responder=None, esf=None, incident_store=None, history=None, decoys=None):
+                responder=None, esf=None, incident_store=None, history=None, decoys=None,
+                provenance=None):
     t0 = time.time()
     procs = collect_processes()
     net = collect_network()
@@ -12847,6 +13150,11 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         for item in shellhist.snapshot():
             add_node(item)
 
+    # --- provenance nodes (new installer-package receipts / removable+DMG+network mounts) ---
+    if provenance:
+        for item in provenance.snapshot():
+            add_node(item)
+
     # --- ESF real-time nodes (ephemeral exec-and-exit processes + new files in watched dirs) ---
     if esf:
         for item in esf.snapshot():
@@ -13047,6 +13355,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         "accounts": accounts.summary() if accounts else {"enabled": False},
         "config": posture.summary() if posture else {"enabled": False},
         "shell": shellhist.summary() if shellhist else {"enabled": False},
+        "provenance": provenance.summary() if provenance else {"enabled": False},
         "esf": esf.summary() if esf else {"enabled": False},
         "incidents": incidents_meta,
         "rules": {"enabled": bool(rules), "builtin": len(BUILTIN_RULES),
@@ -13072,7 +13381,7 @@ class SnapshotCache:
                  auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                  posture=None, shellhist=None, rules=None, sqldet=None, vr=None, responder=None,
                  lifecycle=None, ai=None, suppressions=None, ntfy=None, esf=None, incidents=None,
-                 exporter=None, attack=None, decoys=None):
+                 exporter=None, attack=None, decoys=None, provenance=None):
         self.interval = interval
         self.no_sig = no_sig
         self.sig = SignatureChecker(enabled=not no_sig)
@@ -13101,6 +13410,7 @@ class SnapshotCache:
         self.exporter = exporter
         self.attack = attack
         self.decoys = decoys
+        self.provenance = provenance
         self.lock = threading.Lock()
         self.data = None
         self.ts = 0.0
@@ -13142,7 +13452,8 @@ class SnapshotCache:
                                rules=self.rules, sqldet=self.sqldet,
                                suppressions=self.suppressions, responder=self.responder,
                                esf=self.esf, incident_store=self.incidents,
-                               history=self.history, decoys=self.decoys)
+                               history=self.history, decoys=self.decoys,
+                               provenance=self.provenance)
             if self.history:
                 data["meta"]["history"] = self.history.stats()
             if self.decoys:
@@ -20529,6 +20840,10 @@ def main():
                     help="disable shell-history scanning for suspicious commands")
     ap.add_argument("--shell-history-interval", type=int, default=300,
                     help="seconds between shell-history scans (default 300)")
+    ap.add_argument("--no-provenance", action="store_true",
+                    help="disable install-receipt + volume-mount (USB/DMG/network) change detection")
+    ap.add_argument("--provenance-interval", type=int, default=600,
+                    help="seconds between install/mount provenance scans (default 600)")
     ap.add_argument("--no-esf", action="store_true",
                     help="disable real-time Endpoint Security events (eslogger; needs sudo, macOS 13+)")
     ap.add_argument("--esf-ephemeral-secs", type=float, default=ESF_EPHEMERAL_MAX_LIFETIME,
@@ -20733,6 +21048,9 @@ def main():
     shellhist = ShellHistoryCollector(enabled=not args.no_shell_history,
                                       interval=args.shell_history_interval)
     shellhist.start()
+    provenance = ProvenanceCollector(enabled=not args.no_provenance,
+                                     interval=args.provenance_interval)
+    provenance.start()
     esf = ESFCollector(history=history, enabled=not args.no_esf,
                        ephemeral_lifetime=args.esf_ephemeral_secs)
     esf.start()
@@ -20777,7 +21095,8 @@ def main():
                           accounts=accounts, posture=posture, shellhist=shellhist,
                           rules=rules, sqldet=sqldet, vr=vr, responder=responder,
                           lifecycle=lifecycle, ai=ai, suppressions=suppressions, ntfy=ntfy, esf=esf,
-                          incidents=incidents, exporter=exporter, attack=attack, decoys=decoys)
+                          incidents=incidents, exporter=exporter, attack=attack, decoys=decoys,
+                          provenance=provenance)
     cache.analyses = analyses          # exposed to the ai-analyze handler + the /api/ai-analysis reader
     cache.updater = updater            # served by /api/health + /api/update
     updater.start()                    # background, cached 24h; no-op with --no-update-check
@@ -20900,6 +21219,11 @@ def main():
               f"— BTM + system/kernel extensions + profiles, diff every {args.persist_interval}s")
     else:
         print("│  Persist:    off")
+    if provenance.enabled:
+        print(f"│  Provenance: {'baseline exists' if not provenance.learn_only else 'building baseline…'} "
+              f"— install receipts + USB/DMG/network mounts, diff every {args.provenance_interval}s")
+    else:
+        print("│  Provenance: off")
     if tcc.enabled:
         ts = tcc.summary()
         access = ("reading TCC.db" if ts["accessible"]

@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -291,8 +292,8 @@ class TestUpdateChecker(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         uc = agent.UpdateChecker(current=current,
                                  cache_file=os.path.join(tmp, "update-check.json"))
-        uc._fetch_source_version = lambda: source_version
-        uc._fetch_release = lambda latest: release
+        uc._fetch_source_version = lambda timeout=20: source_version
+        uc._fetch_release = lambda latest, timeout=20: release
         return uc
 
     def test_source_version_newer_than_running_reports_update(self):
@@ -326,10 +327,21 @@ class TestUpdateChecker(unittest.TestCase):
     def test_offline_probe_keeps_last_good_state(self):
         uc = self._checker("1.9.0", "1.9.1")
         uc._check()
-        uc._fetch_source_version = lambda: None
-        uc._fetch_release = lambda latest: None
+        uc._fetch_source_version = lambda timeout=20: None
+        uc._fetch_release = lambda latest, timeout=20: None
         uc._check()
         self.assertEqual(uc.status()["latest"], "1.9.1")
+
+    def test_refresh_rechecks_even_when_cache_is_fresh(self):
+        # The reported bug: running 1.9.3 with a fresh cache that saw 1.9.3 as latest; main has since
+        # advanced to 1.10.0. start() would skip (TTL not elapsed) and the button returned the stale
+        # cache. refresh() must re-check NOW and report the update.
+        uc = self._checker("1.9.3", "1.10.0")
+        uc.state = {"checked_ts": int(time.time()), "current": "1.9.3", "latest": "1.9.3"}
+        self.assertFalse(uc.status()["update_available"])
+        st = uc.refresh()
+        self.assertEqual(st["latest"], "1.10.0")
+        self.assertTrue(st["update_available"])
 
     def test_parse_source_version(self):
         self.assertEqual(

@@ -6,6 +6,23 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.10.1 / Linux agent 1.10.1 — 2026-10-23
+
+### Fixed
+
+**"Check for updates" button returned a stale answer.** The update check only ran on a 24h timer, and
+both the `/api/update` endpoint and the version-pill click returned the *cached* result — so after
+upgrading (e.g. to 1.9.3 while `main` was at 1.9.3), a version pushed within the next 24h read as "up
+to date" no matter how many times the button was clicked. The button now forces a fresh check:
+`/api/update?refresh=1` re-queries GitHub synchronously (bounded 10s timeout; last good state kept on
+failure), and the UI click calls it and shows the result (or an "update available" banner even if a
+prior banner was dismissed). This completes the 1.9.2 source-version fix, which was correct but only
+took effect when a check actually ran.
+
+Note: an agent still on ≤1.10.0 won't have the button fix until it updates. To unstick one now, delete
+its `update-check.json` (next to the agent) and restart — that clears the cache so the next background
+check (which already reads `main`) sees the new version.
+
 ## Linux agent 1.10.0 — 2026-10-23
 
 ### Added

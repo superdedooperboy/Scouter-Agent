@@ -6643,8 +6643,14 @@ function dismissUpdate(){
   try{ if(b.dataset.latest) localStorage.setItem('updDismissed', b.dataset.latest); }catch(e){}
 }
 function onVerClick(){
-  if(updInfo && updInfo.update_available) showUpdateBanner(updInfo);
-  else toastShow('Up to date', 'Running the latest version ('+fmtVer(updInfo&&updInfo.version)+').', 'info', null);
+  // Force a FRESH server-side check — the passive status can be up to 24h stale, so without this a
+  // version pushed since the last check reads as "up to date". ?refresh=1 re-checks GitHub now.
+  toastShow('Checking for updates…', '', 'info', null);
+  fetch('/api/update?refresh=1').then(r=>r.json()).then(u=>{
+    applyUpdate(u);
+    if(u && u.update_available) showUpdateBanner(u);   // show even if previously dismissed — they asked
+    else toastShow('Up to date', 'Running the latest version ('+fmtVer(u&&u.version)+').', 'info', null);
+  }).catch(()=>{ toastShow('Update check failed', 'Could not reach GitHub to check.', 'warn', null); });
 }
 function checkUpdate(){ fetch('/api/update').then(r=>r.json()).then(applyUpdate).catch(()=>{}); }
 pollTimer=setInterval(loop,POLL_MS);

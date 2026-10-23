@@ -94,7 +94,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.10.0"
+__version__ = "1.10.1"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -8051,13 +8051,22 @@ class UpdateChecker:
             return
         threading.Thread(target=self._check, daemon=True).start()
 
+    def refresh(self):
+        """Force a fresh check NOW, synchronously, and return the updated status. This is what the UI's
+        'check for updates' button calls — otherwise the answer is only ever as fresh as the 24h cache,
+        so a version pushed since the last check reads as 'up to date'. Bounded timeout so the click
+        doesn't hang; on a network failure the last good state is kept and returned."""
+        if self.enabled:
+            self._check(timeout=10)
+        return self.status()
+
     @staticmethod
     def _parse_source_version(text):
         """Pull `__version__ = "x.y.z"` out of a raw agent source file."""
         m = re.search(r'''(?m)^__version__\s*=\s*['"]([0-9]+(?:\.[0-9]+){1,2})['"]''', text or "")
         return m.group(1) if m else None
 
-    def _fetch_source_version(self):
+    def _fetch_source_version(self, timeout=20):
         """Authoritative latest: the `__version__` on the release branch. None on any failure
         (offline / rate-limited / air-gapped) so the previous state is kept untouched."""
         try:
@@ -8067,13 +8076,13 @@ class UpdateChecker:
                 # serves the whole file if it ignores the header, and the regex still matches).
                 headers={"User-Agent": USER_AGENT, "Accept": "text/plain",
                          "Range": "bytes=0-16383"})
-            with urllib.request.urlopen(req, timeout=20) as r:   # nosec - fixed GitHub host
+            with urllib.request.urlopen(req, timeout=timeout) as r:   # nosec - fixed GitHub host
                 text = r.read(65536).decode("utf-8", "replace")
         except Exception:  # noqa: BLE001
             return None
         return self._parse_source_version(text)
 
-    def _fetch_release(self, latest):
+    def _fetch_release(self, latest, timeout=20):
         """Best-effort enrichment only: the published release whose tag matches `latest` (for its
         notes + link). Never decides whether an update is available. When `latest` is unknown, falls
         back to the newest matching release. None on failure or when no matching release exists yet."""
@@ -8081,7 +8090,7 @@ class UpdateChecker:
             req = urllib.request.Request(
                 self.API.format(self.repo),
                 headers={"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=20) as r:   # nosec - fixed GitHub host
+            with urllib.request.urlopen(req, timeout=timeout) as r:   # nosec - fixed GitHub host
                 rels = json.loads(r.read().decode("utf-8"))
         except Exception:  # noqa: BLE001
             return None
@@ -8104,9 +8113,9 @@ class UpdateChecker:
             return None                             # no tagged release for `latest` yet
         return best[1] if best else None
 
-    def _check(self):
-        latest = self._fetch_source_version()       # authoritative signal
-        rel = self._fetch_release(latest)           # optional notes/link
+    def _check(self, timeout=20):
+        latest = self._fetch_source_version(timeout=timeout)       # authoritative signal
+        rel = self._fetch_release(latest, timeout=timeout)         # optional notes/link
         if latest is None and rel is None:
             return                                  # nothing learned -> keep last good state
         with self.lock:
@@ -15996,10 +16005,16 @@ def make_handler(cache):
                 self._send_json({"ok": True, "version": __version__,
                                  "meta": (cache.get().get("meta") or {})})
             elif path == "/api/update":
-                # Current version + best-effort "is a newer release out?" status (cached; read-only;
-                # only ever contacts api.github.com and never downloads or runs anything).
-                self._send_json(cache.updater.status() if getattr(cache, "updater", None)
-                                else {"version": __version__, "enabled": False, "update_available": False})
+                # Current version + best-effort "is a newer release out?" status. Read-only; only ever
+                # contacts GitHub and never downloads or runs anything. `?refresh=1` forces a fresh
+                # check NOW (what the UI button sends) instead of returning the up-to-24h-old cache.
+                upd = getattr(cache, "updater", None)
+                if not upd:
+                    self._send_json({"version": __version__, "enabled": False, "update_available": False})
+                elif "refresh=1" in (self.path.split("?", 1)[1] if "?" in self.path else ""):
+                    self._send_json(upd.refresh())
+                else:
+                    self._send_json(upd.status())
             elif path == "/api/snapshot":
                 force = "force=1" in self.path
                 try:

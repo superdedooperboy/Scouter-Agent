@@ -22,6 +22,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -355,8 +356,8 @@ class TestUpdateChecker(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         uc = agent.UpdateChecker(current=current,
                                  cache_file=os.path.join(tmp, "update-check.json"))
-        uc._fetch_source_version = lambda: source_version
-        uc._fetch_release = lambda latest: release
+        uc._fetch_source_version = lambda timeout=20: source_version
+        uc._fetch_release = lambda latest, timeout=20: release
         return uc
 
     def test_source_version_newer_than_running_reports_update(self):
@@ -377,7 +378,7 @@ class TestUpdateChecker(unittest.TestCase):
         # A stale release (1.0.0) must never win over the source version on main.
         rel = {"tag_name": "mac-v1.0.0", "html_url": "https://example/r", "body": "old"}
         uc = self._checker("1.9.0", "1.9.1", release=None)
-        uc._fetch_release = lambda latest: None       # no release matches 1.9.1 yet
+        uc._fetch_release = lambda latest, timeout=20: None   # no release matches 1.9.1 yet
         uc._check()
         self.assertTrue(uc.status()["update_available"])
         self.assertEqual(uc.status()["latest"], "1.9.1")
@@ -395,10 +396,21 @@ class TestUpdateChecker(unittest.TestCase):
     def test_offline_probe_keeps_last_good_state(self):
         uc = self._checker("1.9.0", "1.9.1")
         uc._check()                                   # learns 1.9.1
-        uc._fetch_source_version = lambda: None       # next probe is offline
-        uc._fetch_release = lambda latest: None
+        uc._fetch_source_version = lambda timeout=20: None   # next probe is offline
+        uc._fetch_release = lambda latest, timeout=20: None
         uc._check()
         self.assertEqual(uc.status()["latest"], "1.9.1")   # not wiped back to "up to date"
+
+    def test_refresh_rechecks_even_when_cache_is_fresh(self):
+        # The reported bug: running 1.9.3 with a fresh cache that saw 1.9.3 as latest; main has since
+        # advanced to 1.10.0. start() would skip (TTL not elapsed) and the button returned the stale
+        # cache. refresh() must re-check NOW and report the update.
+        uc = self._checker("1.9.3", "1.10.0")
+        uc.state = {"checked_ts": int(time.time()), "current": "1.9.3", "latest": "1.9.3"}
+        self.assertFalse(uc.status()["update_available"])      # stale cache says up to date
+        st = uc.refresh()
+        self.assertEqual(st["latest"], "1.10.0")
+        self.assertTrue(st["update_available"])
 
     def test_parse_source_version(self):
         self.assertEqual(

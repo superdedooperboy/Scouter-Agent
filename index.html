@@ -2001,6 +2001,9 @@ function renderDetail(id){
   } else if(n.type==='file'){
     kv.push(['file',det.path?det.path.split('/').pop():''],['size',det.size!=null?fmtBytes(det.size):''],
             ['modified',det.mtime?new Date(det.mtime*1000).toLocaleString():''],['path',det.path]);
+    if(det.category==='webshell') kv.push(
+            ['finding', det.session_file?'PHP webshell in a session file (php2shell drop)':'disguised webshell — PHP in a non-PHP file'],
+            ['sinks', (det.sinks||[]).join(', ')]);
     if(det.via==='esf') kv.push(['capture','⚡ real-time (Endpoint Security)'],['event',det.event],
             ['written by',det.source_app||'(unknown)']);
   } else if(n.type==='detection'){
@@ -3589,6 +3592,11 @@ function sensorCards(m){
     push('Host inventory','Installs & media', 'ok', `${pv.flagged||0} flagged`,
          `${pv.install||0} install receipt(s) · ${pv.mount||0} external mount(s) · ${pv.download||0} download(s) tracked`);
   } else push('Host inventory','Installs & media','off','—','Disabled with --no-provenance.');
+  const ws=m.webshell||{};
+  if(ws.enabled){
+    push('Host inventory','Webshell scan', ws.flagged?'warn':'ok', `${ws.flagged||0} flagged`,
+         `Content-scanning ${(ws.dirs||[]).length} dir(s) for PHP in session files / disguised drops · ${ws.scanned||0} file(s) last pass`);
+  } else push('Host inventory','Webshell scan','off','—','Disabled with --no-webshell-scan.');
   const ra=m.raccess||{};
   if(ra.enabled){ const svc=(ra.services_on||[]).length;
     push('Host inventory','Remote access', svc?'warn':'ok', `${svc} service(s) on · ${ra.authorized_keys||0} authorized_keys`,

@@ -10,6 +10,22 @@ agents, versioned independently.
 
 ### Added
 
+**Webshell content scanner (T1505.003), both platforms.** A new read-only collector that reads file
+*contents* in the PHP session directories and common drop locations, flagging a PHP webshell hidden
+where PHP should never be:
+- A **session file** (`sess_*`) containing `<?php … system($_GET)` — the php2shell
+  `PHP_SESSION_UPLOAD_PROGRESS` drop. A session file holds serialized data, never executable PHP, so
+  this is flagged **CRITICAL**.
+- PHP + a command/eval sink hiding in a **non-`.php` file** (a `.txt`, an image, a log) — a disguised
+  webshell, flagged **HIGH**.
+
+A real `.php` application file and benign serialized session data are deliberately not flagged
+(near-zero FP). Bounded (file-size and per-pass caps), and a finding is kept ~24h for triage even if
+the attacker deletes the file. macOS scans `/tmp` and `/var/tmp`; Linux scans the distro PHP session
+dirs (`/var/lib/php*/sessions`, …) plus `/tmp` / `/dev/shm`. Flags: `--no-webshell-scan`,
+`--webshell-interval`, `--webshell-dir` (for a custom `session.save_path`). Surfaces as a file node
+with the matched sinks; no new rules/builtins, no Mesh change.
+
 **Anti-forensics detection — forensic-store wipes (T1070 / T1562).** Two new high-confidence built-in
 rules close the FSEvents anti-forensics gap and its Linux analog:
 - macOS `b-forensic-wipe`: flags deleting or clearing a macOS forensic store — the FSEvents

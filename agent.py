@@ -5623,6 +5623,148 @@ class FileScanner:
 
 
 # ---------------------------------------------------------------------------
+# Webshell content scan. The php2shell drop plants PHP into a session file (sess_* containing
+# `<?php ... system($_GET['c'])`) via PHP_SESSION_UPLOAD_PROGRESS — and a PHP session file must never
+# contain executable PHP. More broadly, PHP code with a command/eval sink hiding in a NON-.php file (a
+# .txt, an image, a log) is a disguised webshell. This reads file CONTENTS (bounded, read-only) in the
+# session dirs and common drop locations and flags those two cases. A normal .php application file is
+# deliberately NOT flagged (that is the app's own code), so this stays near-zero-FP. T1505.003.
+# ---------------------------------------------------------------------------
+WEBSHELL_NODE_TTL = 24 * 3600
+WEBSHELL_MAX_FILE = 512 * 1024           # don't open files bigger than this
+WEBSHELL_READ_HEAD = 65536               # bytes read per file
+WEBSHELL_FILE_CAP = 4000                 # files opened per pass (bounded)
+WEBSHELL_PHP_OPEN_RE = re.compile(rb"<\?(php\b|=)")
+# A PHP open tag alone is not a webshell (a benign template has one); the sink/superglobal is what
+# turns it into one — a command/code execution call, or attacker input pulled from a superglobal.
+WEBSHELL_SINK_RE = re.compile(
+    rb"(?i)(\b(system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec|eval|assert"
+    rb"|create_function|call_user_func(_array)?)\s*\(|\$_(GET|POST|REQUEST|COOKIE|SERVER|FILES)\s*\["
+    rb"|\b(base64_decode|gzinflate|gzuncompress|str_rot13|convert_uudecode)\s*\(|preg_replace\s*\([^)]*/e)")
+WEBSHELL_PHP_EXTS = (".php", ".php3", ".php4", ".php5", ".php7", ".phtml", ".pht", ".phar", ".inc")
+WEBSHELL_SCAN_DIRS = ("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp")
+
+
+def scan_data_for_webshell(data):
+    """(matched, sinks): True when `data` (bytes) carries a PHP open tag AND a dangerous sink or
+    superglobal. Returns the sink keywords found (for the alert). Pure + testable."""
+    if not data or not WEBSHELL_PHP_OPEN_RE.search(data):
+        return False, []
+    sinks = []
+    for m in WEBSHELL_SINK_RE.finditer(data):
+        s = m.group(0).decode("latin-1", "replace").strip()
+        if s not in sinks:
+            sinks.append(s)
+        if len(sinks) >= 6:
+            break
+    return bool(sinks), sinks
+
+
+class WebshellScanner:
+    """Content-scans files in the PHP session dirs + common drop locations for a PHP webshell hidden
+    where PHP should never be: a session file (sess_*) that contains PHP — the php2shell
+    PHP_SESSION_UPLOAD_PROGRESS drop, flagged CRITICAL — or a non-.php file carrying PHP + a dangerous
+    sink (a disguised webshell), flagged HIGH. A normal .php application file is not flagged. Read-only
+    and bounded (file-size / per-pass caps). A match is flagged once and kept ~24h for triage even if
+    the attacker deletes it. (The default PHP session.save_path is covered; a custom path set in
+    php.ini is not auto-discovered — add it with --webshell-dir.)"""
+
+    def __init__(self, enabled=True, interval=300, dirs=WEBSHELL_SCAN_DIRS):
+        self.enabled = enabled
+        self.interval = max(60, interval)
+        self.dirs = tuple(dict.fromkeys(dirs))
+        self.lock = threading.Lock()
+        self.flagged = {}                 # nid -> (first_flagged_ts, node)
+        self.scanned = 0
+        self.started = False
+
+    def start(self):
+        if not self.enabled or self.started:
+            return
+        self.started = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                self._collect()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(self.interval)
+
+    def snapshot(self):
+        with self.lock:
+            return [n for _, n in self.flagged.values()]
+
+    def summary(self):
+        with self.lock:
+            return {"enabled": True, "dirs": list(self.dirs), "scanned": self.scanned,
+                    "flagged": len(self.flagged)}
+
+    @staticmethod
+    def _node(path, st, is_sess, ext, sinks):
+        if is_sess:
+            sev, score = "critical", 95
+            label = "webshell in session file: %s" % os.path.basename(path)
+            txt = ("PHP code in a PHP session file (%s) — session files hold serialized data, never "
+                   "executable PHP. This is the php2shell PHP_SESSION_UPLOAD_PROGRESS webshell drop." % path)
+        else:
+            sev, score = "high", 80
+            label = "webshell: %s" % os.path.basename(path)
+            txt = ("PHP webshell hidden in a non-PHP file (%s) — PHP code with a command/eval sink in a "
+                   "file that should not contain code." % path)
+        if sinks:
+            txt += " Sinks: " + ", ".join(sinks)
+        return {"id": "webshell:" + path, "type": "file", "label": label,
+                "score": score, "severity": sev,
+                "reasons": [reason(txt, "T1505.003", score)],
+                "detail": {"category": "webshell", "path": path, "size": st.st_size,
+                           "mtime": int(st.st_mtime), "session_file": is_sess, "sinks": sinks,
+                           "hashes": {"status": "n/a"}}}
+
+    def _collect(self):
+        now, scanned, found = int(time.time()), 0, {}
+        for d in self.dirs:
+            if scanned >= WEBSHELL_FILE_CAP:
+                break
+            try:
+                entries = os.listdir(d)
+            except OSError:
+                continue
+            for name in entries:
+                if scanned >= WEBSHELL_FILE_CAP:
+                    break
+                p = os.path.join(d, name)
+                try:
+                    lst = os.lstat(p)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(lst.st_mode) or lst.st_size == 0 or lst.st_size > WEBSHELL_MAX_FILE:
+                    continue                                   # regular, non-empty, bounded files only
+                is_sess = name.startswith("sess_")
+                ext = os.path.splitext(name)[1].lower()
+                if not is_sess and ext in WEBSHELL_PHP_EXTS:
+                    continue                                   # a real .php file is the app's code, not a drop
+                scanned += 1
+                try:
+                    with open(p, "rb") as f:
+                        data = f.read(WEBSHELL_READ_HEAD)
+                except OSError:
+                    continue
+                matched, sinks = scan_data_for_webshell(data)
+                if matched:
+                    n = self._node(p, lst, is_sess, ext, sinks)
+                    found[n["id"]] = (now, n)
+        with self.lock:
+            for k, v in found.items():
+                if k not in self.flagged:
+                    self.flagged[k] = v                        # flag once; keep for TTL even if deleted
+            cutoff = now - WEBSHELL_NODE_TTL
+            self.flagged = {k: v for k, v in self.flagged.items() if v[0] >= cutoff}
+            self.scanned = scanned
+
+
+# ---------------------------------------------------------------------------
 # Authentication telemetry — login sessions (last/who) + unified-log auth events
 # (sudo / ssh / failed auth). Baselines each user's normal sources/hours/methods
 # (seeded instantly from `last` history, persisted in the DB) and flags outliers.
@@ -13007,7 +13149,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
                 auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                 posture=None, shellhist=None, rules=None, sqldet=None, suppressions=None,
                 responder=None, esf=None, incident_store=None, history=None, decoys=None,
-                provenance=None):
+                provenance=None, webshell=None):
     t0 = time.time()
     procs = collect_processes()
     net = collect_network()
@@ -13338,6 +13480,11 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         for item in provenance.snapshot():
             add_node(item)
 
+    # --- webshell nodes (PHP in a session file / disguised webshell in a non-PHP file) ---
+    if webshell:
+        for item in webshell.snapshot():
+            add_node(item)
+
     # --- ESF real-time nodes (ephemeral exec-and-exit processes + new files in watched dirs) ---
     if esf:
         for item in esf.snapshot():
@@ -13539,6 +13686,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         "config": posture.summary() if posture else {"enabled": False},
         "shell": shellhist.summary() if shellhist else {"enabled": False},
         "provenance": provenance.summary() if provenance else {"enabled": False},
+        "webshell": webshell.summary() if webshell else {"enabled": False},
         "esf": esf.summary() if esf else {"enabled": False},
         "incidents": incidents_meta,
         "rules": {"enabled": bool(rules), "builtin": len(BUILTIN_RULES),
@@ -13564,7 +13712,7 @@ class SnapshotCache:
                  auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                  posture=None, shellhist=None, rules=None, sqldet=None, vr=None, responder=None,
                  lifecycle=None, ai=None, suppressions=None, ntfy=None, esf=None, incidents=None,
-                 exporter=None, attack=None, decoys=None, provenance=None):
+                 exporter=None, attack=None, decoys=None, provenance=None, webshell=None):
         self.interval = interval
         self.no_sig = no_sig
         self.sig = SignatureChecker(enabled=not no_sig)
@@ -13594,6 +13742,7 @@ class SnapshotCache:
         self.attack = attack
         self.decoys = decoys
         self.provenance = provenance
+        self.webshell = webshell
         self.lock = threading.Lock()
         self.data = None
         self.ts = 0.0
@@ -13636,7 +13785,7 @@ class SnapshotCache:
                                suppressions=self.suppressions, responder=self.responder,
                                esf=self.esf, incident_store=self.incidents,
                                history=self.history, decoys=self.decoys,
-                               provenance=self.provenance)
+                               provenance=self.provenance, webshell=self.webshell)
             if self.history:
                 data["meta"]["history"] = self.history.stats()
             if self.decoys:
@@ -21084,6 +21233,12 @@ def main():
                     help="disable install-receipt + volume-mount (USB/DMG/network) change detection")
     ap.add_argument("--provenance-interval", type=int, default=600,
                     help="seconds between install/mount provenance scans (default 600)")
+    ap.add_argument("--no-webshell-scan", action="store_true",
+                    help="disable the PHP-webshell content scan of session dirs / drop locations")
+    ap.add_argument("--webshell-interval", type=int, default=300,
+                    help="seconds between webshell content scans (default 300)")
+    ap.add_argument("--webshell-dir", action="append", default=[], metavar="DIR",
+                    help="extra directory to webshell-scan (repeatable; e.g. a custom session.save_path)")
     ap.add_argument("--no-esf", action="store_true",
                     help="disable real-time Endpoint Security events (eslogger; needs sudo, macOS 13+)")
     ap.add_argument("--esf-ephemeral-secs", type=float, default=ESF_EPHEMERAL_MAX_LIFETIME,
@@ -21291,6 +21446,10 @@ def main():
     provenance = ProvenanceCollector(enabled=not args.no_provenance,
                                      interval=args.provenance_interval)
     provenance.start()
+    webshell = WebshellScanner(enabled=not args.no_webshell_scan,
+                               interval=args.webshell_interval,
+                               dirs=tuple(WEBSHELL_SCAN_DIRS) + tuple(args.webshell_dir or ()))
+    webshell.start()
     esf = ESFCollector(history=history, enabled=not args.no_esf,
                        ephemeral_lifetime=args.esf_ephemeral_secs)
     esf.start()
@@ -21336,7 +21495,7 @@ def main():
                           rules=rules, sqldet=sqldet, vr=vr, responder=responder,
                           lifecycle=lifecycle, ai=ai, suppressions=suppressions, ntfy=ntfy, esf=esf,
                           incidents=incidents, exporter=exporter, attack=attack, decoys=decoys,
-                          provenance=provenance)
+                          provenance=provenance, webshell=webshell)
     cache.analyses = analyses          # exposed to the ai-analyze handler + the /api/ai-analysis reader
     cache.updater = updater            # served by /api/health + /api/update
     updater.start()                    # background, cached 24h; no-op with --no-update-check
@@ -21464,6 +21623,11 @@ def main():
               f"— install receipts + USB/DMG/network mounts, diff every {args.provenance_interval}s")
     else:
         print("│  Provenance: off")
+    if webshell.enabled:
+        print(f"│  Webshell:   scanning {', '.join(webshell.dirs)} for PHP in session files / drops, "
+              f"every {args.webshell_interval}s")
+    else:
+        print("│  Webshell:   off")
     if tcc.enabled:
         ts = tcc.summary()
         access = ("reading TCC.db" if ts["accessible"]

@@ -5768,6 +5768,7 @@ class FileScanner:
 WEBSHELL_NODE_TTL = 24 * 3600
 WEBSHELL_MAX_FILE = 1024 * 1024          # don't open files bigger than this
 WEBSHELL_READ_HEAD = 131072              # bytes read per file (128K head)
+WEBSHELL_READ_TAIL = 65536               # + 64K tail on a larger file (shell appended after an image)
 WEBSHELL_FILE_CAP = 20000                # files opened per pass (bounded, across all zones)
 WEBSHELL_WEBROOT_MAXDEPTH = 12           # how deep to recurse into a webroot
 WEBSHELL_WEBROOT_RECENT = 14 * 86400     # in a webroot, a non-script file is read only if this new
@@ -5792,6 +5793,7 @@ WS_PHP_STRICT = re.compile(
     rb"|\bcreate_function\s*\([^;]{0,200}\$_(?:GET|POST|REQUEST|COOKIE)\b"
     rb"|\bcall_user_func(?:_array)?\s*\(\s*\$_(?:GET|POST|REQUEST|COOKIE)\b"
     rb"|\$_(?:GET|POST|REQUEST|COOKIE)\s*\[[^\]]{1,60}\]\s*\("                                     # $_GET['x'](...) dynamic call
+    rb"|\$[a-zA-Z_]\w*\s*\(\s*\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b"                              # $fn($_GET[...]) variable function on input
     rb"|\bpreg_replace\s*\(\s*(['\"])(?:(?!\1).){0,200}/e\1"                                       # preg_replace '/.../e'
     rb")")
 WS_JSP_STRICT = re.compile(
@@ -5864,6 +5866,41 @@ WEBSHELL_MARKERS = (
     b"eval(base64_decode($_post", b"preg_replace(\"/.*/e\"", b"preg_replace('/.*/e'",
 )
 
+# Tier-C obfuscation: a code-execution function fed a packed/encoded payload — the shells that hide
+# their sink entirely, so the strict patterns above never see a plain superglobal. PHP-focused, where
+# obfuscated shells overwhelmingly live. Each signal is paired with a real code-exec call so a file
+# that merely embeds a base64 blob (a font, an image, a cert) does not trip it.
+WS_OBF_EXEC_RE = re.compile(rb"(?i)\b(?:eval|assert|create_function)\s*\(")
+WS_OBF_DECODER_RE = re.compile(
+    rb"(?i)\b(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|convert_uudecode|hex2bin"
+    rb"|urldecode|rawurldecode|strrev|pack)\s*\(")
+WS_OBF_PACKED_RE = re.compile(                                  # eval/decode of a long literal blob
+    rb"(?i)\b(?:eval|assert|base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|convert_uudecode)"
+    rb"\s*\(\s*(?:strrev\s*\(\s*)?['\"][A-Za-z0-9+/]{120,}={0,2}['\"]")
+WS_OBF_CHR_CHAIN_RE = re.compile(rb"(?i)(?:chr\s*\(\s*\d{1,3}\s*\)\s*\.\s*){4,}")    # chr(.).chr(.).chr(.).chr(.)
+WS_OBF_SG_RE = re.compile(                                       # ${'_GET'} / ${"\x5f..."} / $$var superglobal obfuscation
+    rb"(?i)\$\{\s*['\"]_(?:GET|POST|REQUEST|COOKIE|SERVER)['\"]\s*\}"
+    rb"|\$\{\s*['\"](?:\\x[0-9a-fA-F]{2}){2,}|\$\$[a-zA-Z_]")
+
+
+def detect_php_obfuscation(data):
+    """(matched, reason): True when PHP `data` shows obfuscated code execution (Tier-C). Each path
+    requires an actual code-exec call next to the obfuscation, so embedded-blob false positives stay
+    near zero. Pure + testable."""
+    if not WEBSHELL_PHP_OPEN_RE.search(data):
+        return False, ""
+    if WS_OBF_PACKED_RE.search(data):
+        return True, "code executed from a packed base64/compressed payload"
+    exec_present = WS_OBF_EXEC_RE.search(data)
+    if exec_present and WS_OBF_CHR_CHAIN_RE.search(data):
+        return True, "code assembled from chr() sequences then executed"
+    if exec_present and WS_OBF_SG_RE.search(data):
+        return True, "obfuscated superglobal feeding code execution"
+    if exec_present and len(WS_OBF_DECODER_RE.findall(data)) >= 2:
+        return True, "nested decoder chain feeding code execution"
+    return False, ""
+
+
 # Default scan zones. DROP = a web script has no business here (loose bar); WEBROOT = scripts live
 # here legitimately (strict bar only).
 # Common PHP session.save_path locations across distros/versions, plus the usual drop dirs.
@@ -5925,6 +5962,7 @@ def classify_webshell(name, data, in_webroot=False):
     # First pass: strict bar, across every language whose extension or pre-filter matches.
     strict_lang = None
     strict_sinks = []
+    obf_reason = None
     for lang, _mitre, exts, open_re, loose_re, strict_re in WS_PROFILES:
         if ext not in exts and not (open_re and open_re.search(data)):
             continue
@@ -5932,6 +5970,14 @@ def classify_webshell(name, data, in_webroot=False):
             strict_lang = lang
             strict_sinks = _ws_collect_sinks(loose_re, data)
             break
+
+    # Tier-C: obfuscated PHP code execution — a shell that hides its sink behind packing/encoding, so
+    # no plain-superglobal strict pattern fired above. Strict-grade, so it applies in both zones.
+    if not strict_lang and WEBSHELL_PHP_OPEN_RE.search(data):
+        ok, why = detect_php_obfuscation(data)
+        if ok:
+            strict_lang, obf_reason = "php", why
+            strict_sinks = _ws_collect_sinks(WS_PHP_LOOSE, data)
 
     # Second pass: loose bar — DROP zone only, and only for a session file or a non-script file (a
     # misplaced real script is not a shell on the loose bar alone).
@@ -5961,7 +6007,8 @@ def classify_webshell(name, data, in_webroot=False):
         finding = "%s webshell in a session file (php2shell drop)" % lang.upper()
     elif strict:
         sev, score = "critical", 90
-        finding = "%s webshell — attacker input passed to a command/eval sink" % lang.upper()
+        finding = ("%s webshell — %s" % (lang.upper(), obf_reason)) if obf_reason \
+            else ("%s webshell — attacker input passed to a command/eval sink" % lang.upper())
     else:
         sev, score = "high", 80
         finding = "disguised %s webshell — code with a command/eval sink in a non-script file" % lang.upper()
@@ -6046,6 +6093,13 @@ class WebshellScanner:
             try:
                 with open(p, "rb") as f:
                     data = f.read(WEBSHELL_READ_HEAD)
+                    # Large file: also read the tail — a shell is often appended after a benign image.
+                    if lst.st_size > WEBSHELL_READ_HEAD + WEBSHELL_READ_TAIL and WEBSHELL_READ_TAIL:
+                        try:
+                            f.seek(lst.st_size - WEBSHELL_READ_TAIL)
+                            data += b"\n" + f.read(WEBSHELL_READ_TAIL)
+                        except OSError:
+                            pass
             except OSError:
                 return
             cls = classify_webshell(p, data, in_webroot=in_webroot)

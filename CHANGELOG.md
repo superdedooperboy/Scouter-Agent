@@ -22,19 +22,25 @@ Python-CGI. It scans two kinds of location with a different bar in each, so it s
   the Homebrew/MAMP/XAMPP/nginx docroots, etc. (where scripts live legitimately): the *strict* bar
   only. A framework's ordinary `system()` / `eval()` does **not** fire — only the shapes that are
   rare-to-nonexistent in real code: attacker input (a superglobal / request param) passed straight
-  into a command/eval sink, a superglobal called as a function (`$_GET['f'](…)`), obfuscated
-  `eval(base64_decode(…))`, the `preg_replace /e` trick, and the JSP/ASP/Perl/Python equivalents →
-  **CRITICAL**.
+  into a command/eval sink, a superglobal called as a function (`$_GET['f'](…)`), a variable function
+  called on a superglobal (`$fn($_GET[…])`), obfuscated `eval(base64_decode(…))`, the `preg_replace
+  /e` trick, and the JSP/ASP/Perl/Python equivalents → **CRITICAL**.
+- **Obfuscated code execution** (the PHP shells that hide their sink entirely): a code-exec call next
+  to a packed base64/compressed payload, a `chr()`-assembled string, a nested decoder chain, or an
+  obfuscated superglobal (`${'_GET'}`, `$$var`) → **CRITICAL**. Each path requires a real `eval` /
+  `assert` / `create_function` beside the obfuscation, so a file that merely embeds a base64 blob (a
+  font, an image, a cert) does not trip it.
 
 Plus a curated set of **named-shell signatures** (c99, r57, WSO, b374k, FilesMan, China Chopper
 `@eval($_POST…)`, GIF/PHP polyglot headers, reversed/nested decoders) that flag **CRITICAL** in any
 zone or language. A real application file and benign serialized session data are deliberately not
 flagged. Bounded throughout: file-size and per-pass caps, a webroot walk capped by depth that skips
-`.git`/`node_modules` and reads non-script files only when recently modified; a finding is kept ~24h
-for triage even if the attacker deletes the file. Flags: `--no-webshell-scan`, `--webshell-interval`,
-`--webshell-dir` (extra drop dir), `--webshell-webroot` (extra docroot). Surfaces as a file node
-carrying language, zone, confidence, matched sinks and any signature markers; no new rules/builtins,
-no Mesh change.
+`.git`/`node_modules` and reads non-script files only when recently modified. Each file is read as a
+128 KB head **plus** a 64 KB tail on larger files, so a shell appended after a benign image is still
+caught. A finding is kept ~24h for triage even if the attacker deletes the file. Flags:
+`--no-webshell-scan`, `--webshell-interval`, `--webshell-dir` (extra drop dir), `--webshell-webroot`
+(extra docroot). Surfaces as a file node carrying language, zone, confidence, matched sinks and any
+signature markers; no new rules/builtins, no Mesh change.
 
 **Anti-forensics detection — forensic-store wipes (T1070 / T1562).** Two new high-confidence built-in
 rules close the FSEvents anti-forensics gap and its Linux analog:

@@ -133,6 +133,41 @@ class TestClassifier(unittest.TestCase):
     def test_empty_is_none(self):
         self.assertIsNone(self.c("sess_x", "", False))
 
+    # --- Tier-C: obfuscated code execution ---
+    def test_obf_nested_decoder_chain_critical(self):
+        r = self.c("a.php", "<?php $x = gzinflate(base64_decode($y)); eval($x); ?>", True)
+        self.assertEqual(r["severity"], "critical")
+        self.assertIn("decoder", r["finding"])
+
+    def test_obf_chr_chain_critical(self):
+        r = self.c("b.php", "<?php $f = chr(115).chr(121).chr(115).chr(116).chr(101); eval($z); ?>", True)
+        self.assertEqual(r["severity"], "critical")
+        self.assertIn("chr()", r["finding"])
+
+    def test_obf_superglobal_critical(self):
+        r = self.c("c.php", "<?php $a = ${'_GET'}['x']; assert($a); ?>", True)
+        self.assertEqual(r["severity"], "critical")
+
+    def test_obf_varvar_critical(self):
+        r = self.c("d.php", "<?php $$k = 1; eval($payload); ?>", True)
+        self.assertEqual(r["severity"], "critical")
+
+    def test_variable_function_on_input_critical(self):
+        r = self.c("e.php", '<?php $g = "system"; $g($_GET["c"]); ?>', True)
+        self.assertEqual(r["severity"], "critical")
+
+    def test_obf_fp_base64_const_no_exec(self):
+        # a long base64 blob with no eval/decode wrapping it is benign (embedded asset)
+        self.assertIsNone(self.c("img.php", "<?php $logo = '" + "A" * 200 + "'; echo $logo; ?>", True))
+
+    def test_obf_fp_variable_callback_plain_arg(self):
+        self.assertIsNone(self.c("cb.php", '<?php $cb = "strtoupper"; echo $cb($name); ?>', True))
+
+    def test_detect_php_obfuscation_helper(self):
+        ok, why = agent.detect_php_obfuscation(b"<?php eval(str_rot13(base64_decode($p))); ?>")
+        self.assertTrue(ok)
+        self.assertFalse(agent.detect_php_obfuscation(b"<?php echo 'hello'; ?>")[0])
+
 
 class TestWebshellScanner(unittest.TestCase):
     def _scan_drop(self, files):
@@ -181,6 +216,13 @@ class TestWebshellScanner(unittest.TestCase):
     def test_empty_file_not_flagged(self):
         _, _, by = self._scan_drop({"sess_empty": ""})
         self.assertEqual(by, {})
+
+    def test_shell_appended_past_read_head_is_caught(self):
+        # a webshell appended to the end of a large benign file (past the head read) — tail read catches it
+        big = "A" * (agent.WEBSHELL_READ_HEAD + agent.WEBSHELL_READ_TAIL + 4096)
+        _, _, by = self._scan_webroot({"upload.php": big + CHINA_CHOPPER})
+        self.assertIn("upload.php", by)
+        self.assertEqual(by["upload.php"]["severity"], "critical")
 
     def test_flag_persists_after_file_is_deleted(self):
         d, ws, by = self._scan_drop({"sess_x": SHELL})

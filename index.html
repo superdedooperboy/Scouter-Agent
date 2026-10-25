@@ -2002,7 +2002,11 @@ function renderDetail(id){
     kv.push(['file',det.path?det.path.split('/').pop():''],['size',det.size!=null?fmtBytes(det.size):''],
             ['modified',det.mtime?new Date(det.mtime*1000).toLocaleString():''],['path',det.path]);
     if(det.category==='webshell') kv.push(
-            ['finding', det.session_file?'PHP webshell in a session file (php2shell drop)':'disguised webshell — PHP in a non-PHP file'],
+            ['finding', det.finding || (det.session_file?'webshell in a session file (php2shell drop)':'disguised webshell — code in a non-script file')],
+            ['language', (det.language||'').toUpperCase()],
+            ['zone', det.location==='session'?'PHP session dir':(det.location==='webroot'?'webroot (strict bar)':'drop dir (loose bar)')],
+            ['confidence', det.markers&&det.markers.length?'named-shell signature':(det.strict?'high (input→sink)':'disguised drop')],
+            ['markers', (det.markers||[]).join(', ')],
             ['sinks', (det.sinks||[]).join(', ')]);
     if(det.via==='esf') kv.push(['capture','⚡ real-time (Endpoint Security)'],['event',det.event],
             ['written by',det.source_app||'(unknown)']);
@@ -3595,7 +3599,7 @@ function sensorCards(m){
   const ws=m.webshell||{};
   if(ws.enabled){
     push('Host inventory','Webshell scan', ws.flagged?'warn':'ok', `${ws.flagged||0} flagged`,
-         `Content-scanning ${(ws.dirs||[]).length} dir(s) for PHP in session files / disguised drops · ${ws.scanned||0} file(s) last pass`);
+         `Content-scanning ${(ws.dirs||[]).length} drop dir(s) + ${(ws.webroots||[]).length} webroot(s) · PHP/JSP/ASP/Perl/Python · ${ws.scanned||0} file(s) last pass`);
   } else push('Host inventory','Webshell scan','off','—','Disabled with --no-webshell-scan.');
   const ra=m.raccess||{};
   if(ra.enabled){ const svc=(ra.services_on||[]).length;

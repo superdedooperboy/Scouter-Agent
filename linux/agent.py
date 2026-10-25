@@ -5748,31 +5748,136 @@ class FileScanner:
 
 
 # ---------------------------------------------------------------------------
-# Webshell content scan. The php2shell drop plants PHP into a session file (sess_* containing
-# `<?php ... system($_GET['c'])`) via PHP_SESSION_UPLOAD_PROGRESS — and a PHP session file must never
-# contain executable PHP. More broadly, PHP code with a command/eval sink hiding in a NON-.php file is
-# a disguised webshell. This reads file CONTENTS (bounded, read-only) in the PHP session dirs and
-# common drop locations and flags those two cases. A normal .php application file is deliberately NOT
-# flagged, so this stays near-zero-FP. T1505.003.
+# Webshell content scan. Reads file CONTENTS (bounded, read-only) and flags webshells in two zones,
+# with a different bar in each so it stays near-zero-FP:
+#
+#   DROP zones (session dirs, /tmp, /var/tmp — places a web script should NEVER live): the loose bar.
+#     A session file (sess_*) holding ANY web-script code is the php2shell PHP_SESSION_UPLOAD_PROGRESS
+#     drop → CRITICAL. Code + a command/eval sink in a non-script file (a .txt, image, log) is a
+#     disguised webshell → HIGH. (A real .php sitting in /tmp is only looked at with the strict bar.)
+#
+#   WEBROOT zones (/var/www, /srv/www, /usr/share/nginx/html … — where scripts live
+#     legitimately): the strict bar ONLY. A plain `system()`/`eval()` won't fire — a framework does
+#     those constantly. We flag only the exact patterns that are rare-to-nonexistent in real code:
+#     attacker input (a superglobal / request param) passed straight into a command/eval sink, a
+#     superglobal called as a function, obfuscated eval(base64_decode(...)), the preg_replace /e
+#     trick — plus a curated set of named-shell banner strings (c99/r57/WSO/b374k/China Chopper …).
+#
+# Languages: PHP, JSP (Java), ASP/ASPX (.NET + classic), Perl/CGI, Python-CGI. Covers T1505.003.
 # ---------------------------------------------------------------------------
 WEBSHELL_NODE_TTL = 24 * 3600
-WEBSHELL_MAX_FILE = 512 * 1024
-WEBSHELL_READ_HEAD = 65536
-WEBSHELL_FILE_CAP = 4000
+WEBSHELL_MAX_FILE = 1024 * 1024          # don't open files bigger than this
+WEBSHELL_READ_HEAD = 131072              # bytes read per file (128K head)
+WEBSHELL_FILE_CAP = 20000                # files opened per pass (bounded, across all zones)
+WEBSHELL_WEBROOT_MAXDEPTH = 12           # how deep to recurse into a webroot
+WEBSHELL_WEBROOT_RECENT = 14 * 86400     # in a webroot, a non-script file is read only if this new
+
+# PHP open tag + loose sink — the original php2shell detector, kept for the DROP-zone loose bar and
+# exported as a stable, testable helper (scan_data_for_webshell).
 WEBSHELL_PHP_OPEN_RE = re.compile(rb"<\?(php\b|=)")
 WEBSHELL_SINK_RE = re.compile(
     rb"(?i)(\b(system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec|eval|assert"
     rb"|create_function|call_user_func(_array)?)\s*\(|\$_(GET|POST|REQUEST|COOKIE|SERVER|FILES)\s*\["
     rb"|\b(base64_decode|gzinflate|gzuncompress|str_rot13|convert_uudecode)\s*\(|preg_replace\s*\([^)]*/e)")
+
+# Per-language profiles. Each: name, MITRE id, file extensions, an open/pre-filter regex (marks the
+# file as containing that language's code — cheap gate), a loose regex (code + any sink/input source,
+# used only in DROP zones) and a strict regex (a high-confidence webshell shape, rare in legit code,
+# used everywhere including webroots). Bytes, case-insensitive.
+WS_PHP_STRICT = re.compile(
+    rb"(?i)(?:"
+    rb"[@\s]*\b(?:eval|assert)\s*\(\s*(?:\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b"
+    rb"|(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|convert_uudecode)\s*\()"      # eval(input) / eval(decode(
+    rb"|\b(?:system|exec|shell_exec|passthru|popen|proc_open|pcntl_exec)\s*\(\s*\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b"  # exec(input)
+    rb"|\bcreate_function\s*\([^;]{0,200}\$_(?:GET|POST|REQUEST|COOKIE)\b"
+    rb"|\bcall_user_func(?:_array)?\s*\(\s*\$_(?:GET|POST|REQUEST|COOKIE)\b"
+    rb"|\$_(?:GET|POST|REQUEST|COOKIE)\s*\[[^\]]{1,60}\]\s*\("                                     # $_GET['x'](...) dynamic call
+    rb"|\bpreg_replace\s*\(\s*(['\"])(?:(?!\1).){0,200}/e\1"                                       # preg_replace '/.../e'
+    rb")")
+WS_JSP_STRICT = re.compile(
+    rb"(?i)(?:Runtime\.getRuntime\s*\(\s*\)\.exec\s*\(\s*[^;]{0,120}\brequest\.getParameter"
+    rb"|new\s+ProcessBuilder\s*\([^;]{0,160}\brequest\.getParameter"
+    rb"|\brequest\.getParameter\s*\([^;]{0,120}(?:Runtime\.getRuntime|ProcessBuilder|\.exec\s*\()"
+    rb"|Runtime\.getRuntime\s*\(\s*\)\.exec\s*\(\s*request\b)")
+WS_ASP_STRICT = re.compile(
+    rb"(?i)(?:\b(?:eval|execute(?:global)?)\s*\(\s*request\b"                                      # classic ASP eval/Execute(Request)
+    rb"|Process\.Start\s*\([^;]{0,160}\bRequest\b"
+    rb"|System\.Diagnostics\.Process[^;]{0,160}\bRequest\b"
+    rb"|(?:Server\.)?CreateObject\s*\(\s*(['\"])(?:WScript\.Shell|Shell\.Application|WScript\.Network)\1"
+    rb"|Response\.Write\s*\(\s*(?:eval|execute)\s*\(\s*request)")
+WS_PERL_STRICT = re.compile(
+    rb"(?i)(?:\b(?:system|exec)\s*\([^;]{0,120}\bparam\s*\("
+    rb"|`[^`]{0,160}\bparam\s*\([^`]{0,160}`"
+    rb"|\bopen\s*\([^;]{0,80}\bparam\s*\([^;]{0,80}\|)")
+WS_PY_STRICT = re.compile(
+    rb"(?i)(?:os\.system\s*\([^;)]{0,160}(?:FieldStorage|cgi\.|\bform\[|environ\s*\[)"
+    rb"|subprocess\.(?:Popen|call|run|check_output)\s*\([^;)]{0,200}(?:FieldStorage|cgi\.|\bform\[))")
+
+WS_PHP_LOOSE = WEBSHELL_SINK_RE
+WS_JSP_LOOSE = re.compile(rb"(?i)(Runtime\.getRuntime|ProcessBuilder|java\.lang\.Process|request\.getParameter)")
+WS_ASP_LOOSE = re.compile(rb"(?i)(Request\s*[.(\[]|\beval\s*\(|\bexecute(global)?\s*\(|Process\.Start|WScript\.Shell|System\.Diagnostics\.Process|CreateObject)")
+WS_PERL_LOOSE = re.compile(rb"(?i)(\bsystem\s*\(|\bexec\s*\(|`[^`]+`|\bqx[/{(]|\bparam\s*\()")
+WS_PY_LOOSE = re.compile(rb"(?i)(os\.system\s*\(|subprocess\.(Popen|call|run)|\bFieldStorage\b)")
+
+WS_PHP_OPEN = WEBSHELL_PHP_OPEN_RE
+WS_JSP_OPEN = re.compile(rb"(?i)(<%|<jsp:|page\s+import|Runtime\.getRuntime)")
+WS_ASP_OPEN = re.compile(rb"(?i)(<%|<script\s+runat|<script\s+language\s*=\s*['\"]?vb|Response\.Write|CreateObject)")
+WS_PERL_OPEN = re.compile(rb"(?i)(#!\s*\S*perl|use\s+CGI|->param|\bparam\s*\()")
+WS_PY_OPEN = re.compile(rb"(?i)(#!\s*\S*python|import\s+cgi|FieldStorage|import\s+subprocess|import\s+os)")
+
+# (name, mitre, exts, open_re, loose_re, strict_re)
+WS_PROFILES = (
+    ("php", "T1505.003",
+     (".php", ".php3", ".php4", ".php5", ".php7", ".php8", ".phtml", ".pht", ".phar", ".inc", ".ctp"),
+     WS_PHP_OPEN, WS_PHP_LOOSE, WS_PHP_STRICT),
+    ("jsp", "T1505.003",
+     (".jsp", ".jspx", ".jspf", ".jsw", ".jsv", ".jhtml"),
+     WS_JSP_OPEN, WS_JSP_LOOSE, WS_JSP_STRICT),
+    ("asp", "T1505.003",
+     (".asp", ".aspx", ".ashx", ".asmx", ".ascx", ".asax", ".cer", ".asa", ".aspq", ".cshtml"),
+     WS_ASP_OPEN, WS_ASP_LOOSE, WS_ASP_STRICT),
+    ("perl", "T1505.003",
+     (".pl", ".cgi", ".pm"),
+     WS_PERL_OPEN, WS_PERL_LOOSE, WS_PERL_STRICT),
+    ("python", "T1505.003",
+     (".py",),
+     WS_PY_OPEN, WS_PY_LOOSE, WS_PY_STRICT),
+)
+# Union of every script extension — a file with one of these is "a script", so in a DROP zone the
+# loose bar is skipped for it (a misplaced script is not automatically a shell; the strict bar still
+# applies). In a webroot, these are exactly the files we always read.
+WEBSHELL_SCRIPT_EXTS = frozenset(e for _n, _m, exts, *_ in WS_PROFILES for e in exts)
+# Kept for back-compat (was the PHP-only set).
 WEBSHELL_PHP_EXTS = (".php", ".php3", ".php4", ".php5", ".php7", ".phtml", ".pht", ".phar", ".inc")
+
+# Named-shell banners + unmistakable obfuscation tells. A hit is a webshell regardless of zone or
+# language. Kept deliberately specific (shell names / magic headers / reversed-or-nested decoders),
+# never ordinary English words, so a blog post or a doc can't trip it. Matched against lower-cased data.
+WEBSHELL_MARKERS = (
+    b"c99shell", b"r57shell", b"wso shell", b"b374k", b"filesman", b"phpjackal",
+    b"indoxploit", b"madspot", b"zehir", b"angel shell", b"mini shell by", b"priv8 shell",
+    b"gif89a<?php",                                    # GIF/PHP polyglot upload shell
+    b"edoced_46esab",                                  # 'base64_decode' spelled backwards
+    b"eval(gzinflate(base64_decode", b"eval(gzuncompress(base64_decode",
+    b"eval(gzdecode(base64_decode", b"eval(str_rot13(base64_decode",
+    b"@eval($_post[", b"@assert($_post[", b"@eval($_request[", b"@eval($_get[",
+    b"eval(base64_decode($_post", b"preg_replace(\"/.*/e\"", b"preg_replace('/.*/e'",
+)
+
+# Default scan zones. DROP = a web script has no business here (loose bar); WEBROOT = scripts live
+# here legitimately (strict bar only).
 # Common PHP session.save_path locations across distros/versions, plus the usual drop dirs.
 WEBSHELL_SCAN_DIRS = ("/var/lib/php/sessions", "/var/lib/php/session", "/var/lib/php5/sessions",
                       "/var/lib/php7/sessions", "/var/lib/php8/sessions", "/tmp", "/var/tmp", "/dev/shm")
+WEBSHELL_WEBROOT_DIRS = (
+    "/var/www", "/var/www/html", "/srv/www", "/srv/http", "/usr/share/nginx/html",
+    "/usr/local/apache2/htdocs", "/opt/lampp/htdocs", "/opt/bitnami/apache/htdocs",
+)
 
 
 def scan_data_for_webshell(data):
     """(matched, sinks): True when `data` (bytes) carries a PHP open tag AND a dangerous sink or
-    superglobal. Returns the sink keywords found (for the alert). Pure + testable."""
+    superglobal. The DROP-zone loose bar for PHP, kept as a stable, pure, testable helper."""
     if not data or not WEBSHELL_PHP_OPEN_RE.search(data):
         return False, []
     sinks = []
@@ -5785,23 +5890,109 @@ def scan_data_for_webshell(data):
     return bool(sinks), sinks
 
 
-class WebshellScanner:
-    """Content-scans files in the PHP session dirs + common drop locations for a PHP webshell hidden
-    where PHP should never be: a session file (sess_*) that contains PHP — the php2shell
-    PHP_SESSION_UPLOAD_PROGRESS drop, flagged CRITICAL — or a non-.php file carrying PHP + a dangerous
-    sink (a disguised webshell), flagged HIGH. A normal .php application file is not flagged. Read-only
-    and bounded (file-size / per-pass caps). A match is flagged once and kept ~24h for triage even if
-    the attacker deletes it. (A custom session.save_path set in php.ini is not auto-discovered — add it
-    with --webshell-dir.)"""
+def _ws_collect_sinks(loose_re, data, cap=6):
+    """Pull up to `cap` distinct sink/input tokens from `data` for display in the alert."""
+    out = []
+    if not loose_re:
+        return out
+    for m in loose_re.finditer(data):
+        s = m.group(0).decode("latin-1", "replace").strip()
+        if s not in out:
+            out.append(s)
+        if len(out) >= cap:
+            break
+    return out
 
-    def __init__(self, enabled=True, interval=300, dirs=WEBSHELL_SCAN_DIRS):
+
+def classify_webshell(name, data, in_webroot=False):
+    """Classify a single file's bytes. Returns a dict (lang, strict, is_session, severity, score,
+    sinks, markers, finding, mitre) when it looks like a webshell, else None.
+
+    DROP zone (in_webroot=False): a sess_* holding script code → critical (php2shell); code + a sink
+    in a non-script file → high (disguised); a misplaced script file is judged only by the strict bar.
+    WEBROOT zone (in_webroot=True): strict bar + named markers only — the loose bar is never applied,
+    because real applications legitimately contain plain sink calls. A named-shell marker is always a
+    hit. Pure + testable."""
+    if not data:
+        return None
+    base = os.path.basename(name)
+    is_sess = base.startswith("sess_")
+    ext = os.path.splitext(base)[1].lower()
+    is_script_ext = ext in WEBSHELL_SCRIPT_EXTS
+
+    markers = [m.decode("latin-1") for m in WEBSHELL_MARKERS if m in data.lower()]
+
+    # First pass: strict bar, across every language whose extension or pre-filter matches.
+    strict_lang = None
+    strict_sinks = []
+    for lang, _mitre, exts, open_re, loose_re, strict_re in WS_PROFILES:
+        if ext not in exts and not (open_re and open_re.search(data)):
+            continue
+        if strict_re and strict_re.search(data):
+            strict_lang = lang
+            strict_sinks = _ws_collect_sinks(loose_re, data)
+            break
+
+    # Second pass: loose bar — DROP zone only, and only for a session file or a non-script file (a
+    # misplaced real script is not a shell on the loose bar alone).
+    loose_lang = None
+    loose_sinks = []
+    if not in_webroot and not strict_lang and (is_sess or not is_script_ext):
+        for lang, _mitre, exts, open_re, loose_re, strict_re in WS_PROFILES:
+            if ext not in exts and not (open_re and open_re.search(data)):
+                continue
+            found = _ws_collect_sinks(loose_re, data)
+            if found:
+                loose_lang, loose_sinks = lang, found
+                break
+
+    if not (markers or strict_lang or loose_lang):
+        return None
+
+    lang = strict_lang or loose_lang or (markers and "php") or "php"
+    strict = bool(strict_lang)
+    sinks = strict_sinks or loose_sinks
+
+    if markers:
+        sev, score = "critical", 95
+        finding = "Known webshell signature (%s)" % ", ".join(markers[:3])
+    elif is_sess:
+        sev, score = "critical", 95
+        finding = "%s webshell in a session file (php2shell drop)" % lang.upper()
+    elif strict:
+        sev, score = "critical", 90
+        finding = "%s webshell — attacker input passed to a command/eval sink" % lang.upper()
+    else:
+        sev, score = "high", 80
+        finding = "disguised %s webshell — code with a command/eval sink in a non-script file" % lang.upper()
+
+    return {"lang": lang, "strict": strict, "is_session": is_sess, "severity": sev,
+            "score": score, "sinks": sinks, "markers": markers, "finding": finding,
+            "mitre": "T1505.003"}
+
+
+class WebshellScanner:
+    """Content-scans files for a webshell, read-only and bounded, in two zones with a different bar in
+    each (see the module comment above): the DROP zone (session dirs + /tmp-like locations, loose bar —
+    a sess_* holding code is the php2shell drop → CRITICAL; code + a sink in a non-script file →
+    disguised shell → HIGH) and the WEBROOT zone (where scripts live legitimately, strict bar only —
+    only attacker-input-into-a-sink patterns + named-shell markers fire → CRITICAL). Languages: PHP,
+    JSP, ASP/ASPX, Perl/CGI, Python-CGI. A match is flagged once and kept ~24h for triage even if the
+    attacker deletes it. (A custom PHP session.save_path isn't auto-discovered — add it with
+    --webshell-dir; extra webroots with --webshell-webroot.)"""
+
+    def __init__(self, enabled=True, interval=300, dirs=WEBSHELL_SCAN_DIRS,
+                 webroots=WEBSHELL_WEBROOT_DIRS):
         self.enabled = enabled
         self.interval = max(60, interval)
-        # Resolve symlinks + de-dup so symlink-equivalent dirs aren't both scanned (the same file
-        # otherwise flagged twice under two path strings).
+        # Resolve symlinks + de-dup each zone so symlink-equivalent roots (e.g. /tmp and /private/tmp
+        # on macOS) aren't scanned twice and a file isn't flagged under two path strings.
         self.dirs = tuple(dict.fromkeys(os.path.realpath(d) for d in dirs))
+        seen = set(self.dirs)
+        self.webroots = tuple(r for r in dict.fromkeys(os.path.realpath(w) for w in webroots)
+                              if os.path.isdir(r) and r not in seen)
         self.lock = threading.Lock()
-        self.flagged = {}
+        self.flagged = {}                 # nid -> (first_flagged_ts, node)
         self.scanned = 0
         self.started = False
 
@@ -5825,32 +6016,46 @@ class WebshellScanner:
 
     def summary(self):
         with self.lock:
-            return {"enabled": True, "dirs": list(self.dirs), "scanned": self.scanned,
-                    "flagged": len(self.flagged)}
+            return {"enabled": True, "dirs": list(self.dirs), "webroots": list(self.webroots),
+                    "scanned": self.scanned, "flagged": len(self.flagged)}
 
     @staticmethod
-    def _node(path, st, is_sess, ext, sinks):
-        if is_sess:
-            sev, score = "critical", 95
-            label = "webshell in session file: %s" % os.path.basename(path)
-            txt = ("PHP code in a PHP session file (%s) — session files hold serialized data, never "
-                   "executable PHP. This is the php2shell PHP_SESSION_UPLOAD_PROGRESS webshell drop." % path)
-        else:
-            sev, score = "high", 80
-            label = "webshell: %s" % os.path.basename(path)
-            txt = ("PHP webshell hidden in a non-PHP file (%s) — PHP code with a command/eval sink in a "
-                   "file that should not contain code." % path)
-        if sinks:
-            txt += " Sinks: " + ", ".join(sinks)
+    def _node(path, st, cls, location):
+        sev, score, lang = cls["severity"], cls["score"], cls["lang"]
+        base = os.path.basename(path)
+        label = ("webshell in session file: %s" % base) if cls["is_session"] \
+            else ("%s webshell: %s" % (lang, base))
+        txt = "%s (%s)." % (cls["finding"], path)
+        if cls["markers"]:
+            txt += " Markers: " + ", ".join(cls["markers"][:3]) + "."
+        if cls["sinks"]:
+            txt += " Sinks: " + ", ".join(cls["sinks"]) + "."
         return {"id": "webshell:" + path, "type": "file", "label": label,
                 "score": score, "severity": sev,
-                "reasons": [reason(txt, "T1505.003", score)],
+                "reasons": [reason(txt, cls["mitre"], score)],
                 "detail": {"category": "webshell", "path": path, "size": st.st_size,
-                           "mtime": int(st.st_mtime), "session_file": is_sess, "sinks": sinks,
-                           "hashes": {"status": "n/a"}}}
+                           "mtime": int(st.st_mtime), "session_file": cls["is_session"],
+                           "language": lang, "location": location, "strict": cls["strict"],
+                           "sinks": cls["sinks"], "markers": cls["markers"],
+                           "finding": cls["finding"], "hashes": {"status": "n/a"}}}
 
     def _collect(self):
         now, scanned, found = int(time.time()), 0, {}
+
+        def consider(p, lst, in_webroot):
+            try:
+                with open(p, "rb") as f:
+                    data = f.read(WEBSHELL_READ_HEAD)
+            except OSError:
+                return
+            cls = classify_webshell(p, data, in_webroot=in_webroot)
+            if cls:
+                loc = "session" if cls["is_session"] else ("webroot" if in_webroot else "drop")
+                n = self._node(p, lst, cls, loc)
+                found[n["id"]] = (now, n)
+
+        # DROP zones — flat scan; read every bounded regular file, because a disguised shell can wear
+        # any extension (or a session-file name). classify_webshell applies the loose bar here.
         for d in self.dirs:
             if scanned >= WEBSHELL_FILE_CAP:
                 break
@@ -5867,25 +6072,45 @@ class WebshellScanner:
                 except OSError:
                     continue
                 if not stat.S_ISREG(lst.st_mode) or lst.st_size == 0 or lst.st_size > WEBSHELL_MAX_FILE:
-                    continue
-                is_sess = name.startswith("sess_")
-                ext = os.path.splitext(name)[1].lower()
-                if not is_sess and ext in WEBSHELL_PHP_EXTS:
-                    continue
+                    continue                                   # regular, non-empty, bounded files only
                 scanned += 1
-                try:
-                    with open(p, "rb") as f:
-                        data = f.read(WEBSHELL_READ_HEAD)
-                except OSError:
-                    continue
-                matched, sinks = scan_data_for_webshell(data)
-                if matched:
-                    n = self._node(p, lst, is_sess, ext, sinks)
-                    found[n["id"]] = (now, n)
+                consider(p, lst, False)
+
+        # WEBROOT zones — bounded recursive walk (no symlink following). Read every script file; read a
+        # non-script file only if it was modified recently (a freshly-dropped disguised shell), so we
+        # don't re-read the whole media library each pass. classify_webshell applies the strict bar.
+        for root in self.webroots:
+            if scanned >= WEBSHELL_FILE_CAP:
+                break
+            base_depth = root.rstrip("/").count("/")
+            for dirpath, dirs, files in os.walk(root):
+                if scanned >= WEBSHELL_FILE_CAP:
+                    break
+                if dirpath.count("/") - base_depth >= WEBSHELL_WEBROOT_MAXDEPTH:
+                    dirs[:] = []                               # stop descending past the depth cap
+                dirs[:] = [x for x in dirs if x not in (".git", ".svn", ".hg", "node_modules")]
+                for name in files:
+                    if scanned >= WEBSHELL_FILE_CAP:
+                        break
+                    p = os.path.join(dirpath, name)
+                    try:
+                        lst = os.lstat(p)
+                    except OSError:
+                        continue
+                    if not stat.S_ISREG(lst.st_mode) or lst.st_size == 0 \
+                            or lst.st_size > WEBSHELL_MAX_FILE:
+                        continue
+                    ext = os.path.splitext(name)[1].lower()
+                    recent = (now - int(lst.st_mtime)) <= WEBSHELL_WEBROOT_RECENT
+                    if ext not in WEBSHELL_SCRIPT_EXTS and not recent:
+                        continue                               # skip old non-script files (media / data)
+                    scanned += 1
+                    consider(p, lst, True)
+
         with self.lock:
             for k, v in found.items():
                 if k not in self.flagged:
-                    self.flagged[k] = v
+                    self.flagged[k] = v                        # flag once; keep for TTL even if deleted
             cutoff = now - WEBSHELL_NODE_TTL
             self.flagged = {k: v for k, v in self.flagged.items() if v[0] >= cutoff}
             self.scanned = scanned
@@ -20486,11 +20711,13 @@ def main():
     ap.add_argument("--provenance-interval", type=int, default=600,
                     help="seconds between install/mount provenance scans (default 600)")
     ap.add_argument("--no-webshell-scan", action="store_true",
-                    help="disable the PHP-webshell content scan of session dirs / drop locations")
+                    help="disable the webshell content scan of session dirs, drop locations and webroots")
     ap.add_argument("--webshell-interval", type=int, default=300,
                     help="seconds between webshell content scans (default 300)")
     ap.add_argument("--webshell-dir", action="append", default=[], metavar="DIR",
-                    help="extra directory to webshell-scan (repeatable; e.g. a custom session.save_path)")
+                    help="extra DROP dir to webshell-scan, loose bar (repeatable; e.g. a custom session.save_path)")
+    ap.add_argument("--webshell-webroot", action="append", default=[], metavar="DIR",
+                    help="extra WEBROOT to webshell-scan, strict bar (repeatable; e.g. a non-standard docroot)")
     ap.add_argument("--no-realtime", action="store_true",
                     help="disable real-time events (cn_proc exec + inotify file watch)")
     ap.add_argument("--realtime-ephemeral-secs", type=float, default=RT_EPHEMERAL_MAX_LIFETIME,
@@ -20687,9 +20914,16 @@ def main():
     provenance = ProvenanceCollector(enabled=not args.no_provenance,
                                      interval=args.provenance_interval)
     provenance.start()
+    # Webroots to strict-scan: the standard distro docroots + every user's ~/public_html + anything
+    # the operator adds. (classify_webshell applies the strict bar here, so a framework's ordinary
+    # system()/eval() does not fire.)
+    _ws_webroots = (tuple(WEBSHELL_WEBROOT_DIRS)
+                    + tuple(os.path.join(h, "public_html") for h in glob.glob("/home/*"))
+                    + tuple(args.webshell_webroot or ()))
     webshell = WebshellScanner(enabled=not args.no_webshell_scan,
                                interval=args.webshell_interval,
-                               dirs=tuple(WEBSHELL_SCAN_DIRS) + tuple(args.webshell_dir or ()))
+                               dirs=tuple(WEBSHELL_SCAN_DIRS) + tuple(args.webshell_dir or ()),
+                               webroots=_ws_webroots)
     webshell.start()
     realtime = RealtimeEvents(history=history, enabled=not args.no_realtime,
                               ephemeral_lifetime=args.realtime_ephemeral_secs)
@@ -20853,8 +21087,8 @@ def main():
     else:
         print("│  Provenance: off")
     if webshell.enabled:
-        print(f"│  Webshell:   scanning {', '.join(webshell.dirs)} for PHP in session files / drops, "
-              f"every {args.webshell_interval}s")
+        print(f"│  Webshell:   {len(webshell.dirs)} drop dir(s) + {len(webshell.webroots)} webroot(s), "
+              f"PHP/JSP/ASP/Perl/Python, every {args.webshell_interval}s")
     else:
         print("│  Webshell:   off")
     if tcc.enabled:

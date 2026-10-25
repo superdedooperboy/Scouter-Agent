@@ -6,25 +6,35 @@ agents, versioned independently.
 
 ## [Unreleased]
 
-## macOS agent 1.11.0 / Linux agent 1.11.0 — 2026-10-23
+## macOS agent 1.11.0 / Linux agent 1.11.0 — 2026-10-25
 
 ### Added
 
 **Webshell content scanner (T1505.003), both platforms.** A new read-only collector that reads file
-*contents* in the PHP session directories and common drop locations, flagging a PHP webshell hidden
-where PHP should never be:
-- A **session file** (`sess_*`) containing `<?php … system($_GET)` — the php2shell
-  `PHP_SESSION_UPLOAD_PROGRESS` drop. A session file holds serialized data, never executable PHP, so
-  this is flagged **CRITICAL**.
-- PHP + a command/eval sink hiding in a **non-`.php` file** (a `.txt`, an image, a log) — a disguised
-  webshell, flagged **HIGH**.
+*contents* and flags webshells across PHP, JSP (Java), ASP/ASPX (.NET + classic), Perl/CGI and
+Python-CGI. It scans two kinds of location with a different bar in each, so it stays near-zero-FP:
 
-A real `.php` application file and benign serialized session data are deliberately not flagged
-(near-zero FP). Bounded (file-size and per-pass caps), and a finding is kept ~24h for triage even if
-the attacker deletes the file. macOS scans `/tmp` and `/var/tmp`; Linux scans the distro PHP session
-dirs (`/var/lib/php*/sessions`, …) plus `/tmp` / `/dev/shm`. Flags: `--no-webshell-scan`,
-`--webshell-interval`, `--webshell-dir` (for a custom `session.save_path`). Surfaces as a file node
-with the matched sinks; no new rules/builtins, no Mesh change.
+- **Drop zones** — PHP session dirs, `/tmp`, `/var/tmp`, `/dev/shm` (places a web script should never
+  live): the *loose* bar. A **session file** (`sess_*`) holding script code is the php2shell
+  `PHP_SESSION_UPLOAD_PROGRESS` drop → **CRITICAL**. Code + a command/eval sink in a **non-script
+  file** (a `.txt`, an image, a log) is a disguised shell → **HIGH**.
+- **Webroots** — `/Library/WebServer/Documents`, `/var/www`, `/srv/www`, `~/Sites`, `~/public_html`,
+  the Homebrew/MAMP/XAMPP/nginx docroots, etc. (where scripts live legitimately): the *strict* bar
+  only. A framework's ordinary `system()` / `eval()` does **not** fire — only the shapes that are
+  rare-to-nonexistent in real code: attacker input (a superglobal / request param) passed straight
+  into a command/eval sink, a superglobal called as a function (`$_GET['f'](…)`), obfuscated
+  `eval(base64_decode(…))`, the `preg_replace /e` trick, and the JSP/ASP/Perl/Python equivalents →
+  **CRITICAL**.
+
+Plus a curated set of **named-shell signatures** (c99, r57, WSO, b374k, FilesMan, China Chopper
+`@eval($_POST…)`, GIF/PHP polyglot headers, reversed/nested decoders) that flag **CRITICAL** in any
+zone or language. A real application file and benign serialized session data are deliberately not
+flagged. Bounded throughout: file-size and per-pass caps, a webroot walk capped by depth that skips
+`.git`/`node_modules` and reads non-script files only when recently modified; a finding is kept ~24h
+for triage even if the attacker deletes the file. Flags: `--no-webshell-scan`, `--webshell-interval`,
+`--webshell-dir` (extra drop dir), `--webshell-webroot` (extra docroot). Surfaces as a file node
+carrying language, zone, confidence, matched sinks and any signature markers; no new rules/builtins,
+no Mesh change.
 
 **Anti-forensics detection — forensic-store wipes (T1070 / T1562).** Two new high-confidence built-in
 rules close the FSEvents anti-forensics gap and its Linux analog:

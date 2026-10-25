@@ -795,6 +795,12 @@ BUILTIN_RULES = [
        [_c("cmdline", "regex", r"\b(srm|shred)\b[^\n]*(/var/log|/var/audit|\.log\b)"),
         _c("cmdline", "regex", r"\b(truncate\s+-s\s*0|:\s*>|>\s*)\s*/var/log/"),
         _c("cmdline", "regex", r"\bunlink\b[^\n]*/var/log/")]),
+    _b("b-forensic-wipe", "macOS forensic store deleted or cleared (anti-forensics)", "high", "T1070.004",
+       [_c("cmdline", "regex",
+           r"\b(rm|srm|shred|unlink|rmdir)\b[^\n]*(/\.fseventsd(\b|/)|/var/db/diagnostics(\b|/)|"
+           r"/var/db/uuidtext(\b|/)|QuarantineEventsV2|/TCC\.db\b)"),
+        _c("cmdline", "regex",
+           r"(>|\btruncate\b[^\n]*-s\s*0)[^\n]*(/\.fseventsd/|/var/db/diagnostics/)")]),
     # ---- Impact ----
     _b("b-data-destroy", "File overwritten with dd (data destruction)", "medium", "T1485",
        [_c("cmdline", "regex", r"\bdd\b[^\n]*\bif=/dev/(zero|random|urandom)\b[^\n]*\bof=\S"),
@@ -913,6 +919,7 @@ RULE_CONFIDENCE = {
     "b-b64pipe": 4,              # base64 -d piped straight to a shell
     "b-lazagne": 4,              # a credential-harvesting tool, matched by name
     "b-la-apple-masq": 4,        # a com.apple.* job label pointing outside the system directories
+    "b-forensic-wipe": 4,        # nothing legitimate deletes .fseventsd / the unified-log store / TCC.db
     "b-dns-exfil": 3,            # DNS tunnelling has no benign form
     "b-clipboard-exec": 3,       # pbpaste into a shell — the ClickFix paste-and-run pattern
 
@@ -1192,6 +1199,11 @@ _BUILTIN_DESC = {
         "timestamps); weigh alongside the file involved.",
     "b-log-clear": "Deleting or truncating system logs via srm/shred/truncate/unlink or a `> /var/log/…` redirect "
         "destroys forensic evidence (anti-forensics), complementing the `log erase` detection.",
+    "b-forensic-wipe": "Deleting or clearing a macOS forensic store — the FSEvents filesystem-change log "
+        "(/.fseventsd), the unified-log backing store (/var/db/diagnostics, /var/db/uuidtext), the download "
+        "provenance DB (QuarantineEventsV2) or the privacy-permission DB (TCC.db). Nothing legitimate removes "
+        "these; wiping them is anti-forensics to defeat timeline reconstruction and hide what was downloaded, "
+        "run or self-granted. (To reset privacy permissions, `tccutil reset` is the supported path, not rm.)",
     "b-data-destroy": "`dd if=/dev/zero|random of=<file>` overwrites a file's contents in place — data destruction "
         "(or secure wiping to prevent recovery). Review the target path to gauge blast radius.",
     "b-shutdown": "A scripted shutdown/reboot/halt (or an osascript 'shut down'/'restart') can be destructive-impact "

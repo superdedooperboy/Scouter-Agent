@@ -1,6 +1,6 @@
 {
  "platform": "Linux",
- "count": 101,
+ "count": 102,
  "rules": [
   {
    "id": "b-revshell",
@@ -441,6 +441,31 @@
    "description": "Vacuuming the journal (`journalctl --vacuum`) or removing/truncating /var/log/auth.log, syslog, or wtmp destroys forensic evidence (anti-forensics / defense evasion).",
    "confidence": 2,
    "confidence_label": "probable"
+  },
+  {
+   "id": "b-audit-tamper",
+   "name": "Audit rules flushed or auditing disabled (auditctl)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1562.001",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bauditctl\\b[^\\n]*(\\s-D\\b|\\s-e\\s*0\\b)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(rm|truncate|shred)\\b[^\\n]*/var/log/audit/|\\bauditctl\\b[^\\n]*-R\\s+/dev/null"
+    }
+   ],
+   "description": "`auditctl -D` flushes every audit rule and `auditctl -e 0` disables auditing outright \u2014 the Linux audit subsystem is the forensic trail, and silencing it without stopping auditd (so the daemon still looks healthy) is deliberate anti-forensics. Also flags deletion/truncation of /var/log/audit/.",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-hist-off",

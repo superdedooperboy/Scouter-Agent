@@ -1,6 +1,6 @@
 {
  "platform": "macOS",
- "count": 112,
+ "count": 113,
  "rules": [
   {
    "id": "b-revshell",
@@ -2126,6 +2126,31 @@
    "description": "Deleting or truncating system logs via srm/shred/truncate/unlink or a `> /var/log/\u2026` redirect destroys forensic evidence (anti-forensics), complementing the `log erase` detection.",
    "confidence": 2,
    "confidence_label": "probable"
+  },
+  {
+   "id": "b-forensic-wipe",
+   "name": "macOS forensic store deleted or cleared (anti-forensics)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1070.004",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(rm|srm|shred|unlink|rmdir)\\b[^\\n]*(/\\.fseventsd(\\b|/)|/var/db/diagnostics(\\b|/)|/var/db/uuidtext(\\b|/)|QuarantineEventsV2|/TCC\\.db\\b)"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(>|\\btruncate\\b[^\\n]*-s\\s*0)[^\\n]*(/\\.fseventsd/|/var/db/diagnostics/)"
+    }
+   ],
+   "description": "Deleting or clearing a macOS forensic store \u2014 the FSEvents filesystem-change log (/.fseventsd), the unified-log backing store (/var/db/diagnostics, /var/db/uuidtext), the download provenance DB (QuarantineEventsV2) or the privacy-permission DB (TCC.db). Nothing legitimate removes these; wiping them is anti-forensics to defeat timeline reconstruction and hide what was downloaded, run or self-granted. (To reset privacy permissions, `tccutil reset` is the supported path, not rm.)",
+   "confidence": 4,
+   "confidence_label": "certain"
   },
   {
    "id": "b-data-destroy",

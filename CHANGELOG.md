@@ -10,6 +10,19 @@ agents, versioned independently.
 
 ### Added
 
+**Anti-forensics detection — forensic-store wipes (T1070 / T1562).** Two new high-confidence built-in
+rules close the FSEvents anti-forensics gap and its Linux analog:
+- macOS `b-forensic-wipe`: flags deleting or clearing a macOS forensic store — the FSEvents
+  filesystem-change log (`/.fseventsd`), the unified-log backing store (`/var/db/diagnostics`,
+  `/var/db/uuidtext`), the download-provenance DB (`QuarantineEventsV2`) or the privacy-permission DB
+  (`TCC.db`). Nothing legitimate removes these; `tccutil reset` (the supported way to reset
+  permissions) is deliberately not matched.
+- Linux `b-audit-tamper`: flags `auditctl -D` (flush all audit rules) / `auditctl -e 0` (disable
+  auditing while auditd keeps running) and deletion of `/var/log/audit/`.
+
+Both rated confidence 4 (near-zero FP). No Mesh change — new rules propagate through the factory
+rule-library seed.
+
 **VQL (Velociraptor) twins for the auto-hunts and advisory hunts.** Both hunt families were
 SQL-only — they query Scouter's recorded history. Each now also carries a VQL query that hunts the
 **live** system through Velociraptor's own plugins (`pslist()`, `netstat()`, `glob()`+`hash()`), the

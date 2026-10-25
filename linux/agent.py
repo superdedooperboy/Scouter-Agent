@@ -584,6 +584,9 @@ BUILTIN_RULES = [
     _b("b-log-erase", "System logs cleared", "medium", "T1070.002",
        [_c("cmdline", "regex", r"journalctl\b[^\n]*--vacuum"),
         _c("cmdline", "regex", r"\b(rm|truncate|shred)\b[^\n]*/var/log/(auth\.log|syslog|wtmp|secure)")]),
+    _b("b-audit-tamper", "Audit rules flushed or auditing disabled (auditctl)", "high", "T1562.001",
+       [_c("cmdline", "regex", r"\bauditctl\b[^\n]*(\s-D\b|\s-e\s*0\b)"),
+        _c("cmdline", "regex", r"\b(rm|truncate|shred)\b[^\n]*/var/log/audit/|\bauditctl\b[^\n]*-R\s+/dev/null")]),
     _b("b-hist-off", "Shell history logging disabled", "medium", "T1070.003",
        [_c("cmdline", "regex", r"unset\s+HISTFILE|HISTFILE=/dev/null|HISTSIZE=0|set\s+\+o\s+history")]),
     _b("b-ld-preload", "Dynamic-linker preload tampering", "high", "T1574.006",
@@ -850,6 +853,7 @@ RULE_CONFIDENCE = {
     "b-b64pipe": 4,              # base64 -d piped straight to a shell
     "b-cred-harvester": 4,       # mimipenguin / LaZagne, matched by name
     "b-ldso-preload-file": 4,    # /etc/ld.so.preload existing at all is near-exclusively a rootkit
+    "b-audit-tamper": 4,         # auditctl -D / -e 0 flushes or disables the audit trail; not an admin routine
     "b-rootkit-selfbuild": 4,    # a shared object compiled on the host from an inline source string
     "b-dns-exfil": 3,            # DNS tunnelling has no benign form
 
@@ -987,6 +991,9 @@ _BUILTIN_DESC = {
         "4755) on a file is used to harden persistence or create a privilege-escalation path. Review what file is targeted.",
     "b-log-erase": "Vacuuming the journal (`journalctl --vacuum`) or removing/truncating /var/log/auth.log, syslog, "
         "or wtmp destroys forensic evidence (anti-forensics / defense evasion).",
+    "b-audit-tamper": "`auditctl -D` flushes every audit rule and `auditctl -e 0` disables auditing outright — the "
+        "Linux audit subsystem is the forensic trail, and silencing it without stopping auditd (so the daemon still "
+        "looks healthy) is deliberate anti-forensics. Also flags deletion/truncation of /var/log/audit/.",
     "b-hist-off": "Disabling shell-history logging (unset HISTFILE, HISTSIZE=0, set +o history) is an anti-forensics "
         "step so the attacker's typed commands aren't recorded.",
     "b-ld-preload": "Writing to /etc/ld.so.preload or exporting LD_PRELOAD forces a library into other processes \u2014 "

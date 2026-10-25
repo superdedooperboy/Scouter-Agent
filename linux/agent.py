@@ -5797,7 +5797,9 @@ class WebshellScanner:
     def __init__(self, enabled=True, interval=300, dirs=WEBSHELL_SCAN_DIRS):
         self.enabled = enabled
         self.interval = max(60, interval)
-        self.dirs = tuple(dict.fromkeys(dirs))
+        # Resolve symlinks + de-dup so symlink-equivalent dirs aren't both scanned (the same file
+        # otherwise flagged twice under two path strings).
+        self.dirs = tuple(dict.fromkeys(os.path.realpath(d) for d in dirs))
         self.lock = threading.Lock()
         self.flagged = {}
         self.scanned = 0

@@ -5672,7 +5672,9 @@ class WebshellScanner:
     def __init__(self, enabled=True, interval=300, dirs=WEBSHELL_SCAN_DIRS):
         self.enabled = enabled
         self.interval = max(60, interval)
-        self.dirs = tuple(dict.fromkeys(dirs))
+        # Resolve symlinks + de-dup so /tmp and /private/tmp (the same dir on macOS) aren't both
+        # scanned — otherwise the same file is flagged twice under two path strings.
+        self.dirs = tuple(dict.fromkeys(os.path.realpath(d) for d in dirs))
         self.lock = threading.Lock()
         self.flagged = {}                 # nid -> (first_flagged_ts, node)
         self.scanned = 0

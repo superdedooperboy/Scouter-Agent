@@ -10,14 +10,16 @@ agents, versioned independently.
 
 ### Fixed
 
-**Panes no longer clip their last rows.** The app grid used `grid-template-rows: auto 1fr`; a bare
-`1fr` resolves to `minmax(auto, 1fr)`, whose auto minimum let the body row grow to the tallest column's
-content (the right-hand detail pane), pushing the bottom of every pane below the clipped
-(`overflow:hidden`) body. The last rows were then only reachable by overscrolling and snapped back out
-of view on release. Seen in the right detail pane (the action audit log) and the Authentications tab
-(the map's dot legend). Now `grid-template-rows: auto minmax(0, 1fr)` plus `min-height: 0` on the grid
-children (`aside`, `main`), so the body row shrinks to the viewport and each column scrolls internally.
-Resolution-independent — it only showed when a pane's content exceeded the viewport height.
+**Panes no longer clip their bottom rows.** On a **mesh-managed host**, the "managed" banner
+(`#managedBar`) sits in the normal flow above the app, but the app was pinned to `height: 100%` (the
+full viewport) — so the banner plus the app together ran ~33px past the bottom of the `overflow:hidden`
+body, and the last rows of **every** pane were clipped off-screen, reachable only by overscrolling and
+snapping back on release. Seen in the right detail pane (the action audit log) and the Authentications
+tab (the map's dot legend); it affected every view, on any mesh-managed host, independent of screen
+resolution. The body now lays out as a flex column, so the banner takes its own height and the app
+fills exactly the rest. The app grid was additionally hardened with `grid-template-rows: auto
+minmax(0, 1fr)` and `min-height: 0` on its children (`aside`, `main`) so each column scrolls
+internally.
 
 **Scouter easter-egg caption no longer covers the scouter.** The demo caption was pinned at a
 hard-coded `top: 54px`, which lands on top of the header — and the animating scouter icon it narrates —

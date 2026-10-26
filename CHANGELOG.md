@@ -6,6 +6,23 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.11.1 / Linux agent 1.11.1 — 2026-10-26
+
+### Fixed
+
+**Panes no longer clip their last rows.** The app grid used `grid-template-rows: auto 1fr`; a bare
+`1fr` resolves to `minmax(auto, 1fr)`, whose auto minimum let the body row grow to the tallest column's
+content (the right-hand detail pane), pushing the bottom of every pane below the clipped
+(`overflow:hidden`) body. The last rows were then only reachable by overscrolling and snapped back out
+of view on release. Seen in the right detail pane (the action audit log) and the Authentications tab
+(the map's dot legend). Now `grid-template-rows: auto minmax(0, 1fr)` plus `min-height: 0` on the grid
+children (`aside`, `main`), so the body row shrinks to the viewport and each column scrolls internally.
+Resolution-independent — it only showed when a pane's content exceeded the viewport height.
+
+**Scouter easter-egg caption no longer covers the scouter.** The demo caption was pinned at a
+hard-coded `top: 54px`, which lands on top of the header — and the animating scouter icon it narrates —
+once the header wraps to two rows. It now sits just below the header's measured bottom.
+
 ## macOS agent 1.11.0 / Linux agent 1.11.0 — 2026-10-25
 
 ### Added

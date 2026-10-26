@@ -179,7 +179,11 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
     font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-text-size-adjust:100%;overflow:hidden}
-  #app{display:grid;grid-template-columns:300px 1fr 360px;grid-template-rows:auto 1fr;height:100%}
+  /* minmax(0,1fr) (not a bare 1fr, whose implicit auto minimum grows the row to the tallest pane's
+     content and pushes the bottom of every pane under the clipped body) — the body row shrinks to the
+     viewport and each column scrolls internally instead. min-height:0 on the children (below) lets
+     their own overflow engage. */
+  #app{display:grid;grid-template-columns:300px 1fr 360px;grid-template-rows:auto minmax(0,1fr);height:100%}
   /* Metrics is an analytical, full-width view — the node-inspector rail on the right has nothing to
      show there, so reclaim it and let the content (metric cards + the detection-flow Sankey) breathe.
      Above the mobile breakpoint only; under 900px the asides already overlay. */
@@ -407,9 +411,9 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
     padding:6px 11px;cursor:pointer;font-size:12px;font-weight:600}
   .btn:hover{border-color:var(--accent)}
   .btn.pri{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
-  aside{background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;padding:12px}
+  aside{background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;padding:12px;min-height:0}
   aside.right{border-right:none;border-left:1px solid var(--line)}
-  main{position:relative;overflow:hidden;background:radial-gradient(1200px 800px at 60% 40%,var(--graph-bg1),var(--graph-bg2))}
+  main{position:relative;overflow:hidden;min-height:0;background:radial-gradient(1200px 800px at 60% 40%,var(--graph-bg1),var(--graph-bg2))}
   h2{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin:16px 0 8px}
   h2:first-child{margin-top:2px}
   label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
@@ -4802,9 +4806,13 @@ async function scouterDemo(){
     ['CRITICAL — code red',      {critical:1,high:0,medium:0,low:0}],
   ];
   const cap=document.createElement('div');
-  cap.style.cssText='position:fixed;top:54px;left:14px;z-index:999;background:#0e1320;'+
+  cap.style.cssText='position:fixed;left:14px;z-index:999;background:#0e1320;'+
     'border:1px solid var(--line);color:var(--txt);padding:6px 11px;border-radius:8px;'+
     'font:600 12px system-ui,sans-serif;box-shadow:0 6px 20px var(--shadow-md)';
+  // Sit just below the header's REAL bottom, not a hard-coded 54px — the header wraps to two rows at
+  // some widths, and a fixed offset drops the caption on top of the scouter it is meant to narrate.
+  const _hdr=document.querySelector('header');
+  cap.style.top=((_hdr?_hdr.getBoundingClientRect().bottom:48)+8)+'px';
   document.body.appendChild(cap);
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
   for(const [label,c] of steps){

@@ -197,6 +197,12 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   #app.rcol{--rw:0}
   #app.lcol>aside.left{display:none}
   #app.rcol>aside.right{display:none}
+  /* Pin each body item to its column. A display:none grid item is removed from placement, so without
+     this a collapsed (hidden) panel lets `main` auto-place into the wrong 0-width column — which
+     shrank main to zero and hid/pushed the toggle tabs off-screen. */
+  aside.left{grid-column:1}
+  main{grid-column:2}
+  aside.right{grid-column:3}
   .pane-tab{position:absolute;top:50%;transform:translateY(-50%);z-index:24;width:15px;height:48px;
     display:none;align-items:center;justify-content:center;cursor:pointer;padding:0;color:var(--muted);
     background:var(--panel);border:1px solid var(--line);font-size:12px;line-height:1;box-shadow:0 2px 8px var(--shadow-sm)}

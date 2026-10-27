@@ -3063,6 +3063,7 @@ function drawAttack(){
   const bd=(d.counts&&d.counts.by_depth)||{}, debt=(d.counts&&d.counts.debt)||0;
   let h=`<div class="atkbar">
     <span class="atkstat">Coverage: <b>${cov}</b> / ${tot} ${macOnly?'Linux-relevant':'enterprise'} techniques · observed on this host: <b>${obs}</b></span>
+    <span class="atkstat" style="color:var(--muted)" title="Vintage of the bundled MITRE ATT&CK dataset — it ships with the agent and updates on each release, not live.">MITRE ATT&amp;CK ${d.attack_version?'<b>v'+esc(d.attack_version)+'</b> · ':''}${esc(d.generated||'—')}</span>
     ${macAvail?`<label class="atkstat" style="cursor:pointer;user-select:none"><input type="checkbox" ${macOnly?'checked':''} onchange="atkToggleMac(this.checked)"> Linux only</label>`:''}
     <select onchange="atkSelectGroup(this.value)">${groupOpts}</select>
     ${atkGroup?'<button class="btn" onclick="atkSelectGroup(\'\')">Clear Overlay</button>':''}
@@ -3222,7 +3223,7 @@ function grpInit(){
   const box=document.getElementById('groups');
   const thrLabel = grpMetric==='shared'?('min shared '+grpMinThresh()):('min '+grpMetric+' '+grpThresh.toFixed(2));
   box.innerHTML=`<div class="grpbar">
-    <span class="gstat"><b>${groupsData.counts.groups}</b> groups${groupsData.counts.feed?` (<b>${groupsData.counts.feed}</b> from feeds)`:''} · <b id="grpEdgeN">0</b> links</span>
+    <span class="gstat"><b>${groupsData.counts.groups}</b> groups${groupsData.counts.feed?` (<b>${groupsData.counts.feed}</b> from feeds)`:''} · <b id="grpEdgeN">0</b> links${groupsData.generated?` · <span title="Vintage of the bundled MITRE ATT&CK group data — ships with the agent, updates on each release">MITRE ATT&amp;CK ${groupsData.attack_version?'<b>v'+esc(groupsData.attack_version)+'</b> · ':''}${esc(groupsData.generated)}</span>`:''}</span>
     <label>metric <select onchange="grpSetMetric(this.value)">
       <option value="jaccard"${grpMetric==='jaccard'?' selected':''}>Jaccard (Shared / Total)</option>
       <option value="overlap"${grpMetric==='overlap'?' selected':''}>Overlap Coef. (Shared / Smaller)</option>

@@ -12256,6 +12256,8 @@ class AttackMatrix:
         tac_names = {t: t.replace("-", " ").title().replace(" And ", " and ") for t in order}
         mac_ids = {t["id"] for t in techs if t["mac"]}
         out = {"available": True, "tactic_order": order, "tactic_names": tac_names,
+               "generated": (self.data.get("meta") or {}).get("generated"),
+               "attack_version": (self.data.get("meta") or {}).get("attack_version"),
                "techniques": techs, "groups": groups, "have_platforms": have_plat,
                "counts": {"techniques": len(tlist), "covered": len(cov),
                           "fired": sum(1 for v in fired.values() if v),
@@ -12290,6 +12292,8 @@ class AttackMatrix:
                         "desc": (act.get("desc", "") or "")[:600], "tech": tids,
                         "software": act.get("software", []), "source": act.get("source", "feed")})
         return {"available": True, "groups": out, "tech_names": tech_names,
+                "generated": (self.data.get("meta") or {}).get("generated"),
+                "attack_version": (self.data.get("meta") or {}).get("attack_version"),
                 "counts": {"groups": len(out), "mitre": sum(1 for g in out if g["source"] == "mitre"),
                            "feed": sum(1 for g in out if g["source"] != "mitre")}}
 

@@ -6,6 +6,17 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+### Changed
+
+**Bundled MITRE ATT&CK dataset refreshed to v20.0.** The ATT&CK coverage matrix and the Threat Groups
+explorer were running on a stale snapshot (492 techniques); they're now on the current release — **706
+techniques, 174 groups, 842 software** (generated 2026-10-27). Both tabs now also show the dataset
+vintage (e.g. "MITRE ATT&CK v20.0 · 2026-10-27"), so its freshness is visible — the data ships with the
+agent and updates on release, not live. Added `tools/gen-attack-data.py`, a pure-stdlib generator that
+rebuilds `attack-data.json` from MITRE's Enterprise ATT&CK STIX bundle, so the dataset can be refreshed
+each release. (Coverage percentages shift because the denominator is now the full current ATT&CK — the
+numbers are more accurate, not worse.)
+
 ### Fixed
 
 **Collapsed right panel now auto-expands when you load something into it.** With the right (inspector)

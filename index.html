@@ -1945,6 +1945,7 @@ function incidentCapture(id){
 }
 function renderDetail(id){
   const host=document.getElementById('detail');
+  autoExpandRight(id);           // if a new node/alert was just selected, un-collapse the right pane
   lastDetailSig=detailSig(id);   // sync the signature so poll refreshes skip until something changes
   // Source from a live snapshot node, or fall back to a historical alert (node no longer live).
   const liveN=id?R.get(id):null;
@@ -2960,6 +2961,17 @@ function togglePane(side){
   syncPaneTabs();
   try{ localStorage.setItem('scouterPanes', JSON.stringify({l:app.classList.contains('lcol'), r:app.classList.contains('rcol')})); }catch(e){}
 }
+// Auto-expand the right pane when a NEW item is loaded into it (a click selected something), so a
+// collapsed inspector doesn't silently swallow what you just clicked. Keyed on the selection, so a
+// poll / filter / response re-render of the SAME item does not fight a manual collapse.
+let _lastExpandedKey=null;
+function autoExpandRight(key){
+  if(key===_lastExpandedKey) return;      // same selection re-rendered — leave the pane as the user set it
+  _lastExpandedKey=key;
+  if(key==null) return;                   // cleared / placeholder — nothing to show
+  const app=document.getElementById('app');
+  if(app && app.classList.contains('rcol')) togglePane('r');   // expand (reuses the tab toggle: syncs + persists)
+}
 function syncPaneTabs(){
   const app=document.getElementById('app'); if(!app) return;
   const l=document.getElementById('ptLeft'), r=document.getElementById('ptRight');
@@ -3845,6 +3857,7 @@ function tlDetailClose(){
 // plus a graph pivot when the underlying node is still live (alerts by node_id, processes by proc:pid).
 function tlDetail(i){
   const host=document.getElementById('detail'), r=tlRows[i]; if(!host||!r){ renderDetailPlaceholder(); return; }
+  autoExpandRight('tl:'+i);
   const kd=TL_KINDS[r.kind]||{label:r.kind}, sev=String(r.sev||'info').toLowerCase();
   const sevOK=TL_SEV_ORDER.includes(sev), title=String(r.title||'');
   const when=new Date((Number(r.ts)||0)*1000).toLocaleString([],{hour12:false});
@@ -4231,6 +4244,7 @@ function huntDetailClose(){
 function renderHuntDetail(i){
   const host=document.getElementById('detail'), row=huntRows[i];
   if(!row){ renderDetailPlaceholder(); return; }
+  autoExpandRight('hunt:'+i);
   const cols=huntCols, sev=String(row.severity==null?'':row.severity).toLowerCase();
   const sevOK=['critical','high','medium','low','info'].includes(sev);
   const titleCol=cols.find(c=>['name','proc_name','item','path','exe','label','child','user','raddr','parent','t'].includes(c))||cols[0];
@@ -4577,6 +4591,7 @@ function detRulePlaceholder(){ document.getElementById('detail').innerHTML='<div
 function detDeselectRule(){ detSel=null; document.getElementById('asideRight').classList.remove('expanded'); renderDetections(); detRulePlaceholder(); }
 function renderRuleDetail(r, source, idx){
   const host=document.getElementById('detail'), builtin=source==='builtin', mesh=(source==='meshnode'||source==='meshsql'), ro=builtin||mesh, isSql=(source==='sql'||source==='meshsql');
+  autoExpandRight('det:'+source+':'+idx);
   let html=`<div class="dhead">${badge(r.severity)}<span class="dt" title="${esc(r.name)}">${esc(r.name)}</span><button class="dexpand" title="Expand / collapse panel" onclick="detailExpandToggle()">⤢</button><button class="dclose" title="Close" onclick="detDeselectRule()">✕</button></div>
     <div class="dtype">${builtin?'built-in':mesh?'mesh-managed':'custom'} ${isSql?'SQL':'live'} detection${ro?' · read-only':''}</div>`;
   const sevVal = builtin
@@ -5189,6 +5204,7 @@ function atkSelectGroup(id){ atkGroup=id; drawAttack(); }
 function atkTechDetail(id){
   atkSel=id; drawAttack();
   const t=atkById[id]; const host=document.getElementById('detail'); if(!host||!t) return;
+  autoExpandRight('atk:'+id);
   const subs=(atkSubsOf[id]||[]).slice().sort((a,b)=>a.id.localeCompare(b.id));
   const groups=(attackData.groups||[]).filter(g=>g.tech.includes(id)||subs.some(s=>g.tech.includes(s.id)))
     .sort((a,b)=>a.name.localeCompare(b.name));
@@ -5399,6 +5415,7 @@ function grpGroupById(id){ return (groupsData.groups||[]).find(g=>g.id===id); }
 function grpDetail(){
   const host=document.getElementById('detail'); if(!host) return;
   if(!grpSelA){ host.innerHTML='<div class="empty">Click a group to explore its TTPs. Click a second to compare.</div>'; return; }
+  autoExpandRight('grp:'+grpSelA+':'+(grpSelB||''));
   const A=grpGroupById(grpSelA);
   if(grpSelA && grpSelB){                            // compare mode
     const B=grpGroupById(grpSelB), sa=new Set(A.tech), sb=new Set(B.tech);

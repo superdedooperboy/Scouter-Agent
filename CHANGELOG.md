@@ -6,6 +6,14 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+### Fixed
+
+**Collapsed right panel now auto-expands when you load something into it.** With the right (inspector)
+panel collapsed, clicking a node, alert, hunt/timeline row, detection rule, ATT&CK technique or threat
+group would render into the hidden pane — so nothing appeared. The pane now re-expands automatically
+when a *new* item is selected. Keyed on the selection, so a live poll / filter / response re-render of
+the item you're already viewing never fights a manual collapse.
+
 ## macOS agent 1.11.2 / Linux agent 1.11.2 — 2026-10-26
 
 ### Added

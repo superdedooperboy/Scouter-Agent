@@ -6,6 +6,17 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.11.2 / Linux agent 1.11.2 — 2026-10-26
+
+### Added
+
+**Collapsible side panels.** A thin tab on each inner edge of the center pane collapses the left panel
+(controls / severity / filters) or the right panel (the node inspector) to reclaim its width — useful
+on a laptop screen, or when you want the alerts table or node graph full-width. The chevron and tooltip
+flip to show the direction, and the choice is remembered per browser (`localStorage`). It composes with
+the existing Metrics / Authentications / Vulnerabilities auto-hide of the right rail (the right tab
+hides on those views, where there is no inspector to show).
+
 ## macOS agent 1.11.1 / Linux agent 1.11.1 — 2026-10-26
 
 ### Fixed

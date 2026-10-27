@@ -186,11 +186,24 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
      content and pushes the bottom of every pane under the clipped body) — the body row shrinks to the
      viewport and each column scrolls internally instead. min-height:0 on the children (below) lets
      their own overflow engage. */
-  #app{display:grid;grid-template-columns:300px 1fr 360px;grid-template-rows:auto minmax(0,1fr);flex:1 1 auto;min-height:0}
+  #app{display:grid;--lw:300px;--rw:360px;grid-template-columns:var(--lw) 1fr var(--rw);grid-template-rows:auto minmax(0,1fr);flex:1 1 auto;min-height:0}
   /* Metrics is an analytical, full-width view — the node-inspector rail on the right has nothing to
      show there, so reclaim it and let the content (metric cards + the detection-flow Sankey) breathe.
      Above the mobile breakpoint only; under 900px the asides already overlay. */
-  @media(min-width:901px){ #app.nodetail{grid-template-columns:300px 1fr} #app.nodetail>aside.right{display:none} }
+  @media(min-width:901px){ #app.nodetail{--rw:0} #app.nodetail>aside.right{display:none} }
+  /* Collapsible side panels — a thin tab on each inner edge of the center pane drives its column to 0.
+     Uses the same --lw/--rw vars as the Metrics auto-hide above, so the two compose cleanly. */
+  #app.lcol{--lw:0}
+  #app.rcol{--rw:0}
+  #app.lcol>aside.left{display:none}
+  #app.rcol>aside.right{display:none}
+  .pane-tab{position:absolute;top:50%;transform:translateY(-50%);z-index:24;width:15px;height:48px;
+    display:none;align-items:center;justify-content:center;cursor:pointer;padding:0;color:var(--muted);
+    background:var(--panel);border:1px solid var(--line);font-size:12px;line-height:1;box-shadow:0 2px 8px var(--shadow-sm)}
+  .pane-tab:hover{color:var(--txt);border-color:var(--accent);background:var(--chip)}
+  #ptLeft{left:0;border-left:none;border-radius:0 8px 8px 0}
+  #ptRight{right:0;border-right:none;border-radius:8px 0 0 8px}
+  @media(min-width:901px){ .pane-tab{display:flex} #app.nodetail #ptRight{display:none} }
   header{grid-column:1/-1;display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;
     min-height:48px;padding:5px 14px;
     background:var(--hdr-bg);border-bottom:1px solid var(--line);z-index:30}
@@ -1123,6 +1136,8 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
 
   <!-- CENTER: graph + alerts -->
   <main>
+    <button class="pane-tab" id="ptLeft" onclick="togglePane('l')" aria-label="Toggle left panel">‹</button>
+    <button class="pane-tab" id="ptRight" onclick="togglePane('r')" aria-label="Toggle right panel">›</button>
     <svg id="svg"><g id="viewport"><g id="edges"></g><g id="nodes"></g></g></svg>
     <div id="viewStatus" style="display:none"></div>
     <div class="zoomctl">
@@ -2691,6 +2706,28 @@ function treeSelect(id){
   for(const [nid,el] of elById) el.g.classList.toggle('sel', nid===selId);
   highlightNeighbors(); renderDetail(id); renderTree();
 }
+
+// ---- collapsible side panels ----
+// A thin tab on each inner edge of the center pane toggles that column to 0 width (CSS .lcol/.rcol).
+// The choice is remembered per-viewer in localStorage; the chevron + tooltip flip to show direction.
+function togglePane(side){
+  const app=document.getElementById('app');
+  app.classList.toggle(side==='l'?'lcol':'rcol');
+  syncPaneTabs();
+  try{ localStorage.setItem('scouterPanes', JSON.stringify({l:app.classList.contains('lcol'), r:app.classList.contains('rcol')})); }catch(e){}
+}
+function syncPaneTabs(){
+  const app=document.getElementById('app'); if(!app) return;
+  const l=document.getElementById('ptLeft'), r=document.getElementById('ptRight');
+  if(l){ const c=app.classList.contains('lcol'); l.textContent=c?'›':'‹'; l.title=(c?'Expand':'Collapse')+' the left panel'; }
+  if(r){ const c=app.classList.contains('rcol'); r.textContent=c?'‹':'›'; r.title=(c?'Expand':'Collapse')+' the right panel'; }
+}
+function restorePanes(){
+  try{ const s=JSON.parse(localStorage.getItem('scouterPanes')||'{}'); const app=document.getElementById('app');
+    if(app){ app.classList.toggle('lcol',!!s.l); app.classList.toggle('rcol',!!s.r); } }catch(e){}
+  syncPaneTabs();
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', restorePanes); else restorePanes();
 
 // ---- tabs / meta ----
 function showTab(t){

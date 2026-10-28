@@ -17280,7 +17280,30 @@ class MeshReporter:
                           if getattr(self.cache, "syslog", None) else None),
             "vulns": (self.cache.vulns.fleet_summary()           # CTEM-Lite: compact vuln rollup for the fleet view
                       if getattr(self.cache, "vulns", None) and self.cache.vulns.enabled else None),
+            "fidelity": self._fidelity_summary(),                # noisy-detection rollup for the fleet fidelity view
         }
+
+    def _fidelity_summary(self):
+        """A compact 7-day noisy-detection rollup for the fleet fidelity view (Gate 3). The Mesh
+        aggregates these per-detection across hosts. Cached ~5 min so it isn't recomputed every cycle."""
+        lc = getattr(self.cache, "lifecycle", None)
+        if not lc:
+            return None
+        now = time.time()
+        if getattr(self, "_fid_cache", None) is not None and (now - getattr(self, "_fid_cache_ts", 0)) < 300:
+            return self._fid_cache
+        try:
+            nowms = now_ms()
+            dets = lc.detection_fidelity(since_ms=nowms - 7 * 86400 * 1000, until_ms=nowms)
+        except Exception:  # noqa: BLE001 — a reporting extra must never break the check-in
+            return getattr(self, "_fid_cache", None)
+        acc = self.cache.accepted.all() if getattr(self.cache, "accepted", None) else {}
+        out = [{"det": d["det"], "label": d["label"], "source": d["source"], "technique": d["technique"],
+                "count": d["count"], "benign_fp": d["benign_fp"], "malicious": d["malicious"],
+                "open": d["open"], "confidence": d["confidence"], "noise": d["noise"],
+                "accepted": d["det"] in acc} for d in dets[:40]]
+        self._fid_cache, self._fid_cache_ts = out, now
+        return out
 
     def _ssl_ctx(self):
         # For an HTTPS mesh with a self-signed cert, --mesh-insecure skips verification.

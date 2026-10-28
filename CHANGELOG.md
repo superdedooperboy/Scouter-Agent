@@ -26,8 +26,16 @@ rule would also hide; you can't create it until you acknowledge that. Suppressio
 expire after N days) and every one requires a **reason note** for the audit log. **Mark accepted noise**
 records a detection as reviewed-and-kept (it drops to the bottom of the view without suppressing
 anything). New `/api/detection-fidelity/suggest` (GET, viewable even on managed hosts) and
-`/api/detection-fidelity/accept`; suppressions gained optional `expires`. Gate 3 (Mesh fleet mirror)
-follows.
+`/api/detection-fidelity/accept`; suppressions gained optional `expires`.
+
+**Fleet mirror — Gate 3.** Each agent now includes a compact 7-day noisy-detection rollup in its Mesh
+check-in (cached ~5 min; raw alert data never leaves the host — only the per-detection counts), so the
+Mesh can show the same noisy-detection ranking across the whole fleet, aggregated per detection, with a
+**fleet-wide vs host-local** scope (noisy on many hosts → tune the detection globally; noisy on one →
+likely a benign local app, suppress narrowly) and a per-host breakdown. From the Mesh Metrics tab an
+operator can **Suppress…** a detection fleet-wide: the Mesh pulls the tightest scoped suggestion from a
+representative host and pushes it (with a required reason) to every host that has the detection —
+offline hosts apply it on reconnect. (Mesh side ships in its own release.)
 
 ## macOS agent 1.11.3 / Linux agent 1.11.3 — 2026-10-27
 

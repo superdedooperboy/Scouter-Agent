@@ -15,8 +15,19 @@ which detections to tune. Each row shows the alert count, the benign/FP rate, th
 confidence, a **trend** vs the prior window, and a transparent **noise score** (more benign/FP closes ×
 lower confidence), worst-first. Detections that also produced **Malicious** closes are flagged in red
 so they're never blindly suppressed. Backed by the alert-lifecycle data (grouped by the firing rule
-when one fired, else source+type) via a new read-only `/api/detection-fidelity` endpoint. Gate 2
-(scoped suppression + snooze from this view) and Gate 3 (Mesh fleet mirror) follow.
+when one fired, else source+type) via a new read-only `/api/detection-fidelity` endpoint.
+
+**Act on noisy detections — Gate 2.** A **Tune…** action on each row opens a tuner that clusters the
+detection's benign / false-positive closes by their common fields and proposes the **tightest** scoped
+suppression (never a blanket rule-disable; unstable fields like pid/cpu are excluded). A live preview
+shows how many benign/FP alerts in the window it would hide, and — crucially — a red **collateral
+warning** that recomputes as you toggle conditions, listing any alerts you closed **Malicious** that the
+rule would also hide; you can't create it until you acknowledge that. Suppressions can **Snooze** (auto-
+expire after N days) and every one requires a **reason note** for the audit log. **Mark accepted noise**
+records a detection as reviewed-and-kept (it drops to the bottom of the view without suppressing
+anything). New `/api/detection-fidelity/suggest` (GET, viewable even on managed hosts) and
+`/api/detection-fidelity/accept`; suppressions gained optional `expires`. Gate 3 (Mesh fleet mirror)
+follows.
 
 ## macOS agent 1.11.3 / Linux agent 1.11.3 — 2026-10-27
 

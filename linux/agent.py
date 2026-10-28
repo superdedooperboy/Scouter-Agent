@@ -8951,6 +8951,108 @@ def node_match_fields(node):
     return out
 
 
+# Fields that are unstable or over-specific identifiers — never auto-add them to a suggested
+# suppression (a pid changes every run; cpu/mem are noise). The analyst can still add them by hand.
+_SUPPRESS_VOLATILE_FIELDS = {"pid", "ppid", "cpu", "mem", "score", "size", "uid", "owner_pid"}
+
+FIDELITY_ACCEPTED_FILE = os.path.join(HERE, "fidelity-accepted.json")
+
+
+def _node_from_lifecycle(rec):
+    """Reconstruct a node-like dict from a stored fidelity sample so the REAL suppression matcher
+    (rule_node_matches) can run against it — the preview/collateral count then equals what the
+    suppression would actually hide at runtime. `rec` is a detection_samples() entry."""
+    node = {"type": rec.get("type"), "label": rec.get("label"),
+            "severity": rec.get("severity"), "detail": {}}
+    for k, v in (rec.get("fields") or {}).items():
+        if k in ("type", "label", "severity", "score"):
+            node[k] = v
+            continue
+        cur = node["detail"]
+        parts = k.split(".")
+        for p in parts[:-1]:
+            nxt = cur.get(p)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                cur[p] = nxt
+            cur = nxt
+        cur[parts[-1]] = v
+    return node
+
+
+def suggest_suppression_spec(det, label, benign_samples):
+    """Build the TIGHTEST scoped suppression from a cluster of benign/FP-closed samples: the node_type
+    they share plus every stable field whose value is IDENTICAL across all of them (eq). Returns
+    (spec, field_options) — field_options is each field's value distribution so the UI can refine."""
+    if not benign_samples:
+        return None, []
+    types = {}
+    for s in benign_samples:
+        types[s.get("type")] = types.get(s.get("type"), 0) + 1
+    ntype = max(types, key=types.get)
+    allf = [s.get("fields") or {} for s in benign_samples if s.get("type") == ntype]
+    dist = {}
+    for f in allf:
+        for k, v in f.items():
+            if k in _SUPPRESS_VOLATILE_FIELDS or v in (None, ""):
+                continue
+            dv = dist.setdefault(k, {})
+            dv[v] = dv.get(v, 0) + 1
+    conds, options = [], []
+    for k, vals in sorted(dist.items()):
+        options.append({"field": k,
+                        "values": sorted(([{"value": vv, "count": c} for vv, c in vals.items()]),
+                                         key=lambda x: -x["count"])[:8]})
+        if len(vals) == 1 and all(k in f for f in allf):     # present + identical across EVERY sample
+            conds.append({"field": k, "op": "eq", "value": next(iter(vals))})
+    spec = {"node_type": ntype or "any", "match": "all", "conditions": conds,
+            "name": ("Benign: %s" % (label or det))[:120]}
+    return spec, options
+
+
+class AcceptedNoise:
+    """Analyst-acknowledged 'known noise': a detection deliberately kept firing but marked accepted so
+    it drops to the bottom of the noisy-detections view. It does NOT suppress anything — the alerts
+    still appear; they are just flagged as reviewed-and-accepted. Keyed by the detection `det`."""
+
+    def __init__(self, path=FIDELITY_ACCEPTED_FILE):
+        self.path = path
+        self.lock = threading.Lock()
+        self.data = {}
+        try:
+            with open(self.path) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                self.data = d
+        except (OSError, ValueError):
+            pass
+
+    def _save(self):
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.data, f)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def set(self, det, on, label=None, reason=None, by=None):
+        if not det:
+            return {"ok": False, "error": "det required"}
+        with self.lock:
+            if on:
+                self.data[det] = {"label": label, "reason": (reason or "").strip()[:300],
+                                  "by": by, "ts": int(time.time())}
+            else:
+                self.data.pop(det, None)
+            self._save()
+        return {"ok": True, "accepted": bool(on)}
+
+    def all(self):
+        with self.lock:
+            return dict(self.data)
+
+
 class AlertLifecycle:
     """One record per alerted node_id capturing the lifecycle timestamps (UTC ms) and an
     append-only action/status audit trail. Powers the per-alert audit log and the
@@ -9395,6 +9497,24 @@ class AlertLifecycle:
                         "last_ms": g["last_ms"], "has_fields": g["has_fields"]})
         out.sort(key=lambda x: (x["noise"], x["benign_fp"], x["count"]), reverse=True)
         return out
+
+    def detection_samples(self, det, since_ms=None, until_ms=None, cap=600):
+        """(label, samples) for ONE detection over a window — each sample carries its triage
+        disposition and field snapshot, the raw material for building a scoped suppression from the
+        benign/FP closes and checking collateral against the malicious ones."""
+        label, out = None, []
+        for nid, r in self._window_items(since_ms, until_ms):
+            d = r.get("det") or ("%s:%s" % (r.get("source") or "heuristic", r.get("type") or "?"))
+            if d != det:
+                continue
+            if label is None:
+                label = r.get("det_label")
+            out.append({"disposition": self._disposition(r), "type": r.get("type"),
+                        "label": r.get("label"), "fields": r.get("fields") or {},
+                        "severity": r.get("severity"), "generated_ms": r.get("generated_ms")})
+            if len(out) >= cap:
+                break
+        return (label or self._det_label_default(det, None)), out
 
     def aggregate(self, since_ms=None, until_ms=None, case_index=None):
         """Lifecycle metrics, optionally over a window.
@@ -11293,9 +11413,12 @@ class Suppressions:
             return [dict(s) for s in self.items]
 
     def match(self, node):
-        """Return the enabled suppressions that match this node-like dict (live graph node OR a
-        stored alert record — both expose type/label/detail and rule_node_matches handles either)."""
-        return [s for s in self.snapshot() if s.get("enabled", True) and rule_node_matches(s, node)]
+        """Return the enabled, non-expired suppressions that match this node-like dict (live graph node
+        OR a stored alert record — both expose type/label/detail and rule_node_matches handles either)."""
+        now = now_ms()
+        return [s for s in self.snapshot()
+                if s.get("enabled", True) and not (s.get("expires") and s["expires"] < now)
+                and rule_node_matches(s, node)]
 
     def _validate(self, spec):
         """Normalize a suppression spec from the UI/file. Returns (ok, normalized|error)."""
@@ -11324,6 +11447,8 @@ class Suppressions:
             "reason": (spec.get("reason") or "").strip()[:300],
             "enabled": bool(spec.get("enabled", True)),
             "created": spec.get("created") or iso_utc_ms(),
+            # Optional auto-expiry (epoch ms) — a "snooze": the suppression stops matching once past it.
+            "expires": spec.get("expires") if isinstance(spec.get("expires"), (int, float)) else None,
         }
 
     def add(self, spec):
@@ -14361,7 +14486,8 @@ class SnapshotCache:
                  auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                  posture=None, shellhist=None, rules=None, sqldet=None, vr=None, responder=None,
                  lifecycle=None, ai=None, suppressions=None, incidents=None, attack=None, exporter=None,
-                 realtime=None, ntfy=None, decoys=None, provenance=None, webshell=None):
+                 realtime=None, ntfy=None, decoys=None, provenance=None, webshell=None,
+                 accepted=None):
         self.interval = interval
         self.no_sig = no_sig
         self.sig = SignatureChecker(enabled=not no_sig)
@@ -14391,6 +14517,7 @@ class SnapshotCache:
         self.realtime = realtime
         self.provenance = provenance
         self.webshell = webshell
+        self.accepted = accepted             # analyst-accepted "known noise" dets (fidelity view)
         self.ntfy = ntfy
         self.lock = threading.Lock()
         self.data = None
@@ -16797,11 +16924,44 @@ def make_handler(cache):
                 cur = lc.detection_fidelity(since_ms=now - span_ms, until_ms=now) if lc else []
                 prior = lc.detection_fidelity(since_ms=now - 2 * span_ms, until_ms=now - span_ms) if lc else []
                 pri = {d["det"]: d["count"] for d in prior}
+                accepted = cache.accepted.all() if cache.accepted else {}
                 for d in cur:
                     d["prev_count"] = pri.get(d["det"], 0)
                     d["trend"] = d["count"] - d["prev_count"]
+                    d["accepted"] = d["det"] in accepted
                 self._send_json({"window": win, "span_ms": span_ms, "generated": now,
                                  "detections": cur, "total_alerts": sum(d["count"] for d in cur)})
+            elif path == "/api/detection-fidelity/suggest":
+                # Gate 2: cluster a detection's benign/FP closes into the TIGHTEST scoped suppression,
+                # with coverage + malicious-collateral preview. Read-only (GET) so it's viewable even on
+                # a managed host; only the actual suppression create is a write. Ships the benign /
+                # malicious field samples so the modal can recompute the preview as conditions are toggled.
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                det = (q.get("det") or [""])[0].strip()
+                win = (q.get("window") or ["week"])[0]
+                span_ms = {"day": 86400, "week": 7 * 86400, "month": 30 * 86400}.get(win, 7 * 86400) * 1000
+                lc = cache.lifecycle
+                if not lc or not det:
+                    self._send_json({"ok": False, "error": "det and lifecycle required"}); return
+                now = now_ms()
+                label, samples = lc.detection_samples(det, since_ms=now - span_ms, until_ms=now)
+                benign = [s for s in samples if s["disposition"] in ("benign", "false-positive")]
+                malicious = [s for s in samples if s["disposition"] in ("malicious", "security-testing")]
+                spec, options = suggest_suppression_spec(det, label, benign)
+                def _hits(sp, recs):
+                    if not sp or not sp.get("conditions"):
+                        return []
+                    return [r for r in recs if rule_node_matches(sp, _node_from_lifecycle(r))]
+                collat = _hits(spec, malicious)
+                self._send_json({
+                    "ok": True, "det": det, "label": label, "window": win,
+                    "node_type": (spec or {}).get("node_type"), "spec": spec, "field_options": options,
+                    "benign_total": len(benign), "malicious_total": len(malicious),
+                    "coverage": len(_hits(spec, benign)), "collateral": len(collat),
+                    "collateral_samples": [{"label": c.get("label")} for c in collat][:10],
+                    "benign_samples": [s["fields"] for s in benign][:300],
+                    "malicious_samples": [{"label": s.get("label"), "fields": s["fields"]} for s in malicious][:100],
+                    "has_fields": any(s["fields"] for s in benign)})
             elif path == "/api/incidents":
                 if not cache.incidents:
                     self._send_json({"enabled": False, "incidents": []})
@@ -17348,6 +17508,25 @@ def make_handler(cache):
                     res = {"ok": False, "error": "unknown op"}
                 if res.get("ok") and op in ("add", "update", "delete", "toggle"):
                     cache.invalidate()
+                self._send_json(res, status=200 if res.get("ok") else 400)
+            elif u.path == "/api/detection-fidelity/accept":
+                # Gate 2: mark a detection as accepted "known noise" (does NOT suppress — just drops it
+                # to the bottom of the view). A reason note is required for the audit trail.
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+                try:
+                    p = json.loads(raw) if raw else {}
+                except ValueError:
+                    p = {}
+                if not cache.accepted:
+                    res = {"ok": False, "error": "unavailable"}
+                elif not (p.get("det") or "").strip():
+                    res = {"ok": False, "error": "det required"}
+                elif p.get("on", True) and not (p.get("reason") or "").strip():
+                    res = {"ok": False, "error": "a reason note is required to accept a detection as noise"}
+                else:
+                    res = cache.accepted.set((p.get("det") or "").strip(), bool(p.get("on", True)),
+                                             label=p.get("label"), reason=p.get("reason"), by="console")
                 self._send_json(res, status=200 if res.get("ok") else 400)
             elif u.path == "/api/mesh":
                 length = int(self.headers.get("Content-Length") or 0)
@@ -19102,7 +19281,7 @@ class MeshReporter:
     # Read-only endpoints the mesh may pull on demand for a host "Full view" (mirrors the local UI
     # WITHOUT streaming or remoting in). GET-only: nothing here mutates state, and POST is never relayed.
     VIEW_WHITELIST = {"/api/decoys", "/api/snapshot", "/api/alerts", "/api/metrics", "/api/detection-fidelity",
-                      "/api/incidents", "/api/attack",
+                      "/api/detection-fidelity/suggest", "/api/incidents", "/api/attack",
                       "/api/groups", "/api/rules", "/api/suppressions", "/api/playbook",
                       "/api/alert-history", "/api/ai-analysis", "/api/health", "/api/sensors",
                       "/api/export", "/api/ioc-feeds", "/api/geoip", "/api/respond", "/api/ai",
@@ -19116,7 +19295,7 @@ class MeshReporter:
     WRITE_WHITELIST = {"/api/decoys", "/api/triage", "/api/triage-bulk", "/api/incidents", "/api/incidents-bulk", "/api/incident-members", "/api/incident-note", "/api/export",
                        "/api/ioc-feeds", "/api/ioc-key", "/api/geoip", "/api/ai-config", "/api/ai-key",
                        "/api/notify", "/api/rules", "/api/rules-test", "/api/suppressions", "/api/respond",
-                       "/api/vulns"}   # + response posture + vuln remediation
+                       "/api/detection-fidelity/accept", "/api/vulns"}   # + response posture + vuln remediation
 
     def __init__(self, cache, secrets=None, settings_file=None):
         self.cache = cache
@@ -21111,6 +21290,7 @@ def main():
     atexit.register(vr.stop)   # never orphan the VR subprocess
     atexit.register(realtime.stop)   # close netlink/inotify + flush the event buffers
     lifecycle = AlertLifecycle()
+    accepted = AcceptedNoise()         # analyst-accepted "known noise" dets (fidelity view)
     ai = AIClient(secrets=secrets)
     suppressions = Suppressions()   # operator alert-suppression rules (suppressions.json)
     # Deception: on unless opted out. A mesh-connected host takes the mesh's posture, and the mesh's
@@ -21142,7 +21322,7 @@ def main():
                           rules=rules, sqldet=sqldet, vr=vr, responder=responder,
                           lifecycle=lifecycle, ai=ai, suppressions=suppressions, incidents=incidents,
                           attack=attack, exporter=exporter, realtime=realtime, ntfy=ntfy,
-                          provenance=provenance, webshell=webshell)
+                          provenance=provenance, webshell=webshell, accepted=accepted)
     cache.analyses = analyses            # exposed to the ai-analyze writer + the /api/ai-analysis reader
     cache.updater = updater              # served by /api/health + /api/update
     updater.start()                      # background, cached 24h; no-op with --no-update-check

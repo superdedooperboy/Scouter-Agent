@@ -344,6 +344,8 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   #metrics table.fidtbl td{padding:7px 10px;border-bottom:1px solid var(--hair);vertical-align:top}
   #metrics table.fidtbl tbody tr:hover{background:var(--panel)}
   #metrics .fidwin button{padding:3px 11px}
+  .fidbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;width:min(560px,92vw);max-height:86vh;overflow:auto;box-shadow:0 24px 70px var(--shadow)}
+  .fidbox code{background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:11.5px}
   /* AI assist */
   #aiPanel label{display:block;font-size:10.5px;color:var(--muted);margin-top:6px}
   #aiPanel input[type=text],#aiPanel input:not([type]),#aiPanel select{width:100%;box-sizing:border-box;font-size:11px;padding:3px 6px;margin-top:2px}
@@ -4451,28 +4453,108 @@ function fidDraw(d){
   const dets=(d&&d.detections)||[];
   const tabs=['day','week','month'].map(w=>`<button class="btn${w===fidWindow?' pri':''}" onclick="renderFidelity('${w}')">${w[0].toUpperCase()+w.slice(1)}</button>`).join('');
   let h=`<h2 style="margin:0 0 4px">Noisy detections</h2>`+
-    `<div class="hint" style="margin-bottom:10px">Detections generating the most benign / false-positive noise ${FID_SPANLBL[d.window]||''}, ranked by a noise score — <b>more benign/FP closes × lower confidence</b>. Use it to spot low-fidelity detections worth tuning. <span style="opacity:.75">Suppressing directly from this view lands in the next update.</span></div>`+
+    `<div class="hint" style="margin-bottom:10px">Detections generating the most benign / false-positive noise ${FID_SPANLBL[d.window]||''}, ranked by a noise score — <b>more benign/FP closes × lower confidence</b>. Spot a low-fidelity detection, then <b>Tune…</b> it to build a scoped suppression (or accept it as known noise).</div>`+
     `<div class="fidwin" style="display:flex;gap:6px;margin-bottom:12px">${tabs}</div>`;
+  fidDets=dets;
   if(!dets.length){ wrap.innerHTML=h+'<div class="hint">No alerts with lifecycle data in this window yet — the view fills in as alerts are raised and triaged.</div>'; return; }
+  const ALIGN=['','right','left','center','center','right','center'];
   h+=`<table class="fidtbl"><thead><tr>`+
-     ['Detection','Alerts','Benign / FP','Confidence','Trend','Noise'].map((c,i)=>`<th${i>0?' style="text-align:'+(i===2?'left':(i===5?'right':'center'))+'"':''}>${c}</th>`).join('')+
+     ['Detection','Alerts','Benign / FP','Confidence','Trend','Noise','Tune'].map((c,i)=>`<th${i>0?' style="text-align:'+ALIGN[i]+'"':''}>${c}</th>`).join('')+
      `</tr></thead><tbody>`;
-  for(const x of dets){
+  dets.forEach((x,idx)=>{
     const pct=x.count?Math.round(100*x.benign_fp/x.count):0;
     const trend = x.trend>0?`<span style="color:var(--sev-high)" title="noisier than the previous window">▲ +${x.trend}</span>`
       : (x.trend<0?`<span style="color:var(--good)" title="quieter than the previous window">▼ ${x.trend}</span>`
       : `<span style="color:var(--muted)">—</span>`);
     const mal = x.malicious?` · <span title="some alerts from this detection were closed MALICIOUS — do not blindly suppress" style="color:var(--sev-critical)">⚠ ${x.malicious} malicious</span>`:'';
-    h+=`<tr>`+
-      `<td><div style="font-weight:600">${esc(x.label||x.det)}</div><div class="hint" style="margin:0">${esc(FID_SRC[x.source]||x.source||'')}${x.technique?' · '+esc(x.technique):''}</div></td>`+
+    const acc = x.accepted?` <span title="accepted as known noise — not suppressed" style="background:var(--chip);color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 5px;font-size:10px">accepted</span>`:'';
+    h+=`<tr${x.accepted?' style="opacity:.55"':''}>`+
+      `<td><div style="font-weight:600">${esc(x.label||x.det)}${acc}</div><div class="hint" style="margin:0">${esc(FID_SRC[x.source]||x.source||'')}${x.technique?' · '+esc(x.technique):''}</div></td>`+
       `<td style="text-align:right;font-variant-numeric:tabular-nums">${x.count}</td>`+
       `<td style="min-width:150px"><div style="display:flex;align-items:center;gap:7px"><div style="flex:1;min-width:60px;height:7px;border-radius:4px;background:var(--line);overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--sev-medium)"></div></div><span style="font-variant-numeric:tabular-nums;min-width:34px;text-align:right">${pct}%</span></div><div class="hint" style="margin:1px 0 0">${x.benign_fp} of ${x.count}${mal}</div></td>`+
       `<td style="text-align:center">${esc(fidConfName(x.confidence))}</td>`+
       `<td style="text-align:center;white-space:nowrap">${trend}</td>`+
       `<td style="text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${x.noise}</td>`+
+      `<td style="text-align:center"><button class="btn" onclick="fidTune(${idx})">Tune…</button></td>`+
       `</tr>`;
-  }
+  });
   wrap.innerHTML=h+`</tbody></table>`;
+}
+
+// ---- Gate 2: tune a noisy detection — scoped suppression from benign clusters, snooze, accept noise ----
+let fidDets=[], fidModal=null;
+function fidMatchCount(conds, samples){
+  if(!conds.length) return samples.length;
+  return (samples||[]).filter(f=>conds.every(c=>String((f&&f[c.field])!=null?f[c.field]:'')===String(c.value))).length;
+}
+function fidActiveConds(){ const c=(fidModal.s.spec&&fidModal.s.spec.conditions)||[]; return c.filter((_,i)=>fidModal.checked[i]); }
+function fidTune(i){
+  const x=fidDets[i]; if(!x) return;
+  fetch('/api/detection-fidelity/suggest?det='+encodeURIComponent(x.det)+'&window='+encodeURIComponent(fidWindow))
+    .then(r=>r.json()).then(s=>{
+      if(!s||s.ok===false){ alert((s&&s.error)||'Could not load suggestion'); return; }
+      fidModal={x, s, checked:((s.spec&&s.spec.conditions)||[]).map(()=>true), ack:false, reason:'', snooze:''};
+      fidModalRender();
+    }).catch(()=>alert('Could not load suggestion'));
+}
+function fidSyncAndRender(){ const ta=document.getElementById('fidReason'); if(ta) fidModal.reason=ta.value; const sn=document.getElementById('fidSnooze'); if(sn) fidModal.snooze=sn.value; fidModalRender(); }
+function fidClose(){ const el=document.getElementById('fidModal'); if(el) el.style.display='none'; fidModal=null; }
+function fidMsg(m){ const el=document.getElementById('fidMsg'); if(el){ el.textContent=m; el.style.color='var(--sev-high)'; } }
+function fidModalRender(){
+  let el=document.getElementById('fidModal');
+  if(!el){ el=document.createElement('div'); el.id='fidModal'; el.className='modal'; el.onclick=(e)=>{ if(e.target===el) fidClose(); }; document.body.appendChild(el); }
+  const {x,s}=fidModal, conds=(s.spec&&s.spec.conditions)||[], active=fidActiveConds();
+  const cov=fidMatchCount(active, s.benign_samples||[]);
+  const col=fidMatchCount(active, (s.malicious_samples||[]).map(m=>m.fields||{}));
+  const noField=!s.has_fields || !conds.length;
+  let h=`<div class="fidbox">`+
+    `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px"><h2 style="margin:0">Tune detection</h2><span class="va" onclick="fidClose()" style="cursor:pointer">✕</span></div>`+
+    `<div style="font-weight:600;margin:6px 0 2px">${esc(s.label||x.det)}</div>`+
+    `<div class="hint" style="margin:0 0 14px">${x.count} alert(s) ${FID_SPANLBL[s.window]||''} · ${x.benign_fp} benign/FP${x.malicious?` · <span style="color:var(--sev-critical)">${x.malicious} malicious</span>`:''}${x.accepted?' · <b>accepted noise</b>':''}</div>`;
+  if(noField){
+    h+=`<div class="hint" style="margin-bottom:12px">No field data for this detection's benign closes yet (alerts raised before this build don't carry it). New alerts will populate a scoped suggestion. You can build a suppression by hand on the Detections tab, or accept this as known noise below.</div>`;
+  } else {
+    h+=`<div style="font-weight:600;margin-bottom:3px">Scoped suppression</div>`+
+       `<div class="hint" style="margin:0 0 8px">Silence future <b>${esc(s.node_type)}</b> alerts where the checked conditions all hold — the tightest pattern common to the benign closes. Uncheck to broaden.</div>`+
+       `<div style="margin-bottom:8px">`+conds.map((c,i)=>
+         `<label style="display:flex;align-items:center;gap:7px;padding:2px 0;font-size:12.5px"><input type="checkbox" ${fidModal.checked[i]?'checked':''} onchange="fidModal.checked[${i}]=this.checked;fidSyncAndRender()"> <code>${esc(c.field)}</code> = <code>${esc(String(c.value))}</code></label>`).join('')+
+       `</div>`+
+       `<div class="hint" style="margin:0 0 10px">Would hide <b>${cov}</b> of <b>${s.benign_total}</b> benign/FP in this window.${active.length?'':' <span style="color:var(--sev-high)">Select at least one condition.</span>'}</div>`;
+    if(col>0){
+      h+=`<div style="border:1px solid var(--sev-critical);border-radius:8px;padding:9px 11px;margin-bottom:12px">`+
+         `<div style="color:var(--sev-critical);font-weight:600">⚠ Collateral: would also hide ${col} alert(s) you closed MALICIOUS</div>`+
+         `<div class="hint" style="margin:3px 0 7px">${(s.malicious_samples||[]).slice(0,5).map(m=>esc(m.label||'')).join(' · ')}</div>`+
+         `<label style="display:flex;align-items:center;gap:7px;font-size:12.5px"><input type="checkbox" ${fidModal.ack?'checked':''} onchange="fidModal.ack=this.checked;fidSyncAndRender()"> I understand — suppress anyway (tighten the conditions to avoid this)</label></div>`;
+    }
+    h+=`<label style="font-size:12px;color:var(--muted)">Reason — required, recorded in the audit log</label>`+
+       `<textarea id="fidReason" rows="2" style="width:100%;box-sizing:border-box;margin:3px 0 10px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px" placeholder="e.g. Chrome's local updater listener — benign across our hosts">${esc(fidModal.reason||'')}</textarea>`+
+       `<label style="font-size:12px;color:var(--muted)">Snooze — auto-expire after N days (blank = permanent)</label><br>`+
+       `<input id="fidSnooze" type="number" min="1" max="365" value="${esc(String(fidModal.snooze||''))}" style="width:90px;margin:3px 0 14px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:5px">`;
+    const canCreate=active.length && (col===0 || fidModal.ack);
+    h+=`<button class="btn pri" ${canCreate?'':'disabled style="opacity:.5;cursor:not-allowed"'} onclick="fidSyncAndRender();fidCreateSuppression()">Create suppression</button> `;
+  }
+  h+=`<button class="btn" onclick="fidSyncAndRender();fidAccept()">${x.accepted?'Un-accept':'Mark accepted noise'}</button> `+
+     `<button class="btn" onclick="fidClose()">Cancel</button>`+
+     `<div id="fidMsg" class="hint" style="margin-top:8px"></div></div>`;
+  el.innerHTML=h; el.style.display='flex';
+}
+function fidCreateSuppression(){
+  const {x,s}=fidModal, active=fidActiveConds(), reason=(fidModal.reason||'').trim();
+  if(!active.length){ fidMsg('Select at least one condition.'); return; }
+  if(!reason){ fidMsg('A reason is required.'); return; }
+  if(fidMatchCount(active,(s.malicious_samples||[]).map(m=>m.fields||{}))>0 && !fidModal.ack){ fidMsg('Acknowledge the malicious collateral first.'); return; }
+  const spec={node_type:s.node_type, match:'all', conditions:active, reason:reason, name:(s.label||x.det)};
+  const days=parseInt(fidModal.snooze||'0',10);
+  if(days>0) spec.expires=Date.now()+days*86400*1000;
+  fetch('/api/suppressions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:'add',spec})})
+    .then(r=>r.json()).then(res=>{ if(res&&res.ok){ fidClose(); renderFidelity(); } else fidMsg((res&&res.error)||'Failed'); }).catch(()=>fidMsg('Failed'));
+}
+function fidAccept(){
+  const {x,s}=fidModal, on=!x.accepted;
+  let reason=(fidModal.reason||'').trim();
+  if(on && !reason){ reason=(prompt('Reason for accepting this as known noise:')||'').trim(); if(!reason){ fidMsg('A reason is required to accept.'); return; } }
+  fetch('/api/detection-fidelity/accept',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({det:x.det,label:s.label||x.det,reason:reason,on:on})})
+    .then(r=>r.json()).then(res=>{ if(res&&res.ok){ fidClose(); renderFidelity(); } else fidMsg((res&&res.error)||'Failed'); }).catch(()=>fidMsg('Failed'));
 }
 
 // Detection-flow Sankeys. Five three-column flows over the alerts in the window; the server sends

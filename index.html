@@ -341,6 +341,12 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   #metrics .mcard h3{margin:0 0 2px;font-size:13px}
   #metrics .mcard .big{font-size:26px;font-weight:650;color:var(--accent);font-variant-numeric:tabular-nums}
   #metrics .mcard .sub{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.6}
+  /* Noisy-detection (fidelity) table */
+  #metrics table.fidtbl{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:4px}
+  #metrics table.fidtbl th{text-align:left;color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;padding:4px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  #metrics table.fidtbl td{padding:7px 10px;border-bottom:1px solid var(--hair);vertical-align:top}
+  #metrics table.fidtbl tbody tr:hover{background:var(--panel)}
+  #metrics .fidwin button{padding:3px 11px}
   /* Sensor health */
   #sensors{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:16px}
   #sensors h2{margin:0 0 4px}
@@ -3319,6 +3325,7 @@ function renderMetrics(){
         `</div></div>`;
     }).join('')+'</div>';
     if(!d.alerts) h+='<div class="hint" style="margin-top:8px">No alerts with lifecycle data yet. Metrics populate as alerts are generated, triaged, and acted on.</div>';
+    h+=`<div id="metFidelityWrap" style="margin-top:24px"></div>`;
     if(Array.isArray(d.flows)&&d.flows.length){
       h+=`<h2 style="margin-top:22px">Detection flow</h2>`+
          `<div id="metFlowCtl" style="margin-bottom:8px"></div>`+
@@ -3326,8 +3333,50 @@ function renderMetrics(){
          `<div id="metFlow" style="width:100%"></div>`;
     }
     box.innerHTML=h;
+    renderFidelity();
     if(Array.isArray(d.flows)&&d.flows.length){ metFlows=d.flows; metFlowRender(); }
   }).catch(e=>{ box.innerHTML='<div class="empty-big">Error loading metrics: '+esc(''+e)+'</div>'; });
+}
+
+// ---- Noisy-detection (fidelity) view: rank detections by benign/FP noise over day/week/month ----
+let fidWindow='week';
+const FID_CONF={1:'weak',2:'probable',3:'strong',4:'certain'};
+function fidConfName(c){ return FID_CONF[Math.round(c)] || (typeof c==='number'?c.toFixed(1):'—'); }
+const FID_SRC={'threat-intel':'threat-intel','live-rule':'built-in rule','custom':'custom rule','sql':'SQL rule','heuristic':'heuristic'};
+const FID_SPANLBL={day:'in the last 24 hours',week:'in the last 7 days',month:'in the last 30 days'};
+function renderFidelity(win){
+  if(win) fidWindow=win;
+  const wrap=document.getElementById('metFidelityWrap'); if(!wrap) return;
+  fetch('/api/detection-fidelity?window='+encodeURIComponent(fidWindow)).then(r=>r.json()).then(fidDraw)
+    .catch(()=>{ wrap.innerHTML='<h2 style="margin:0 0 6px">Noisy detections</h2><div class="hint">Could not load detection fidelity.</div>'; });
+}
+function fidDraw(d){
+  const wrap=document.getElementById('metFidelityWrap'); if(!wrap) return;
+  const dets=(d&&d.detections)||[];
+  const tabs=['day','week','month'].map(w=>`<button class="btn${w===fidWindow?' pri':''}" onclick="renderFidelity('${w}')">${w[0].toUpperCase()+w.slice(1)}</button>`).join('');
+  let h=`<h2 style="margin:0 0 4px">Noisy detections</h2>`+
+    `<div class="hint" style="margin-bottom:10px">Detections generating the most benign / false-positive noise ${FID_SPANLBL[d.window]||''}, ranked by a noise score — <b>more benign/FP closes × lower confidence</b>. Use it to spot low-fidelity detections worth tuning. <span style="opacity:.75">Suppressing directly from this view lands in the next update.</span></div>`+
+    `<div class="fidwin" style="display:flex;gap:6px;margin-bottom:12px">${tabs}</div>`;
+  if(!dets.length){ wrap.innerHTML=h+'<div class="hint">No alerts with lifecycle data in this window yet — the view fills in as alerts are raised and triaged.</div>'; return; }
+  h+=`<table class="fidtbl"><thead><tr>`+
+     ['Detection','Alerts','Benign / FP','Confidence','Trend','Noise'].map((c,i)=>`<th${i>0?' style="text-align:'+(i===2?'left':(i===5?'right':'center'))+'"':''}>${c}</th>`).join('')+
+     `</tr></thead><tbody>`;
+  for(const x of dets){
+    const pct=x.count?Math.round(100*x.benign_fp/x.count):0;
+    const trend = x.trend>0?`<span style="color:var(--sev-high)" title="noisier than the previous window">▲ +${x.trend}</span>`
+      : (x.trend<0?`<span style="color:var(--good)" title="quieter than the previous window">▼ ${x.trend}</span>`
+      : `<span style="color:var(--muted)">—</span>`);
+    const mal = x.malicious?` · <span title="some alerts from this detection were closed MALICIOUS — do not blindly suppress" style="color:var(--sev-critical)">⚠ ${x.malicious} malicious</span>`:'';
+    h+=`<tr>`+
+      `<td><div style="font-weight:600">${esc(x.label||x.det)}</div><div class="hint" style="margin:0">${esc(FID_SRC[x.source]||x.source||'')}${x.technique?' · '+esc(x.technique):''}</div></td>`+
+      `<td style="text-align:right;font-variant-numeric:tabular-nums">${x.count}</td>`+
+      `<td style="min-width:150px"><div style="display:flex;align-items:center;gap:7px"><div style="flex:1;min-width:60px;height:7px;border-radius:4px;background:var(--line);overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--sev-medium)"></div></div><span style="font-variant-numeric:tabular-nums;min-width:34px;text-align:right">${pct}%</span></div><div class="hint" style="margin:1px 0 0">${x.benign_fp} of ${x.count}${mal}</div></td>`+
+      `<td style="text-align:center">${esc(fidConfName(x.confidence))}</td>`+
+      `<td style="text-align:center;white-space:nowrap">${trend}</td>`+
+      `<td style="text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${x.noise}</td>`+
+      `</tr>`;
+  }
+  wrap.innerHTML=h+`</tbody></table>`;
 }
 
 // Detection-flow Sankeys. Five three-column flows over the alerts in the window; the server sends

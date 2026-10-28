@@ -8919,6 +8919,38 @@ class AIAnalysisStore:
             return self.data.get(self._key(node_id, ntype, detail, techniques))
 
 
+def detection_key_for(node, source):
+    """Stable identity of the DETECTION that raised this alert, for the noisy-detection view.
+    The highest-confidence rule hit's id when a rule fired (that is the actionable, suppressable
+    unit); otherwise a coarse source:type key. Returns (key, label|None)."""
+    best = None
+    for h in ((node.get("detail") or {}).get("rule_hits") or []):
+        if not h.get("id"):
+            continue
+        if best is None or int(h.get("confidence") or 0) > int(best.get("confidence") or 0):
+            best = h
+    if best:
+        return "rule:" + str(best["id"]), (best.get("name") or str(best["id"]))
+    return "%s:%s" % (source or "heuristic", node.get("type") or "?"), None
+
+
+def node_match_fields(node):
+    """Snapshot a node's whitelisted, matchable fields — read with the SAME resolver that rules and
+    suppressions use (_rule_resolve_field) — so a scoped suppression can later be built from a cluster
+    of benign closes. Flat {field: str}, bounded to the per-type field hints."""
+    out = {}
+    ntype = node.get("type")
+    wanted = list(dict.fromkeys(RULE_FIELD_HINTS.get("any", []) + RULE_FIELD_HINTS.get(ntype, [])))
+    for f in wanted:
+        v = _rule_resolve_field(node, f)
+        if v is None or isinstance(v, (dict, list)):
+            continue
+        s = str(v)
+        if s:
+            out[f] = s[:200]
+    return out
+
+
 class AlertLifecycle:
     """One record per alerted node_id capturing the lifecycle timestamps (UTC ms) and an
     append-only action/status audit trail. Powers the per-alert audit log and the
@@ -9025,9 +9057,11 @@ class AlertLifecycle:
             # absorbs the second-granularity of mtime/etime so genuinely-fresh artifacts aren't
             # mis-flagged as pre-existing.
             pre_existing = landing is not None and landing < (self.start_ms - 2000)
+            det_key, det_label = detection_key_for(node, source)
             rec = {"type": node.get("type"), "label": node.get("label"),
                    "severity": node.get("severity"), "confidence_rank": conf_rank,
                    "technique": tech, "source": source, "landing_ms": landing,
+                   "det": det_key, "det_label": det_label, "fields": node_match_fields(node),
                    "generated_ms": gen, "first_status_ms": None, "first_action_ms": None,
                    "closed_ms": None, "status": "open", "pre_existing": pre_existing, "events": []}
             rec["events"].append(self._ev("alert", f"Alert generated (severity {node.get('severity')})"
@@ -9294,6 +9328,74 @@ class AlertLifecycle:
 
         return [signal, attack, response, lifecycle, correlation]
 
+    def _window_items(self, since_ms=None, until_ms=None):
+        """(node_id, record) pairs, optionally filtered to alerts RAISED within [since,until] (ms)."""
+        with self.lock:
+            items = list(self.data.items())
+        if since_ms is None and until_ms is None:
+            return items
+        lo = since_ms if since_ms is not None else float("-inf")
+        hi = until_ms if until_ms is not None else float("inf")
+        return [(nid, r) for nid, r in items
+                if r.get("generated_ms") is not None and lo <= r["generated_ms"] <= hi]
+
+    @staticmethod
+    def _modal(counts):
+        return max(counts, key=counts.get) if counts else None
+
+    def _det_label_default(self, det, source):
+        """Human label for a detection with no stored rule name (source:type keys / older records)."""
+        if det and det.startswith("rule:"):
+            return det[5:]
+        parts = (det or "").split(":", 1)
+        ntype = parts[1] if len(parts) == 2 else ""
+        src = (source or (parts[0] if parts else "heuristic")).replace("-", " ").title()
+        return ("%s · %s" % (src, ntype)).strip(" ·") if ntype else src
+
+    def detection_fidelity(self, since_ms=None, until_ms=None):
+        """Per-detection noise rollup over a window — how much each detection fired and where its
+        alerts landed (triage disposition), so the analyst can find the low-fidelity detections
+        drowning the signal. Grouped by the stable `det` key (a rule id when a rule fired, else
+        source:type). Ranked worst-first by a transparent noise score."""
+        groups = {}
+        for nid, r in self._window_items(since_ms, until_ms):
+            det = r.get("det") or ("%s:%s" % (r.get("source") or "heuristic", r.get("type") or "?"))
+            g = groups.get(det)
+            if g is None:
+                g = groups[det] = {"det": det, "label": r.get("det_label"), "source": r.get("source"),
+                                   "count": 0, "disp": {}, "conf_sum": 0, "conf_n": 0,
+                                   "sev": {}, "tech": {}, "last_ms": 0, "has_fields": False}
+            g["count"] += 1
+            d = self._disposition(r)
+            g["disp"][d] = g["disp"].get(d, 0) + 1
+            cr = r.get("confidence_rank")
+            if isinstance(cr, int):
+                g["conf_sum"] += cr
+                g["conf_n"] += 1
+            if r.get("severity"):
+                g["sev"][r["severity"]] = g["sev"].get(r["severity"], 0) + 1
+            if r.get("technique"):
+                g["tech"][r["technique"]] = g["tech"].get(r["technique"], 0) + 1
+            g["last_ms"] = max(g["last_ms"], r.get("generated_ms") or 0)
+            if r.get("fields"):
+                g["has_fields"] = True
+        out = []
+        for g in groups.values():
+            c = g["count"]
+            benign = g["disp"].get("benign", 0) + g["disp"].get("false-positive", 0)
+            conf = (g["conf_sum"] / g["conf_n"]) if g["conf_n"] else 2.0
+            noise = round(benign * (2.0 - conf / 4.0), 2)     # more benign/FP × lower confidence = noisier
+            out.append({"det": g["det"], "label": g["label"] or self._det_label_default(g["det"], g["source"]),
+                        "source": g["source"], "count": c,
+                        "benign_fp": benign, "malicious": g["disp"].get("malicious", 0),
+                        "open": g["disp"].get("open", 0), "disp": g["disp"],
+                        "benign_rate": round(benign / c, 3) if c else 0.0,
+                        "confidence": round(conf, 2), "severity": self._modal(g["sev"]),
+                        "technique": self._modal(g["tech"]), "noise": noise,
+                        "last_ms": g["last_ms"], "has_fields": g["has_fields"]})
+        out.sort(key=lambda x: (x["noise"], x["benign_fp"], x["count"]), reverse=True)
+        return out
+
     def aggregate(self, since_ms=None, until_ms=None, case_index=None):
         """Lifecycle metrics, optionally over a window.
 
@@ -9303,12 +9405,7 @@ class AlertLifecycle:
         keys = ("ttd_ms", "tti_ms", "ttr_ms", "ttc_ms")
         buckets = {k: [] for k in keys}
         ttd_excluded = 0
-        items = list(self.data.items())
-        if since_ms is not None or until_ms is not None:
-            lo = since_ms if since_ms is not None else float("-inf")
-            hi = until_ms if until_ms is not None else float("inf")
-            items = [(nid, r) for nid, r in items
-                     if r.get("generated_ms") is not None and lo <= r["generated_ms"] <= hi]
+        items = self._window_items(since_ms, until_ms)
         recs = [r for _, r in items]
         total = len(recs)
         for rec in recs:
@@ -16689,6 +16786,22 @@ def make_handler(cache):
                     self._send_json(agg)
                 else:
                     self._send_json({"alerts": 0, "metrics": {}, "window": {"from": since, "to": until}})
+            elif path == "/api/detection-fidelity":
+                # Noisy-detection tuning view: per-detection disposition rollup over day/week/month,
+                # plus the prior equal-length window so the UI can show a trend. Read-only (Gate 1).
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                win = (q.get("window") or ["week"])[0]
+                span_ms = {"day": 86400, "week": 7 * 86400, "month": 30 * 86400}.get(win, 7 * 86400) * 1000
+                now = now_ms()
+                lc = cache.lifecycle
+                cur = lc.detection_fidelity(since_ms=now - span_ms, until_ms=now) if lc else []
+                prior = lc.detection_fidelity(since_ms=now - 2 * span_ms, until_ms=now - span_ms) if lc else []
+                pri = {d["det"]: d["count"] for d in prior}
+                for d in cur:
+                    d["prev_count"] = pri.get(d["det"], 0)
+                    d["trend"] = d["count"] - d["prev_count"]
+                self._send_json({"window": win, "span_ms": span_ms, "generated": now,
+                                 "detections": cur, "total_alerts": sum(d["count"] for d in cur)})
             elif path == "/api/incidents":
                 if not cache.incidents:
                     self._send_json({"enabled": False, "incidents": []})
@@ -18988,7 +19101,8 @@ class MeshReporter:
 
     # Read-only endpoints the mesh may pull on demand for a host "Full view" (mirrors the local UI
     # WITHOUT streaming or remoting in). GET-only: nothing here mutates state, and POST is never relayed.
-    VIEW_WHITELIST = {"/api/decoys", "/api/snapshot", "/api/alerts", "/api/metrics", "/api/incidents", "/api/attack",
+    VIEW_WHITELIST = {"/api/decoys", "/api/snapshot", "/api/alerts", "/api/metrics", "/api/detection-fidelity",
+                      "/api/incidents", "/api/attack",
                       "/api/groups", "/api/rules", "/api/suppressions", "/api/playbook",
                       "/api/alert-history", "/api/ai-analysis", "/api/health", "/api/sensors",
                       "/api/export", "/api/ioc-feeds", "/api/geoip", "/api/respond", "/api/ai",

@@ -6,6 +6,18 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+### Added
+
+**Noisy-detection tuning view (Metrics tab) — Gate 1 of the detection-fidelity feature.** A new "Noisy
+detections" section ranks each detection by how much **benign / false-positive** noise it produced over
+a selectable **day / week / month** window, so an analyst drowning in low-value alerts can see exactly
+which detections to tune. Each row shows the alert count, the benign/FP rate, the detection's
+confidence, a **trend** vs the prior window, and a transparent **noise score** (more benign/FP closes ×
+lower confidence), worst-first. Detections that also produced **Malicious** closes are flagged in red
+so they're never blindly suppressed. Backed by the alert-lifecycle data (grouped by the firing rule
+when one fired, else source+type) via a new read-only `/api/detection-fidelity` endpoint. Gate 2
+(scoped suppression + snooze from this view) and Gate 3 (Mesh fleet mirror) follow.
+
 ## macOS agent 1.11.3 / Linux agent 1.11.3 — 2026-10-27
 
 ### Changed

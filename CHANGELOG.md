@@ -6,6 +6,8 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## macOS agent 1.11.3 / Linux agent 1.11.3 — 2026-10-27
+
 ### Changed
 
 **Bundled MITRE ATT&CK dataset refreshed to v20.0.** The ATT&CK coverage matrix and the Threat Groups

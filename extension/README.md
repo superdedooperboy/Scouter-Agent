@@ -23,9 +23,23 @@ account is required.
   enriched with a **threat-intel verdict** (is the destination on a malware blocklist?) and a one-click
   **reversible, device-wide block** (`/etc/hosts` + blackhole route — protects the whole machine, not
   just the browser). Fully standalone when unpaired. See **Pairing** below.
+- **2d — Firefox.** Cross-browser (Chromium `manifest.json` + Firefox `manifest.firefox.json`), no
+  build step, no polyfill. See the Firefox load section below.
+- **2e — packaging & store.** Icons (`tools/make-icons.py`, pure stdlib), `tools/pack.sh` builds
+  store-ready Chrome + Firefox zips, plus `STORE.md` (listing + permission justifications) and
+  `PRIVACY.md`.
 - **Toolbar popup** — shows how many threats this browser has caught.
 
-Not yet (later gates): Firefox port (2d); packaging & store/signing (2e).
+Phase 2 is feature-complete. (Later: surfacing browser threats as first-class agent/Mesh alerts — Phase 3.)
+
+## Package for the stores
+
+```
+./tools/pack.sh      # -> dist/scouter-web-guard-chrome-<v>.zip and ...-firefox-<v>.zip
+```
+
+Regenerate icons with `python3 tools/make-icons.py`. Submission copy + permission justifications are in
+`STORE.md`; the privacy policy is `PRIVACY.md`.
 
 ## Pairing with the Scouter agent (optional)
 

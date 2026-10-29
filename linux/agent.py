@@ -7992,6 +7992,87 @@ class ShellHistoryCollector:
 
 
 # ---------------------------------------------------------------------------
+# Browser extension bridge (Scouter Web Guard <-> this agent).
+# The extension reports browser-delivered threats (ClickFix lure pages / clipboard writes,
+# credential-phishing) over the agent's loopback HTTP server and asks for a threat-intel verdict
+# and, on the user's say-so (or when the agent is armed), a reversible block. It authenticates with
+# a PERSISTENT token the user pairs once — separate from the per-launch UI CSRF token (so the
+# extension survives restarts) and from the mesh token (so it grants only the /api/ext/* endpoints).
+# ---------------------------------------------------------------------------
+class ExtAuth:
+    """Persistent shared secret the browser extension presents as X-Scouter-Ext-Token. Stored 0600
+    next to the agent so it survives restarts (re-pairing every launch would be unusable)."""
+
+    def __init__(self, path=None):
+        self.path = path or os.path.join(HERE, "ext-token.json")
+        self.token = self._load_or_create()
+
+    def _load_or_create(self):
+        try:
+            with open(self.path) as f:
+                t = (json.load(f) or {}).get("token")
+            if t:
+                return t
+        except (OSError, ValueError):
+            pass
+        t = secrets.token_urlsafe(32)
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"token": t, "created": int(time.time())}, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+        return t
+
+    def ok(self, header):
+        return bool(header) and secrets.compare_digest(str(header), self.token)
+
+
+class BrowserThreats:
+    """Recent browser-guard findings reported by the paired extension (in-memory ring). The local
+    record + config feed; surfacing these as first-class fleet alerts lands in the Mesh phase."""
+
+    def __init__(self, cap=200):
+        self.lock = threading.Lock()
+        self.items = collections.deque(maxlen=cap)
+
+    def add(self, rec):
+        with self.lock:
+            self.items.appendleft(dict(rec))
+
+    def recent(self, n=50):
+        with self.lock:
+            return list(self.items)[:max(0, int(n))]
+
+
+# Loopback-only pairing page: shows the agent URL + the ext-token for the user to paste into the
+# extension's options. A cross-origin web page cannot read this response (same-origin policy), and the
+# loopback Host check kills DNS rebinding, so the token is only ever disclosed to the local user.
+_EXT_PAIR_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Pair Scouter Web Guard</title>
+<style>body{font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
+max-width:560px;margin:48px auto;padding:0 20px;color:#1f2430}h1{font-size:20px}
+label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;margin:16px 0 4px}
+.row{display:flex;gap:8px}input{flex:1;font:13px ui-monospace,Menlo,Consolas,monospace;padding:9px 11px;
+border:1px solid #d7dce5;border-radius:8px;background:#f8fafc}button{font:inherit;padding:9px 14px;border:0;
+border-radius:8px;background:#2f6fed;color:#fff;cursor:pointer}.note{font-size:12.5px;color:#9a4a00;
+background:#fff8f0;border:1px solid #f1d9bf;border-radius:8px;padding:10px 12px;margin-top:18px}
+.ok{color:#2fa84f;font-size:12px;margin-left:6px}</style></head><body>
+<h1>Pair Scouter Web Guard</h1>
+<p>Open the Scouter Web Guard extension&rsquo;s <b>Options</b>, paste these two values, and click Save.</p>
+<label>Agent URL</label><div class="row"><input id="u" readonly value="__BASE__"><button onclick="cp('u',this)">Copy</button></div>
+<label>Pairing token</label><div class="row"><input id="t" readonly value="__TOKEN__"><button onclick="cp('t',this)">Copy</button></div>
+<div class="note"><b>Keep this token private.</b> Anyone who has it can report threats to, and request site
+blocks on, this device. It was generated on this machine and never leaves it except when you paste it above.</div>
+<script>function cp(id,b){var e=document.getElementById(id);e.focus();e.select();
+try{document.execCommand('copy');var s=document.createElement('span');s.className='ok';s.textContent='copied';
+b.after(s);setTimeout(function(){s.remove();},1500);}catch(_){}}</script>
+</body></html>"""
+
+
+# ---------------------------------------------------------------------------
 # Custom detection rules — author your own detections in-platform (no code edits).
 # A "node rule" is a set of field conditions; when it matches a graph node it floors
 # that node's severity and adds a MITRE-tagged reason (same mechanics as IOC feeds).
@@ -16752,6 +16833,147 @@ def make_handler(cache):
                 return False
             return True
 
+        # ---- browser extension bridge (/api/ext/*) ----
+        def _read_json(self):
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return {}
+            if length <= 0 or length > 1024 * 1024:
+                return {}
+            try:
+                raw = self.rfile.read(length).decode("utf-8", "replace")
+                return json.loads(raw) if raw else {}
+            except (ValueError, OSError):
+                return {}
+
+        def _ext_ok(self):
+            """Gate the extension endpoints: loopback Host + the persistent ext-token. Deliberately
+            does NOT require Origin==loopback, so a chrome-extension:// origin is accepted — the
+            unguessable token plus the CORS-preflight barrier (a web page cannot send our custom header
+            cross-origin without a preflight we never grant) are what keep this safe. No permissive
+            CORS headers are ever sent (they would let web pages read our responses)."""
+            if not self._host_ok():
+                self._send_json({"ok": False, "error": "forbidden: bad Host"}, status=403)
+                return False
+            ext = getattr(cache, "ext_auth", None)
+            if not ext:
+                self._send_json({"ok": False, "error": "browser extension endpoints are disabled"}, status=403)
+                return False
+            if not ext.ok(self.headers.get("X-Scouter-Ext-Token") or ""):
+                self._send_json({"ok": False, "error": "forbidden: pair the browser extension first"}, status=403)
+                return False
+            return True
+
+        @staticmethod
+        def _ext_is_ip(h):
+            try:
+                ipaddress.ip_address(h); return True
+            except ValueError:
+                return False
+
+        def _ext_targets(self, body):
+            """Normalize the indicators the extension sent into (domain, ip, url)."""
+            url = str(body.get("url") or "")[:2048].strip()
+            domain = str(body.get("domain") or "")[:253].strip().lower().rstrip(".")
+            ip = str(body.get("ip") or "")[:45].strip()
+            if not domain and url:
+                domain = (host_from_url(url) or "").lower()
+            if domain and self._ext_is_ip(domain):        # a bare IP arrived in the domain slot
+                ip, domain = domain, ""
+            if ip and not self._ext_is_ip(ip):
+                ip = ""
+            if ip and is_private_ip(ip):                   # never block a private / loopback address
+                ip = ""
+            return domain, ip, url
+
+        def _ext_verdict(self, body):
+            kind = str(body.get("kind") or "threat")[:40]
+            page = str(body.get("page_url") or "")[:2048]
+            domain, ip, url = self._ext_targets(body)
+            ioc = getattr(cache, "ioc", None)
+            hits = []
+            try:
+                if ioc:
+                    if url:
+                        hits = ioc.match_url(url)
+                    if not hits and domain:
+                        hits = ioc.match_url("http://" + domain + "/")
+                    if not hits and ip:
+                        hits = ioc.match_ip(ip)
+            except Exception:  # noqa: BLE001
+                hits = []
+            malicious = bool(hits)
+            feed = hits[0].get("feed") if hits else None
+            resp = getattr(cache, "responder", None)
+            armed = bool(resp and not getattr(resp, "locked", False)
+                         and getattr(resp, "mode", "scouting") != "scouting")
+            blocked = []
+            if malicious and armed and resp and (domain or ip):
+                try:
+                    blocked = [b for b in resp.block_target(domain=domain or None, ip=ip or None, auto=True)
+                               if b.get("ok")]
+                except Exception:  # noqa: BLE001
+                    blocked = []
+            rec = {"ts": int(time.time() * 1000), "kind": kind, "domain": domain, "ip": ip,
+                   "url": url[:300], "page": page[:300], "verdict": "malicious" if malicious else "unknown",
+                   "feed": feed, "blocked": blocked}
+            bt = getattr(cache, "browser_threats", None)
+            if bt:
+                bt.add(rec)
+            if resp and hasattr(resp, "_audit"):
+                try:
+                    resp._audit("browser-threat", {"kind": kind, "domain": domain or ip,
+                                                   "verdict": rec["verdict"]},
+                                "malicious" if malicious else "seen")
+                except Exception:  # noqa: BLE001
+                    pass
+            return {"ok": True, "verdict": rec["verdict"], "feed": feed, "blocked": blocked,
+                    "can_block": bool(domain or ip), "armed": armed,
+                    "target": {"domain": domain, "ip": ip}}
+
+        def _ext_block(self, body):
+            resp = getattr(cache, "responder", None)
+            if not resp:
+                return {"ok": False, "error": "response engine unavailable"}
+            domain, ip, _ = self._ext_targets(body)
+            if not (domain or ip):
+                return {"ok": False, "error": "nothing to block"}
+            try:
+                results = resp.block_target(domain=domain or None, ip=ip or None, auto=False)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": str(e)[:160]}
+            ok = [b for b in results if b.get("ok")]
+            return {"ok": bool(ok), "blocked": ok, "results": results}
+
+        def _ext_post(self, path):
+            if not self._ext_ok():
+                return
+            body = self._read_json() or {}
+            if path == "/api/ext/verdict":
+                self._send_json(self._ext_verdict(body))
+            elif path == "/api/ext/block":
+                self._send_json(self._ext_block(body))
+            else:
+                self._send_json({"ok": False, "error": "unknown endpoint"}, status=404)
+
+        def _ext_pair_info(self):
+            ext = getattr(cache, "ext_auth", None)
+            if not ext:
+                self.send_error(404, "browser extension endpoints are disabled")
+                return
+            hostraw = self.headers.get("Host") or ""
+            port = re.sub(r"\D", "", hostraw.rsplit(":", 1)[1])[:5] if ":" in hostraw else ""
+            base = "http://127.0.0.1" + (":" + port if port else "")
+            page = _EXT_PAIR_HTML.replace("__BASE__", base).replace("__TOKEN__", ext.token)
+            body = page.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
         # Read-only-by-nature endpoints: they answer questions (a hunt, a lookup, a rule dry-run) and
         # change nothing on the machine, so they stay available even when the mesh is the authority.
         LOCAL_READS = {"/api/hunt-sql", "/api/geo-lookup", "/api/rules-test", "/api/vt-scan",
@@ -16954,6 +17176,17 @@ def make_handler(cache):
                 self._send_json({"ok": True, "version": __version__, "euid": os.geteuid(),
                                  "privilege": "full" if os.geteuid() == 0 else "user",
                                  "sig_enabled": not cache.no_sig})
+            elif path == "/api/ext/pair-info":
+                self._ext_pair_info()                    # loopback HTML (Host already checked above)
+            elif path == "/api/ext/config":
+                if not self._ext_ok():
+                    return
+                resp = getattr(cache, "responder", None)
+                bt = getattr(cache, "browser_threats", None)
+                self._send_json({"ok": True, "paired": True, "version": __version__,
+                                 "armed": bool(resp and getattr(resp, "mode", "scouting") != "scouting"
+                                               and not getattr(resp, "locked", False)),
+                                 "recent": bt.recent() if bt else []})
             elif path == "/api/decoys":
                 dc = getattr(cache, "decoys", None)
                 self._send_json(dc.status() if dc else {"ok": False, "enabled": False,
@@ -17270,9 +17503,13 @@ def make_handler(cache):
                 self.send_error(404)
 
         def do_POST(self):
+            from urllib.parse import urlparse, parse_qs
+            # Browser-extension endpoints use their own ext-token guard (the write guard rejects the
+            # chrome-extension Origin by design), so they are routed BEFORE _guard_write.
+            if self.path.split("?", 1)[0].startswith("/api/ext/"):
+                return self._ext_post(urlparse(self.path).path)
             if not self._guard_write():   # Host + Origin + CSRF-token gate; sends 403 itself
                 return
-            from urllib.parse import urlparse, parse_qs
             u = urlparse(self.path)
             if not self._write_allowed(u.path):
                 return
@@ -21335,6 +21572,9 @@ def main():
                          "'restore' (resume last session's armed posture). Overrides the saved "
                          "per-user preference for this launch; default is whatever you last chose "
                          "in the UI (and 'scouting' for a fresh install).")
+    ap.add_argument("--no-browser-ext", action="store_true",
+                    help="disable the Scouter Web Guard browser-extension bridge (the loopback "
+                         "/api/ext/* pairing + verdict + block endpoints)")
     ap.add_argument("--no-decoys", action="store_true",
                     help="don't plant decoys (bait credentials) on this host. They are planted by "
                          "default; any already planted are removed when you turn them off")
@@ -21537,6 +21777,11 @@ def main():
                           provenance=provenance, webshell=webshell, accepted=accepted)
     cache.analyses = analyses            # exposed to the ai-analyze writer + the /api/ai-analysis reader
     cache.updater = updater              # served by /api/health + /api/update
+    cache.ioc = ioc                      # IOC-feed matcher, for the browser-extension verdict endpoint
+    # Browser extension bridge: a persistent pairing token + a recent-findings log, reachable over the
+    # loopback server at /api/ext/*. On by default; --no-browser-ext disables the endpoints entirely.
+    cache.ext_auth = None if args.no_browser_ext else ExtAuth()
+    cache.browser_threats = None if args.no_browser_ext else BrowserThreats()
     updater.start()                      # background, cached 24h; no-op with --no-update-check
     mesh = MeshReporter(cache, secrets=secrets)          # Scouter Mesh: optional fleet reporting (off unless --mesh-url)
     mesh.self_port = args.port

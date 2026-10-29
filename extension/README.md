@@ -8,20 +8,33 @@ account is required.
 
 ## Status
 
-**Gate 2a (standalone detection + warning).** Done:
+**Gates 2a–2c done.**
 
-- **Clipboard-write interception** — a MAIN-world hook (`inject.js`) wraps `navigator.clipboard.writeText`
-  and `document.execCommand('copy')` and forwards *command-shaped* payloads to the isolated content
-  script. It never blocks or alters the copy and never sends anything off the page.
-- **ClickFix heuristic + in-page warning** — `content.js` matches remote-exec one-liners (`curl|bash`,
-  `powershell … iex/DownloadString`, `osascript … do shell script`, `base64 -d | sh`, `mshta`,
-  `certutil`/`bitsadmin`, `cmd /c …`, `/dev/tcp/…`, etc.) and throws an unmissable, shadow-DOM warning
-  with a one-click **Clear my clipboard**.
-- **Toolbar popup** — shows how many scam commands this browser has caught.
+- **2a — clipboard-write interception + warning (standalone).** A MAIN-world hook (`inject.js`) wraps
+  `navigator.clipboard.writeText` and `document.execCommand('copy')` and forwards *command-shaped*
+  payloads to the isolated content script (never blocking/altering the copy, nothing leaves the page).
+  `content.js` matches remote-exec one-liners (`curl|bash`, `powershell … iex/DownloadString`,
+  `osascript … do shell script`, `base64 -d | sh`, `mshta`, `certutil`/`bitsadmin`, `cmd /c …`,
+  `/dev/tcp/…`) and throws an unmissable shadow-DOM warning with a one-click **Clear my clipboard**.
+- **2b — page heuristics.** A dismissible **banner** for ClickFix *lure pages* ("verify you are human"
+  + a shell/run instruction) and for *credential-phishing* (password field on an untrusted origin:
+  public-IP, punycode, brand-on-wrong-domain, or plain http). Conservative, to avoid false positives.
+- **2c — local-agent bridge (optional).** When paired with the Scouter agent, the clipboard warning is
+  enriched with a **threat-intel verdict** (is the destination on a malware blocklist?) and a one-click
+  **reversible, device-wide block** (`/etc/hosts` + blackhole route — protects the whole machine, not
+  just the browser). Fully standalone when unpaired. See **Pairing** below.
+- **Toolbar popup** — shows how many threats this browser has caught.
 
-Not yet (later gates): fake-CAPTCHA / credential-form page heuristics (2b); pairing with the local
-Scouter agent for threat-intel verdicts + reversible blocking (2c); Firefox port (2d); packaging &
-store/signing (2e).
+Not yet (later gates): Firefox port (2d); packaging & store/signing (2e).
+
+## Pairing with the Scouter agent (optional)
+
+1. In the agent, open `<agent URL>/api/ext/pair-info` in your browser
+   (e.g. `http://127.0.0.1:7777/api/ext/pair-info`) to see the agent URL + a one-time pairing token.
+2. Open the extension's **Options**, paste both, click **Save**, then **Test connection**.
+3. The token is a persistent secret stored on your device; a web page can't reach these endpoints
+   (loopback `Host` check + the unguessable `X-Scouter-Ext-Token` + the CORS-preflight barrier).
+   Pass `--no-browser-ext` to the agent to disable the bridge entirely.
 
 ## Load it (Chrome / Edge / Brave — Chromium, MV3)
 

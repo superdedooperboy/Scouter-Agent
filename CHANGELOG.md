@@ -68,6 +68,17 @@ with a clear "needs a free key" status instead of erroring. This also restores I
 wide. (Linux gets the feed repair + `block_domain`; its ClickFix host-guard is deferred to the Phase 2
 cross-platform browser extension, since Linux has no real-time exec hook.)
 
+**Browser extension bridge — `/api/ext/*` (both agents).** The Scouter Web Guard browser extension
+(Phase 2) can pair with the local agent over the loopback HTTP server to get threat-intel verdicts and
+request a reversible block. New endpoints: `GET /api/ext/pair-info` (loopback-only HTML showing the
+agent URL + a persistent pairing token), `GET /api/ext/config`, `POST /api/ext/verdict` (cross-ref the
+reported domain/ip/url against the IOC feeds, log it, and — when the agent is armed — auto-block a
+confirmed-malicious destination), and `POST /api/ext/block` (user-initiated reversible block). These
+authenticate with a persistent `X-Scouter-Ext-Token` (separate from the UI CSRF + mesh tokens) and a
+loopback `Host` check, and deliberately accept a `chrome-extension://` Origin — a web page can't forge
+the custom header cross-origin (CORS preflight) and can't guess the token, and no permissive CORS
+headers are ever sent. `--no-browser-ext` disables the bridge.
+
 ### Fixed
 
 **`/api/incidents` supports a `compact` relay (both agents).** `GET /api/incidents?compact=1` returns

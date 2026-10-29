@@ -20289,7 +20289,16 @@ def make_handler(cache):
                     self._send_json({"enabled": False, "incidents": []})
                 else:
                     cache.get()   # ensure a fresh reconcile has run this cycle
-                    self._send_json({"enabled": True, "incidents": cache.incidents.list()})
+                    incs = cache.incidents.list()
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    if q.get("compact", ["0"])[0] in ("1", "true", "yes"):
+                        # The mesh FLEET view renders ids/labels/status/counts only — never
+                        # member_meta (per-member captured-alert blobs, up to 400/incident). Dropping
+                        # it keeps the relayed body under the mesh's VIEW_MAX_BYTES on hosts with a
+                        # deep incident history; the single-host drill-in omits compact and still
+                        # gets member_meta.
+                        incs = [{k: v for k, v in c.items() if k != "member_meta"} for c in incs]
+                    self._send_json({"enabled": True, "incidents": incs})
             elif path == "/api/auth-map":
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 try:

@@ -68,6 +68,16 @@ with a clear "needs a free key" status instead of erroring. This also restores I
 wide. (Linux gets the feed repair + `block_domain`; its ClickFix host-guard is deferred to the Phase 2
 cross-platform browser extension, since Linux has no real-time exec hook.)
 
+### Fixed
+
+**`/api/incidents` supports a `compact` relay (both agents).** `GET /api/incidents?compact=1` returns
+the incident list without each case's `member_meta` (the per-member captured-alert snapshots, up to
+400/incident). The Mesh fleet Investigations view never renders those blobs, and dropping them keeps
+the relayed body under the Mesh's view-size cap on hosts with a deep incident history — which was
+causing the fleet pull to error and the Mesh to show "No host auto-correlated groups" even when a host
+had open investigations. The local UI and the single-host drill-in (no `compact`) are unchanged and
+still receive full `member_meta`.
+
 ## macOS agent 1.11.3 / Linux agent 1.11.3 — 2026-10-27
 
 ### Changed

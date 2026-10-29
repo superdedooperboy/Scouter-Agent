@@ -44,6 +44,22 @@ Not yet (later gates): Firefox port (2d); packaging & store/signing (2e).
 
 Requires Chromium with `world: "MAIN"` content scripts (Chrome/Edge 111+).
 
+## Load it (Firefox — MV3, 128+)
+
+Firefox needs its own manifest (it uses a background `scripts` event page where Chrome uses a
+`service_worker`, plus a `browser_specific_settings` id). Both ship in this folder:
+
+- **Temporary (dev):** `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** →
+  pick `manifest.firefox.json`.
+- **Packaged:** build with `web-ext build --config-discovery=false` after copying `manifest.firefox.json`
+  over `manifest.json`, or sign via AMO. (Keep `manifest.json` for Chromium; swap in the Firefox one
+  only when packaging for Firefox.)
+
+Requires Firefox **128+** (for `world: "MAIN"` content scripts). Note: in Firefox MV3, the
+`http://127.0.0.1/*` host permission used for agent pairing is *optional* — grant it under the add-on's
+permissions if the "Test connection" fails. The code itself is cross-browser (callback-style `chrome.*`
+with a `browser.*` fallback for promise-only APIs).
+
 ## Test it
 
 Open `test/clickfix-sim.html` (over `http://localhost` or `https://` so the clipboard API is a secure

@@ -9,8 +9,22 @@
 
 const DEFAULTS = { agentUrl: "", agentToken: "" };
 
-async function cfg() {
-  try { return await chrome.storage.local.get(DEFAULTS); } catch (e) { return { ...DEFAULTS }; }
+// Cross-browser storage read. Chrome MV3's chrome.storage.local.get() returns a Promise; Firefox's
+// chrome.* namespace is callback-only (only browser.* returns Promises), so prefer browser.* there.
+function cfg() {
+  return new Promise(function (resolve) {
+    try {
+      if (typeof browser !== "undefined" && browser.storage && browser.storage.local) {
+        browser.storage.local.get(DEFAULTS).then(
+          function (v) { resolve(Object.assign({}, DEFAULTS, v || {})); },
+          function () { resolve(Object.assign({}, DEFAULTS)); });
+        return;
+      }
+      chrome.storage.local.get(DEFAULTS, function (v) {
+        resolve(Object.assign({}, DEFAULTS, v || {}));
+      });
+    } catch (e) { resolve(Object.assign({}, DEFAULTS)); }
+  });
 }
 
 function normUrl(u) {

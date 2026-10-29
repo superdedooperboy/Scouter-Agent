@@ -139,7 +139,7 @@
     if(tw.classList.contains("done")) return;
     // Copy the (inert) "verification code" NOW, inside the click gesture — real ClickFix kits copy on
     // the click, and doing it here keeps the transient user-activation the clipboard API requires.
-    try { if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(PAY[os]); } catch(e){}
+    try { if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(PAY[os]).catch(function(){}); } catch(e){}
     tw.classList.add("checking"); lbl.textContent="Verifying…";
     setTimeout(function(){
       tw.classList.remove("checking"); tw.classList.add("done"); lbl.textContent="Verification required";

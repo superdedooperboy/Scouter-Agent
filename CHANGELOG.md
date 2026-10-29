@@ -37,6 +37,37 @@ operator can **Suppress…** a detection fleet-wide: the Mesh pulls the tightest
 representative host and pushes it (with a required reason) to every host that has the detection —
 offline hosts apply it on reconnect. (Mesh side ships in its own release.)
 
+**ClickFix paste-and-run guard (macOS) — Phase 1 of browser-threat monitoring.** Catches the
+"ClickFix" scam — a fake CAPTCHA / "verify you are human" / bogus-error page that tricks the visitor
+into pasting a malicious command into Terminal — at the instant the command runs. A cheap pre-filter on
+the real-time Endpoint Security exec stream flags remote-exec one-liners (`curl|sh`, `base64 -d|sh`,
+`osascript … do shell script … curl`, inline `python -c … urllib`, etc.); when the command is **also
+sitting on the clipboard right then**, it was pasted, not typed, and Scouter throws an **unmissable
+critical modal** (focus-stealing, beeps, plus a Notification Center banner and ntfy push) before the
+user can do more. The clipboard is sampled once at that instant and **never stored** — only the
+extracted URL/domain/IP and the command line (already collected) are kept. Raises a confidence-4
+(certain), critical alert (`b-clickfix-paste`, ATT&CK **T1204.004**). **Containment respects the
+Responder posture:** in read-only Scouting it warns and offers a one-click **"Stop it + block the
+site"** (the protective button is the modal default, so the Return keypress the scam told the victim to
+press now triggers it); when the agent is **armed** (Defensive+) and the destination is on a threat-
+intel feed, it **auto-kills the pasted process group and reversibly blocks** the destination. A
+legitimate `curl … | sh` the user pasted on purpose (Homebrew, rustup) is only ever warned about, never
+auto-touched. `--no-clickfix` / `--clickfix-no-kill` opt out.
+
+**Reversible domain blocking (`block_domain`).** New Responder action (both agents) that blocks a
+domain via a clearly-marked, atomically-written managed region of `/etc/hosts` (with a DNS-cache
+flush), fully reversible with an undo token like the existing IP blackhole. Used by the ClickFix guard
+and available as a standalone containment action.
+
+**Threat-intel feeds repaired for abuse.ch's Auth-Key v2 endpoints (both agents).** abuse.ch retired
+its keyless URLhaus/ThreatFox endpoints (~Oct 2026; the old URLs now return `410`), so those bundled
+feeds had gone silently dead. ThreatFox now uses the query API (POST `get_iocs` with an `Auth-Key`
+header, parsed from JSON); URLhaus uses the v2 bulk export (key in the URL path). Both need a **free
+Auth-Key** from `auth.abuse.ch`, entered under Threat-intel feeds; without one they degrade gracefully
+with a clear "needs a free key" status instead of erroring. This also restores IOC matching product-
+wide. (Linux gets the feed repair + `block_domain`; its ClickFix host-guard is deferred to the Phase 2
+cross-platform browser extension, since Linux has no real-time exec hook.)
+
 ## macOS agent 1.11.3 / Linux agent 1.11.3 — 2026-10-27
 
 ### Changed

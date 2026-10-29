@@ -203,17 +203,22 @@ IOC_FEED_CATALOG = [
      "kinds": ["ip"], "parser": "plaintext", "severity": "high", "mitre": "T1071.001",
      "url": "https://sslbl.abuse.ch/blacklist/sslipblacklist.txt",
      "auth": False, "default": True, "tos": "https://sslbl.abuse.ch/blacklist/"},
+    # abuse.ch retired its keyless endpoints (~Oct 2026); both now need a FREE Auth-Key from
+    # auth.abuse.ch. ThreatFox uses the query API (POST, key in an Auth-Key header); URLhaus uses the
+    # v2 bulk export (GET, key in the URL path). Default ON but dormant until a key is added.
     {"id": "threatfox", "name": "ThreatFox (abuse.ch)",
      "desc": "Recent IOCs with malware-family attribution — IPs, domains, URLs, hashes.",
-     "kinds": ["ip", "domain", "url", "hash"], "parser": "threatfox_csv",
+     "kinds": ["ip", "domain", "url", "hash"], "parser": "threatfox_json",
      "severity": "high", "mitre": "T1071",
-     "url": "https://threatfox.abuse.ch/export/csv/recent/",
-     "auth": False, "default": True, "tos": "https://threatfox.abuse.ch/faq/#tos"},
+     "url": "https://threatfox-api.abuse.ch/api/v1/", "auth": True, "auth_mode": "post_threatfox",
+     "signup": "https://auth.abuse.ch/", "default": True,
+     "tos": "https://threatfox.abuse.ch/faq/#tos"},
     {"id": "urlhaus", "name": "URLhaus (abuse.ch)",
      "desc": "Malware-distribution URLs (and their hosts).",
      "kinds": ["url", "domain"], "parser": "urlhaus_csv", "severity": "high", "mitre": "T1105",
-     "url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
-     "auth": False, "default": True, "tos": "https://urlhaus.abuse.ch/api/"},
+     "url": "https://urlhaus-api.abuse.ch/v2/files/exports/{key}/recent.csv",
+     "auth": True, "auth_mode": "path", "signup": "https://auth.abuse.ch/", "default": True,
+     "tos": "https://urlhaus.abuse.ch/api/"},
     {"id": "digitalside_ip", "name": "DigitalSide OSINT — IPs",
      "desc": "Malicious IPs seen in the last 7 days (OSINT.digitalside.it).",
      "kinds": ["ip"], "parser": "plaintext", "severity": "medium", "mitre": "T1071",
@@ -922,6 +927,7 @@ RULE_CONFIDENCE = {
     "b-forensic-wipe": 4,        # nothing legitimate deletes .fseventsd / the unified-log store / TCC.db
     "b-dns-exfil": 3,            # DNS tunnelling has no benign form
     "b-clipboard-exec": 3,       # pbpaste into a shell — the ClickFix paste-and-run pattern
+    "b-clickfix-paste": 4,       # a remote-exec one-liner that is ALSO on the clipboard — pasted, not typed
 
     # -- serious if real, but routine administration and developer tooling produce it -------------
     "b-curlpipe": 2,             # rustup / Homebrew / nvm are all installed by curl | sh
@@ -1618,6 +1624,27 @@ def notify_macos(title, body, subtitle=None, url=None):
         return False
     rc, _, _ = run(cmd, timeout=5)
     return rc == 0
+
+
+def warn_macos_modal(title, body, buttons=("Close this window",), default=None, timeout_s=45):
+    """A front-and-center CRITICAL alert in the logged-in user's GUI session — for a threat the user
+    has to see *this second*, like a ClickFix paste-and-run caught mid-flight. Unlike notify_macos'
+    banner (easy to miss, and the window before the user hits Return is tiny), `display alert … as
+    critical` throws a modal that steals focus and must be dismissed, preceded by a few beeps.
+    Returns the clicked button's label, "" if it timed out / was dismissed without one, or None if
+    there was no GUI session to show it in. Blocks until dismissed, so callers fire it off-thread."""
+    blist = "{" + ", ".join(_as_literal(b) for b in buttons) + "}"
+    dflt = int(default if default is not None else len(buttons))   # default = last button (safest)
+    script = (f'display alert {_as_literal(title)} message {_as_literal(body)} as critical '
+              f'buttons {blist} default button {dflt} giving up after {int(timeout_s)}')
+    cmd = _as_gui_user(["osascript", "-e", "beep 3", "-e", script])
+    if cmd is None:
+        return None                       # service, nobody at the console: no one to warn
+    rc, out, _ = run(cmd, timeout=int(timeout_s) + 6)
+    if rc != 0:
+        return None
+    mt = re.search(r"button returned:([^,]*)", out or "")
+    return mt.group(1).strip() if mt else ""
 
 
 def is_private_ip(ip):
@@ -3011,6 +3038,15 @@ class IOCFeeds:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8", "replace")
 
+    def _http_post_json(self, url, payload, headers=None, timeout=45):
+        data = json.dumps(payload).encode("utf-8")
+        hdrs = {"User-Agent": USER_AGENT, "Content-Type": "application/json",
+                "Accept": "application/json"}
+        hdrs.update(headers or {})
+        req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8", "replace")
+
     def _fetch_one(self, fid):
         f = self.feeds.get(fid)
         if not f or not f["on"]:
@@ -3019,7 +3055,13 @@ class IOCFeeds:
             self.state[fid]["last_error"] = "no URL configured"
             return
         if f.get("auth") and not f.get("api_key"):
-            self.state[fid]["last_error"] = f"needs API key ({f.get('key_env','set api_key')})"
+            if f.get("key_env"):
+                hint = f"set ${f['key_env']}"
+            else:
+                hint = "add a key under Threat-intel feeds"
+            if f.get("signup"):
+                hint += f" — free key at {f['signup']}"
+            self.state[fid]["last_error"] = "needs an Auth-Key (" + hint + ")"
             return
         self.state[fid]["fetching"] = True
         try:
@@ -3067,9 +3109,19 @@ class IOCFeeds:
             self._store_actors(f, objs)
             return parse_stix_objects(objs)
         headers = {"User-Agent": f"{USER_AGENT} (+local IOC matching)"}
+        mode = f.get("auth_mode")
+        if mode == "post_threatfox":
+            # ThreatFox query API: POST JSON, key in an Auth-Key header. Returns JSON, not CSV.
+            body = self._http_post_json(f["url"], {"query": "get_iocs", "days": 1},
+                                        headers={**headers, "Auth-Key": f.get("api_key") or ""})
+            return parse_threatfox_json(body)
+        url = f["url"]
+        if mode == "path" and f.get("api_key"):
+            # abuse.ch v2 bulk export: the Auth-Key lives in the URL path, not a header.
+            url = url.replace("{key}", urllib.parse.quote(f["api_key"], safe=""))
         if f.get("api_key") and parser in ("stix_bundle", "hashlist", "plaintext"):
             headers["Authorization"] = f"Bearer {f['api_key']}"
-        body = self._http_get(f["url"], headers=headers)
+        body = self._http_get(url, headers=headers)
         if parser == "plaintext":
             return {"ip" if "ip" in f["kinds"] else f["kinds"][0]: parse_plaintext(body)}
         if parser == "cidr":
@@ -3155,6 +3207,41 @@ def parse_threatfox_csv(body):
             if h:
                 out["domain"].append(h)
         elif "hash" in itype:
+            out["hash"].append(ioc.lower())
+    return out
+
+
+def parse_threatfox_json(body):
+    """ThreatFox query-API (get_iocs) response: {"query_status":"ok","data":[{ioc, ioc_type, ...}]}.
+    ioc_type is one of ip:port, domain, url, md5_hash, sha256_hash, …"""
+    out = {"ip": [], "domain": [], "url": [], "hash": []}
+    try:
+        data = json.loads(body) or {}
+    except ValueError:
+        return out
+    status = data.get("query_status")
+    if status not in ("ok", None):
+        return out                                   # e.g. no_result / illegal_auth_key
+    rows = data.get("data")
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ioc = (row.get("ioc") or "").strip()
+        itype = (row.get("ioc_type") or "").strip().lower()
+        if not ioc:
+            continue
+        if itype.startswith("ip"):                   # ip:port
+            out["ip"].append(ioc.split(":")[0].lower())
+        elif itype in ("domain", "domain_name"):
+            out["domain"].append(ioc.lower())
+        elif itype == "url":
+            out["url"].append(ioc.lower())
+            h = host_from_url(ioc)
+            if h:
+                out["domain"].append(h)
+        elif "hash" in itype or itype in ("md5", "sha1", "sha256"):
             out["hash"].append(ioc.lower())
     return out
 
@@ -7877,6 +7964,7 @@ class ESFCollector:
         self.homes = self._homes()
         self.flagged_exec = {}         # node id -> (ts, node)
         self.flagged_file = {}         # node id -> (ts, node)
+        self.clickfix_cb = None        # set by main -> ClickFixGuard.on_suspect (paste-and-run guard)
         self.live = collections.OrderedDict()   # pid -> exec info (for lifetime on exit)
         self.counts = {"exec": 0, "exit": 0, "ephemeral": 0, "file": 0, "flagged_file": 0}
         self._exec_buf = []            # batched DB writes — one commit per flush, not per event
@@ -8037,6 +8125,18 @@ class ESFCollector:
                 self._exec_buf.append((
                     _hkey(pid, exe, int(now * 1000)), int(now), pid, ppid, exe, cmdline[:2000],
                     uid, signing_id, 1 if platform_bin else 0, int(now), int(now)))
+        # ClickFix paste-and-run guard: cheap regex pre-filter here (off the lock), clipboard
+        # correlation + warning happen off-thread in the guard so the ES stream never stalls.
+        cb = self.clickfix_cb
+        if cb is not None and cmdline:
+            try:
+                nm = os.path.basename(exe) if exe else cmdline.split()[0]
+                desc = _clickfix_suspect(nm, cmdline)
+                if desc:
+                    cb({"pid": pid, "ppid": ppid, "exe": exe, "cmdline": cmdline,
+                        "uid": uid, "ts": now}, desc)
+            except Exception:  # noqa: BLE001 — a detection must never kill the stream
+                pass
 
     def _on_exit(self, msg):
         pid = self._first(msg.get("process") or {}, ("audit_token", "pid"), ("pid",))
@@ -8170,6 +8270,364 @@ class ESFCollector:
             return {"enabled": self.enabled, "status": self.status, "events": self.EVENTS,
                     "counts": dict(self.counts), "in_flight": len(self.live),
                     "flagged": len(self.flagged_exec) + len(self.flagged_file)}
+
+
+# ---------------------------------------------------------------------------
+# ClickFix paste-and-run guard
+# "ClickFix" is the social-engineering chain behind a surge of 2024-2026 macOS
+# infostealer infections: a fake CAPTCHA / "verify you are human" / "fix this
+# error" page tells the visitor to copy a command and paste it into Terminal.
+# The page has quietly put a remote-exec one-liner on the clipboard, so the
+# victim runs the attacker's installer themselves. The host can't see the page
+# without a browser extension (that is Phase 2) — but it CAN catch the tell the
+# instant the shell runs: the command being executed is the very text sitting on
+# the clipboard, i.e. it was pasted, not typed. We sample the clipboard only at
+# that moment, compare, and never store it. ATT&CK T1204.004.
+# ---------------------------------------------------------------------------
+CLICKFIX_TECH = "T1204.004"            # User Execution: Malicious Copy and Paste
+# /etc/hosts domain-block, written inside a clearly-marked managed region so it is trivially
+# reversible (and obvious to anyone who opens the file). The Responder owns the edits.
+_SCOUTER_HOSTS_FILE = "/etc/hosts"
+_SCOUTER_HOSTS_BEGIN = "# >>> scouter blocked sites (managed — safe to remove) >>>"
+_SCOUTER_HOSTS_END = "# <<< scouter blocked sites <<<"
+CLICKFIX_EXPLAIN = (
+    "A shell ran a remote-exec one-liner (download-and-run / base64-decode-and-run / AppleScript "
+    "shell-out) that was ALSO on the clipboard at that instant — i.e. it was pasted, not typed. "
+    "That is the signature of the “ClickFix” scam: a web page (fake CAPTCHA, “verify "
+    "you are human,” a bogus error or update prompt) tells the visitor to copy a command and "
+    "paste it into Terminal, where it fetches and runs an infostealer. The command and its "
+    "destination are attacker-controlled, so treat this as remote code execution the user was "
+    "tricked into launching."
+)
+
+# Interpreters / fetchers worth the clipboard check. Anything else never reaches it.
+_CLICKFIX_HOSTS = {"sh", "bash", "zsh", "dash", "ksh", "osascript", "python", "python2", "python3",
+                   "perl", "ruby", "php", "node", "curl", "wget"}
+_CLICKFIX_SIG_RES = [
+    (re.compile(r"(?i)(?:curl|wget)\b[^|&;]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b"),
+     "a download piped straight into a shell"),
+    (re.compile(r"(?i)\bbase64\b[^|&;]*(?:-{1,2}[dD]|--decode)\b[^|]*\|\s*(?:ba|z)?sh\b"),
+     "a base64-decoded payload piped into a shell"),
+    (re.compile(r"(?i)\becho\b[^|]*\|\s*(?:openssl\s+)?base64\b[^|]*-[dD][^|]*\|\s*(?:ba|z)?sh\b"),
+     "an echo | base64 -d | sh chain"),
+    (re.compile(r"(?i)\bosascript\b[^\n]*do\s+shell\s+script[^\n]*(?:curl|wget|https?://)"),
+     "AppleScript shelling out to fetch and run code"),
+    (re.compile(r"(?i)\b(?:python3?|perl|ruby|php)\b\s+-[A-Za-z]*[ce]\b[^\n]*"
+                r"(?:urllib|urlopen|requests|socket|https?://)"),
+     "an inline interpreter that fetches remote code"),
+    (re.compile(r"(?i)\bnohup\b[^\n]*\b(?:curl|wget)\b[^\n]*\|\s*(?:ba|z)?sh\b"),
+     "a backgrounded download piped into a shell"),
+]
+
+
+def _clickfix_suspect(name, cmdline):
+    """Cheap pre-filter run on every real-time exec: return a short description when the command
+    looks like a remote-exec one-liner worth the clipboard check, else None. Pure regex, no
+    subprocess, so it stays off the hot path for the overwhelming majority of execs."""
+    cl = cmdline or ""
+    low = cl.lower()
+    if (name or "").lower() not in _CLICKFIX_HOSTS \
+            and not any(t in low for t in ("curl", "wget", "osascript", "base64")):
+        return None
+    for rx, desc in _CLICKFIX_SIG_RES:
+        if rx.search(cl):
+            return desc
+    return None
+
+
+class ClickFixGuard:
+    """Turns a suspicious real-time exec into a verdict: if the command that just ran is also on the
+    clipboard, it was pasted from a web page (ClickFix) — warn the user instantly and raise a
+    certain-confidence alert. The clipboard is sampled once and never persisted; only the extracted
+    indicators (URL/domain/IP) and the command line (already collected by ESF) are kept."""
+
+    COOLDOWN = 25          # s: a pasted line often spawns several execs; warn once per payload
+
+    def __init__(self, ioc=None, ntfy=None, esf=None, responder=None, enabled=True, kill=True):
+        self.ioc = ioc
+        self.ntfy = ntfy
+        self.esf = esf
+        self.responder = responder      # containment engine (kill-gate + reversible block + undo)
+        self.enabled = bool(enabled)
+        self.kill = bool(kill)          # auto-kill the pasted process on a confirmed-malicious hit
+        self._recent = collections.OrderedDict()   # payload signature -> ts (de-dupe)
+        self._lock = threading.Lock()
+
+    def _armed(self):
+        """True when the operator has armed the agent past read-only 'Scouting'. Auto kill/block
+        happen only when armed; in Scouting we warn and offer a one-click (user-initiated) action."""
+        r = self.responder
+        return bool(r and not getattr(r, "locked", False) and getattr(r, "mode", "scouting") != "scouting")
+
+    def _block(self, dom, ip, auto):
+        if not self.responder or not (dom or ip):
+            return []
+        try:
+            return self.responder.block_target(domain=dom, ip=ip, auto=auto)
+        except Exception:  # noqa: BLE001
+            return []
+
+    # -- entry point wired to ESFCollector.clickfix_cb --------------------
+    def on_suspect(self, evt, sig):
+        if not self.enabled:
+            return
+        threading.Thread(target=self._handle, args=(evt, sig), daemon=True).start()
+
+    def _handle(self, evt, sig):
+        try:
+            cmdline = evt.get("cmdline") or ""
+            clip = self._clipboard()
+            if not self._correlates(cmdline, clip):
+                return                 # ran but not pasted — the ordinary curl|sh rules cover it
+            iocs = self._extract(cmdline + "\n" + clip)
+            key = " ".join((_script_payload(cmdline) or _strip_interpreter(cmdline)
+                            or cmdline).split())[:400]
+            if self._seen(key):
+                return
+            intel = self._intel(iocs)
+            acted = self._respond(evt, iocs, intel)
+            self._raise(evt, iocs, intel, acted)
+        except Exception:  # noqa: BLE001 — a detection must never take down the stream thread
+            pass
+
+    # -- clipboard (sampled once, never stored) ---------------------------
+    def _clipboard(self):
+        cmd = _as_gui_user(["pbpaste"])
+        if cmd is None:
+            return ""
+        try:
+            rc, out, _ = run(cmd, timeout=3)
+            return out if rc == 0 and out else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _correlates(cmdline, clip):
+        """True when what just ran is (part of) what's on the clipboard — i.e. it was pasted."""
+        if not clip:
+            return False
+        c = " ".join(clip.split())
+        cmd = " ".join((cmdline or "").split())
+        if len(c) < 12 or not cmd:
+            return False
+        if c in cmd or cmd in c:
+            return True
+        payload = _script_payload(cmdline) or _strip_interpreter(cmdline)
+        if payload:
+            p = " ".join(payload.split())
+            if len(p) >= 12 and (p in c or c in p):
+                return True
+        uc = {m.group(0) for m in _RE_URL.finditer(c)}
+        um = {m.group(0) for m in _RE_URL.finditer(cmd)}
+        return bool(uc & um)
+
+    def _seen(self, key):
+        now = time.time()
+        with self._lock:
+            for k, ts in list(self._recent.items()):
+                if now - ts > self.COOLDOWN:
+                    self._recent.pop(k, None)
+            if key in self._recent:
+                self._recent[key] = now
+                return True
+            self._recent[key] = now
+            while len(self._recent) > 64:
+                self._recent.popitem(last=False)
+            return False
+
+    # -- indicator extraction + threat-intel cross-reference --------------
+    @staticmethod
+    def _extract(text):
+        urls, domains, ips = [], [], []
+        for m in _RE_URL.finditer(text or ""):
+            u = m.group(0).rstrip(").,'\";>")
+            urls.append(u)
+            h = host_from_url(u)
+            if not h:
+                continue
+            try:
+                ipaddress.ip_address(h)
+                if not is_private_ip(h):
+                    ips.append(h)
+            except ValueError:
+                domains.append(h.lower())
+        for m in re.finditer(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text or ""):
+            ip = m.group(0)
+            if not is_private_ip(ip):
+                ips.append(ip)
+
+        def ded(xs):
+            seen, out = set(), []
+            for x in xs:
+                if x not in seen:
+                    seen.add(x); out.append(x)
+            return out
+        return {"urls": ded(urls)[:8], "domains": ded(domains)[:8], "ips": ded(ips)[:8]}
+
+    def _intel(self, iocs):
+        if not self.ioc:
+            return None
+        try:
+            for u in iocs["urls"]:
+                hits = self.ioc.match_url(u)
+                if hits:
+                    return {"value": u, "kind": "url", "feed": hits[0].get("feed")}
+            for d in iocs["domains"]:
+                hits = self.ioc.match_url("http://" + d + "/")
+                if hits:
+                    return {"value": d, "kind": "domain", "feed": hits[0].get("feed")}
+            for ip in iocs["ips"]:
+                hits = self.ioc.match_ip(ip)
+                if hits:
+                    return {"value": ip, "kind": "ip", "feed": hits[0].get("feed")}
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    # -- containment: kill the pasted process group -----------------------
+    def _kill(self, pid):
+        """SIGKILL the pasted command's process group — stops a `curl | bash` pipeline mid-download.
+        Best-effort and bounded: never touches pid<=1 or the agent's own group."""
+        if not pid or pid <= 1:
+            return False
+        killed = False
+        try:
+            pgid = os.getpgid(pid)
+            if pgid > 1 and pgid != os.getpgid(0):
+                os.killpg(pgid, signal.SIGKILL); killed = True
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            os.kill(pid, signal.SIGKILL); killed = True
+        except (OSError, ProcessLookupError):
+            pass
+        return killed
+
+    # -- respond: warn unmissably; kill + block per posture / user action --
+    def _respond(self, evt, iocs, intel):
+        """Warn the user front-and-center. When the agent is ARMED and the destination is a known-
+        malware site, kill the pasted process group and blackhole/hosts-block the destination right
+        away. In read-only Scouting we only warn and offer a one-click, user-initiated "Stop it +
+        block the site" — a user click is explicit consent, so it acts in any posture. Returns an
+        {killed, blocked:[...]} record. Auto-action is gated on an intel hit so a legitimate
+        `curl | sh` the user pasted on purpose (Homebrew, rustup) is warned about but never touched."""
+        pid = evt.get("pid")
+        dom = iocs["domains"][0] if iocs["domains"] else None
+        ip = iocs["ips"][0] if iocs["ips"] else None
+        if intel:                                   # pin the exact malicious target when we know it
+            if intel["kind"] == "domain":
+                dom = intel["value"]
+            elif intel["kind"] == "ip":
+                ip = intel["value"]
+            elif intel["kind"] == "url":
+                h = host_from_url(intel["value"])
+                if h:
+                    try:
+                        ipaddress.ip_address(h); ip = h
+                    except ValueError:
+                        dom = h
+        where = dom or ip or next((host_from_url(u) for u in iocs["urls"] if host_from_url(u)), "")
+        armed = self._armed()
+        acted = {"killed": False, "blocked": []}
+        if armed and intel:                         # automatic containment (armed posture only)
+            acted["killed"] = bool(self.kill and self._kill(pid))
+            acted["blocked"] = self._block(dom, ip, auto=True)
+
+        # Backups that survive a too-fast dismissal: Notification Center banner + ntfy push.
+        notify_macos("Scouter: possible ClickFix scam",
+                     "A pasted command was flagged — see the alert on screen.",
+                     subtitle=((intel.get("value") if intel else where) or None))
+        if self.ntfy:
+            try:
+                self.ntfy.send(
+                    "⚠️ ClickFix paste-and-run (malicious)" if intel
+                    else "⚠️ ClickFix paste-and-run",
+                    (f"Contacting {intel['value']} ({intel.get('feed')})." if intel
+                     else (f"Reaching {where}." if where else "A pasted command ran.")), "critical")
+            except Exception:  # noqa: BLE001
+                pass
+
+        act_label = "Stop it + block the site" if where else "Stop it now"
+        if acted["killed"] or acted["blocked"]:     # armed + intel: we already acted → informational
+            title = "⚠️  STOP — a scam was blocked (Scouter)"
+            did = []
+            if acted["killed"]:
+                did.append("stopped the command")
+            if any(b.get("ok") for b in acted["blocked"]):
+                did.append(f"blocked {where}")
+            lead = (f"A command you pasted was contacting {intel['value']}, a known-malware site "
+                    f"({intel.get('feed')}). Scouter " + " and ".join(did or ["flagged it"])
+                    + ". You can undo this in Scouter → Response.")
+            buttons = ("OK",)
+            default = 1
+        elif intel:                                 # confirmed-malicious but not armed → one click away
+            title = "⚠️  STOP — this is a known scam (Scouter)"
+            lead = (f"A command you just pasted contacts {intel['value']}, which is on a known-malware "
+                    f"blocklist ({intel.get('feed')}). This is the ClickFix scam.")
+            buttons = (act_label, "Ignore")
+            default = 1                             # Return (what the scam told them to press) stops it
+        else:                                       # correlated paste, destination not known-bad
+            title = "⚠️  STOP — this may be a scam (Scouter)"
+            lead = ("A command was just pasted into your terminal and run"
+                    + (f", reaching {where}. " if where else ". "))
+            buttons = (act_label, "Ignore")
+            default = 1
+        body = (lead + "\n\n"
+                "If a website told you to copy and paste a command to “verify you are human,” "
+                "“fix an error,” or “install an update,” this is the ClickFix scam "
+                "and the command installs malware.\n\n"
+                "• Do NOT paste or run anything else it told you to.\n"
+                "• Close this Terminal window now.\n"
+                "• If it already ran, disconnect from the network and change your passwords from "
+                "another device.")
+        choice = warn_macos_modal(title, body, buttons=buttons, default=default)
+        if choice in (act_label,):                  # user-initiated → acts in any posture
+            if not acted["killed"]:
+                acted["killed"] = bool(self._kill(pid))
+            if choice == "Stop it + block the site" and not acted["blocked"]:
+                acted["blocked"] = self._block(dom, ip, auto=False)
+        return acted
+
+    # -- raise the alert into the graph (flows to lifecycle / UI / mesh) --
+    def _raise(self, evt, iocs, intel, acted=None):
+        if self.esf is None:
+            return
+        acted = acted or {"killed": False, "blocked": []}
+        killed = bool(acted.get("killed"))
+        blocked = [b for b in acted.get("blocked", []) if b.get("ok")]
+        pid = evt.get("pid")
+        start = evt.get("ts") or time.time()
+        name = os.path.basename(evt.get("exe") or "") or "shell"
+        reasons = [reason("Detection: ClickFix paste-and-run (a command was pasted from a web page "
+                          "and run)", CLICKFIX_TECH, 90)]
+        ioc_list = []
+        if intel:
+            reasons.append(reason(f"Destination {intel['value']} is on threat-intel feed "
+                                  f"{intel.get('feed')}", CLICKFIX_TECH, 95))
+            ioc_list = [{"feed": intel.get("feed"), "kind": intel.get("kind"),
+                         "value": intel.get("value")}]
+        if killed:
+            reasons.append(reason("Scouter killed the pasted process group (containment)",
+                                  CLICKFIX_TECH, 95))
+        for b in blocked:
+            reasons.append(reason(f"Blocked {b['kind']} {b['value']} (reversible)", CLICKFIX_TECH, 90))
+        detail = {
+            "pid": pid, "ppid": evt.get("ppid"), "uid": evt.get("uid"), "user": None,
+            "exe": evt.get("exe"), "cmdline": evt.get("cmdline"),
+            "argv": (evt.get("cmdline") or "").split(),
+            "signature": {"category": "unknown", "trusted": True, "detail": "captured at exec (ESF)"},
+            "hashes": {"status": "n/a"}, "vt": None, "ioc": ioc_list, "via": "clickfix",
+            "clickfix": {"indicators": iocs, "intel": intel, "killed": killed,
+                         "blocked": blocked},
+            "ephemeral": True, "exited": False, "state": "running",
+            "rule_hits": [{"id": "b-clickfix-paste", "name": "ClickFix paste-and-run",
+                           "mitre": CLICKFIX_TECH, "severity": "critical", "confidence": 4,
+                           "builtin": True, "explanation": CLICKFIX_EXPLAIN}],
+        }
+        node = {"id": f"clickfix:{pid}:{int(start * 1000)}", "type": "process", "label": name,
+                "score": 95, "severity": "critical", "reasons": reasons, "detail": detail}
+        with self.esf.lock:
+            self.esf.flagged_exec[node["id"]] = (time.time(), node)
 
 
 # ---------------------------------------------------------------------------
@@ -18226,6 +18684,12 @@ class Responder:
             "unblock_ip": d(label="Unblock", icon="✅", mode="defensive", kind="network",
                             applies=["remote"], backend="native", reversible=False,
                             destructive=False, verb="Unblocked", hidden=True),
+            "block_domain": d(label="Block site", icon="🚫", mode="defensive", kind="hosts",
+                              applies=["process", "remote"], backend="native", reversible=True,
+                              destructive=False, undo="unblock_domain", verb="Blocked"),
+            "unblock_domain": d(label="Unblock site", icon="✅", mode="defensive", kind="hosts",
+                                applies=["process", "remote"], backend="native", reversible=False,
+                                destructive=False, verb="Unblocked", hidden=True),
             "disable_job": d(label="Disable", icon="🔌", mode="defensive", kind="launchd",
                              applies=["job"], backend="native", reversible=True,
                              destructive=False, undo="enable_job", verb="Disabled"),
@@ -18777,7 +19241,7 @@ class Responder:
     def _dispatch(self, action_id, spec, target):
         handler = {"process": self._act_process, "network": self._act_network,
                    "launchd": self._act_launchd, "file": self._act_file,
-                   "vr": self._act_vr}.get(spec["kind"])
+                   "hosts": self._act_hosts, "vr": self._act_vr}.get(spec["kind"])
         if not handler:
             return {"ok": False, "error": "no handler for this action"}
         return handler(action_id, spec, target)
@@ -19016,6 +19480,109 @@ class Responder:
         self._audit(action_id, {"ip": ip}, "ok")
         return {"ok": True, "undo_token": token,
                 "result": f"{spec['verb']} {ip}", "status": self.status()}
+
+    # ---- hosts-file actions (block/unblock a domain via /etc/hosts) ----
+    @staticmethod
+    def _hosts_parse(cur):
+        """Domains currently in our managed /etc/hosts block."""
+        out, inblk = set(), False
+        for ln in (cur or "").splitlines():
+            s = ln.strip()
+            if s == _SCOUTER_HOSTS_BEGIN:
+                inblk = True; continue
+            if s == _SCOUTER_HOSTS_END:
+                inblk = False; continue
+            if inblk:
+                parts = ln.split()
+                if len(parts) >= 2 and parts[0] in ("0.0.0.0", "::"):
+                    out.add(parts[1].lower())
+        return out
+
+    @staticmethod
+    def _hosts_render(cur, domains):
+        """Return /etc/hosts with its managed block stripped and rewritten for `domains` (if any).
+        Everything outside the markers is preserved verbatim."""
+        out, inblk = [], False
+        for ln in (cur or "").splitlines():
+            s = ln.strip()
+            if s == _SCOUTER_HOSTS_BEGIN:
+                inblk = True; continue
+            if s == _SCOUTER_HOSTS_END:
+                inblk = False; continue
+            if not inblk:
+                out.append(ln)
+        while out and out[-1].strip() == "":
+            out.pop()
+        if domains:
+            out += ["", _SCOUTER_HOSTS_BEGIN,
+                    "# Added by Mac Scouter to block malware/scam sites. Safe to delete."]
+            for dmn in sorted(domains):
+                out += [f"0.0.0.0\t{dmn}", f"::\t{dmn}"]
+            out.append(_SCOUTER_HOSTS_END)
+        return "\n".join(out) + "\n"
+
+    def _flush_dns(self):
+        for cmd in (["dscacheutil", "-flushcache"], ["killall", "-HUP", "mDNSResponder"]):
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=8)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _act_hosts(self, action_id, spec, target):
+        domain = (target.get("domain") or "").strip().lower().rstrip(".")
+        if not domain or " " in domain or not _IOC_DOM.match(domain):
+            return {"ok": False, "error": "invalid domain"}
+        if domain in ("localhost",) or domain.endswith(".local") or "." not in domain:
+            return {"ok": False, "error": "refused — local hostname"}
+        if os.geteuid() != 0:
+            return {"ok": False, "error": "blocking a site needs root — relaunch Mac Scouter with sudo"}
+        try:
+            with open(_SCOUTER_HOSTS_FILE) as fh:
+                cur = fh.read()
+        except OSError as e:
+            return {"ok": False, "error": "cannot read /etc/hosts: " + str(e)}
+        blocked = self._hosts_parse(cur)
+        blocked.add(domain) if action_id == "block_domain" else blocked.discard(domain)
+        new = self._hosts_render(cur, blocked)
+        if new != cur:
+            try:
+                tmp = _SCOUTER_HOSTS_FILE + ".scouter.tmp"
+                with open(tmp, "w") as fh:
+                    fh.write(new)
+                os.chmod(tmp, 0o644)
+                os.replace(tmp, _SCOUTER_HOSTS_FILE)
+            except OSError as e:
+                return {"ok": False, "error": "cannot write /etc/hosts: " + str(e)}
+            self._flush_dns()
+        token = None
+        if spec["reversible"]:
+            token = self._ledger_add(action_id, spec, {"domain": domain}, domain, domain)
+        else:
+            self._ledger_remove_match("hosts", domain)
+        self._audit(action_id, {"domain": domain}, "ok")
+        return {"ok": True, "undo_token": token,
+                "result": f"{spec['verb']} {domain}", "status": self.status()}
+
+    def block_target(self, domain=None, ip=None, auto=False):
+        """Blackhole an IP and/or /etc/hosts-block a domain, reversibly (ledgered). Called by the
+        ClickFix guard once it has decided — by armed posture or an explicit click — to act, so this
+        intentionally bypasses the mode gate (the decision was already made upstream). Returns a list
+        of {kind, value, ok, undo_token, error}."""
+        out = []
+        for kind, val, aid in (("domain", domain, "block_domain"), ("ip", ip, "block_ip")):
+            if not val:
+                continue
+            spec = self.registry.get(aid)
+            tgt = {"domain": val} if kind == "domain" else {"ip": val}
+            try:
+                res = self._dispatch(aid, spec, tgt)
+            except Exception as e:  # noqa: BLE001
+                res = {"ok": False, "error": str(e)}
+            out.append({"kind": kind, "value": val, "ok": bool(res.get("ok")),
+                        "undo_token": res.get("undo_token"), "error": res.get("error")})
+            if res.get("ok"):
+                self._audit(aid, tgt, "ok:clickfix/" + ("auto" if auto else "user"))
+        return out
 
     # ---- launchd actions (disable/enable a job by booting it out / back in) ----
     def _act_launchd(self, action_id, spec, target):
@@ -21846,6 +22413,13 @@ def main():
     ap.add_argument("--esf-ephemeral-secs", type=float, default=ESF_EPHEMERAL_MAX_LIFETIME,
                     help="an exec that exits faster than this (s) is surfaced as an ephemeral "
                          f"process the poll missed (default {ESF_EPHEMERAL_MAX_LIFETIME})")
+    ap.add_argument("--no-clickfix", action="store_true",
+                    help="disable the ClickFix paste-and-run guard (the real-time, clipboard-"
+                         "correlated warning for fake-CAPTCHA 'paste this command' scams; needs "
+                         "real-time Endpoint Security, so it is a no-op when --no-esf is set)")
+    ap.add_argument("--clickfix-no-kill", action="store_true",
+                    help="ClickFix guard still warns, but does NOT auto-kill the pasted process on a "
+                         "confirmed-malicious hit (default: it SIGKILLs the pasted process group)")
     ap.add_argument("--no-decoys", action="store_true",
                     help="don't plant decoys (bait credentials) on this host. They are planted by "
                          "default; any already planted are removed when you turn them off")
@@ -22097,6 +22671,13 @@ def main():
         responder.set_auto_mode(args.auto_response)
     if not args.no_response and args.ai_auto is not None:
         responder.set_ai_auto(args.ai_auto)
+    # ClickFix paste-and-run guard: watches real-time execs for a remote-exec one-liner that is also
+    # sitting on the clipboard (the fake-CAPTCHA "paste this to verify you're human" scam) and throws
+    # an unmissable warning before the user can run it. On by default; a mesh can opt a host out. Auto
+    # kill/block respect the Responder's posture (Scouting = warn + one-click; armed = automatic).
+    clickfix = ClickFixGuard(ioc=ioc, ntfy=ntfy, esf=esf, responder=responder,
+                             enabled=not args.no_clickfix, kill=not args.clickfix_no_kill)
+    esf.clickfix_cb = clickfix.on_suspect
 
     cache = SnapshotCache(interval=args.interval, no_sig=args.no_sig, enrich=enrich,
                           triage=triage, history=history, downloads=downloads, auth=auth,

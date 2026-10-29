@@ -206,17 +206,22 @@ IOC_FEED_CATALOG = [
      "kinds": ["ip"], "parser": "plaintext", "severity": "high", "mitre": "T1071.001",
      "url": "https://sslbl.abuse.ch/blacklist/sslipblacklist.txt",
      "auth": False, "default": True, "tos": "https://sslbl.abuse.ch/blacklist/"},
+    # abuse.ch retired its keyless endpoints (~Oct 2026); both now need a FREE Auth-Key from
+    # auth.abuse.ch. ThreatFox uses the query API (POST, key in an Auth-Key header); URLhaus uses the
+    # v2 bulk export (GET, key in the URL path). Default ON but dormant until a key is added.
     {"id": "threatfox", "name": "ThreatFox (abuse.ch)",
      "desc": "Recent IOCs with malware-family attribution — IPs, domains, URLs, hashes.",
-     "kinds": ["ip", "domain", "url", "hash"], "parser": "threatfox_csv",
+     "kinds": ["ip", "domain", "url", "hash"], "parser": "threatfox_json",
      "severity": "high", "mitre": "T1071",
-     "url": "https://threatfox.abuse.ch/export/csv/recent/",
-     "auth": False, "default": True, "tos": "https://threatfox.abuse.ch/faq/#tos"},
+     "url": "https://threatfox-api.abuse.ch/api/v1/", "auth": True, "auth_mode": "post_threatfox",
+     "signup": "https://auth.abuse.ch/", "default": True,
+     "tos": "https://threatfox.abuse.ch/faq/#tos"},
     {"id": "urlhaus", "name": "URLhaus (abuse.ch)",
      "desc": "Malware-distribution URLs (and their hosts).",
      "kinds": ["url", "domain"], "parser": "urlhaus_csv", "severity": "high", "mitre": "T1105",
-     "url": "https://urlhaus.abuse.ch/downloads/csv_recent/",
-     "auth": False, "default": True, "tos": "https://urlhaus.abuse.ch/api/"},
+     "url": "https://urlhaus-api.abuse.ch/v2/files/exports/{key}/recent.csv",
+     "auth": True, "auth_mode": "path", "signup": "https://auth.abuse.ch/", "default": True,
+     "tos": "https://urlhaus.abuse.ch/api/"},
     {"id": "digitalside_ip", "name": "DigitalSide OSINT — IPs",
      "desc": "Malicious IPs seen in the last 7 days (OSINT.digitalside.it).",
      "kinds": ["ip"], "parser": "plaintext", "severity": "medium", "mitre": "T1071",
@@ -2588,6 +2593,13 @@ def apply_vt_severity(score, reasons, vt, is_file):
     return score
 
 
+# /etc/hosts domain-block, written inside a clearly-marked managed region so it is trivially
+# reversible (and obvious to anyone who opens the file). The Responder owns the edits.
+_SCOUTER_HOSTS_FILE = "/etc/hosts"
+_SCOUTER_HOSTS_BEGIN = "# >>> scouter blocked sites (managed — safe to remove) >>>"
+_SCOUTER_HOSTS_END = "# <<< scouter blocked sites <<<"
+
+
 def host_from_url(u):
     """Best-effort hostname out of a URL or bare host string (stdlib only)."""
     if not u:
@@ -3198,6 +3210,15 @@ class IOCFeeds:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8", "replace")
 
+    def _http_post_json(self, url, payload, headers=None, timeout=45):
+        data = json.dumps(payload).encode("utf-8")
+        hdrs = {"User-Agent": USER_AGENT, "Content-Type": "application/json",
+                "Accept": "application/json"}
+        hdrs.update(headers or {})
+        req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8", "replace")
+
     def _fetch_one(self, fid):
         f = self.feeds.get(fid)
         if not f or not f["on"]:
@@ -3206,7 +3227,13 @@ class IOCFeeds:
             self.state[fid]["last_error"] = "no URL configured"
             return
         if f.get("auth") and not f.get("api_key"):
-            self.state[fid]["last_error"] = f"needs API key ({f.get('key_env','set api_key')})"
+            if f.get("key_env"):
+                hint = f"set ${f['key_env']}"
+            else:
+                hint = "add a key under Threat-intel feeds"
+            if f.get("signup"):
+                hint += f" — free key at {f['signup']}"
+            self.state[fid]["last_error"] = "needs an Auth-Key (" + hint + ")"
             return
         self.state[fid]["fetching"] = True
         try:
@@ -3224,9 +3251,19 @@ class IOCFeeds:
             objs = self._fetch_taxii21(f["url"], f.get("collection", ""), f.get("api_key"))
             return parse_stix_objects(objs)
         headers = {"User-Agent": f"{USER_AGENT} (+local IOC matching)"}
+        mode = f.get("auth_mode")
+        if mode == "post_threatfox":
+            # ThreatFox query API: POST JSON, key in an Auth-Key header. Returns JSON, not CSV.
+            body = self._http_post_json(f["url"], {"query": "get_iocs", "days": 1},
+                                        headers={**headers, "Auth-Key": f.get("api_key") or ""})
+            return parse_threatfox_json(body)
+        url = f["url"]
+        if mode == "path" and f.get("api_key"):
+            # abuse.ch v2 bulk export: the Auth-Key lives in the URL path, not a header.
+            url = url.replace("{key}", urllib.parse.quote(f["api_key"], safe=""))
         if f.get("api_key") and parser in ("stix_bundle", "hashlist", "plaintext"):
             headers["Authorization"] = f"Bearer {f['api_key']}"
-        body = self._http_get(f["url"], headers=headers)
+        body = self._http_get(url, headers=headers)
         if parser == "plaintext":
             return {"ip" if "ip" in f["kinds"] else f["kinds"][0]: parse_plaintext(body)}
         if parser == "cidr":
@@ -3310,6 +3347,41 @@ def parse_threatfox_csv(body):
             if h:
                 out["domain"].append(h)
         elif "hash" in itype:
+            out["hash"].append(ioc.lower())
+    return out
+
+
+def parse_threatfox_json(body):
+    """ThreatFox query-API (get_iocs) response: {"query_status":"ok","data":[{ioc, ioc_type, ...}]}.
+    ioc_type is one of ip:port, domain, url, md5_hash, sha256_hash, …"""
+    out = {"ip": [], "domain": [], "url": [], "hash": []}
+    try:
+        data = json.loads(body) or {}
+    except ValueError:
+        return out
+    status = data.get("query_status")
+    if status not in ("ok", None):
+        return out                                   # e.g. no_result / illegal_auth_key
+    rows = data.get("data")
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ioc = (row.get("ioc") or "").strip()
+        itype = (row.get("ioc_type") or "").strip().lower()
+        if not ioc:
+            continue
+        if itype.startswith("ip"):                   # ip:port
+            out["ip"].append(ioc.split(":")[0].lower())
+        elif itype in ("domain", "domain_name"):
+            out["domain"].append(ioc.lower())
+        elif itype == "url":
+            out["url"].append(ioc.lower())
+            h = host_from_url(ioc)
+            if h:
+                out["domain"].append(h)
+        elif "hash" in itype or itype in ("md5", "sha1", "sha256"):
             out["hash"].append(ioc.lower())
     return out
 
@@ -15494,6 +15566,12 @@ class Responder:
             "unblock_ip": d(label="Unblock", icon="✅", mode="defensive", kind="network",
                             applies=["remote"], backend="native", reversible=False,
                             destructive=False, verb="Unblocked", hidden=True),
+            "block_domain": d(label="Block site", icon="🚫", mode="defensive", kind="hosts",
+                              applies=["process", "remote"], backend="native", reversible=True,
+                              destructive=False, undo="unblock_domain", verb="Blocked"),
+            "unblock_domain": d(label="Unblock site", icon="✅", mode="defensive", kind="hosts",
+                                applies=["process", "remote"], backend="native", reversible=False,
+                                destructive=False, verb="Unblocked", hidden=True),
             "disable_job": d(label="Disable", icon="🔌", mode="defensive", kind="job",
                              applies=["job"], backend="native", reversible=True,
                              destructive=False, undo="enable_job", verb="Disabled"),
@@ -16064,7 +16142,7 @@ class Responder:
     def _dispatch(self, action_id, spec, target):
         handler = {"process": self._act_process, "network": self._act_network,
                    "job": self._act_job, "file": self._act_file,
-                   "vr": self._act_vr}.get(spec["kind"])
+                   "hosts": self._act_hosts, "vr": self._act_vr}.get(spec["kind"])
         if not handler:
             return {"ok": False, "error": "no handler for this action"}
         return handler(action_id, spec, target)
@@ -16162,6 +16240,108 @@ class Responder:
         self._audit(action_id, {"ip": ip}, "ok")
         return {"ok": True, "undo_token": token,
                 "result": f"{spec['verb']} {ip}", "status": self.status()}
+
+    # ---- hosts-file actions (block/unblock a domain via /etc/hosts) ----
+    @staticmethod
+    def _hosts_parse(cur):
+        """Domains currently in our managed /etc/hosts block."""
+        out, inblk = set(), False
+        for ln in (cur or "").splitlines():
+            s = ln.strip()
+            if s == _SCOUTER_HOSTS_BEGIN:
+                inblk = True; continue
+            if s == _SCOUTER_HOSTS_END:
+                inblk = False; continue
+            if inblk:
+                parts = ln.split()
+                if len(parts) >= 2 and parts[0] in ("0.0.0.0", "::"):
+                    out.add(parts[1].lower())
+        return out
+
+    @staticmethod
+    def _hosts_render(cur, domains):
+        """Return /etc/hosts with its managed block stripped and rewritten for `domains` (if any).
+        Everything outside the markers is preserved verbatim."""
+        out, inblk = [], False
+        for ln in (cur or "").splitlines():
+            s = ln.strip()
+            if s == _SCOUTER_HOSTS_BEGIN:
+                inblk = True; continue
+            if s == _SCOUTER_HOSTS_END:
+                inblk = False; continue
+            if not inblk:
+                out.append(ln)
+        while out and out[-1].strip() == "":
+            out.pop()
+        if domains:
+            out += ["", _SCOUTER_HOSTS_BEGIN,
+                    "# Added by Linux Scouter to block malware/scam sites. Safe to delete."]
+            for dmn in sorted(domains):
+                out += [f"0.0.0.0\t{dmn}", f"::\t{dmn}"]
+            out.append(_SCOUTER_HOSTS_END)
+        return "\n".join(out) + "\n"
+
+    def _flush_dns(self):
+        # Most Linux resolvers read /etc/hosts fresh per lookup; this only clears a caching resolver.
+        for cmd in (["resolvectl", "flush-caches"], ["systemd-resolve", "--flush-caches"]):
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=8)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _act_hosts(self, action_id, spec, target):
+        domain = (target.get("domain") or "").strip().lower().rstrip(".")
+        if not domain or " " in domain or not _IOC_DOM.match(domain):
+            return {"ok": False, "error": "invalid domain"}
+        if domain in ("localhost",) or domain.endswith(".local") or "." not in domain:
+            return {"ok": False, "error": "refused — local hostname"}
+        if os.geteuid() != 0:
+            return {"ok": False, "error": "blocking a site needs root — relaunch Linux Scouter with sudo"}
+        try:
+            with open(_SCOUTER_HOSTS_FILE) as fh:
+                cur = fh.read()
+        except OSError as e:
+            return {"ok": False, "error": "cannot read /etc/hosts: " + str(e)}
+        blocked = self._hosts_parse(cur)
+        blocked.add(domain) if action_id == "block_domain" else blocked.discard(domain)
+        new = self._hosts_render(cur, blocked)
+        if new != cur:
+            try:
+                tmp = _SCOUTER_HOSTS_FILE + ".scouter.tmp"
+                with open(tmp, "w") as fh:
+                    fh.write(new)
+                os.chmod(tmp, 0o644)
+                os.replace(tmp, _SCOUTER_HOSTS_FILE)
+            except OSError as e:
+                return {"ok": False, "error": "cannot write /etc/hosts: " + str(e)}
+            self._flush_dns()
+        token = None
+        if spec["reversible"]:
+            token = self._ledger_add(action_id, spec, {"domain": domain}, domain, domain)
+        else:
+            self._ledger_remove_match("hosts", domain)
+        self._audit(action_id, {"domain": domain}, "ok")
+        return {"ok": True, "undo_token": token,
+                "result": f"{spec['verb']} {domain}", "status": self.status()}
+
+    def block_target(self, domain=None, ip=None, auto=False):
+        """Blackhole an IP and/or /etc/hosts-block a domain, reversibly (ledgered). Bypasses the mode
+        gate: the caller already decided to act. Returns [{kind, value, ok, undo_token, error}]."""
+        out = []
+        for kind, val, aid in (("domain", domain, "block_domain"), ("ip", ip, "block_ip")):
+            if not val:
+                continue
+            spec = self.registry.get(aid)
+            tgt = {"domain": val} if kind == "domain" else {"ip": val}
+            try:
+                res = self._dispatch(aid, spec, tgt)
+            except Exception as e:  # noqa: BLE001
+                res = {"ok": False, "error": str(e)}
+            out.append({"kind": kind, "value": val, "ok": bool(res.get("ok")),
+                        "undo_token": res.get("undo_token"), "error": res.get("error")})
+            if res.get("ok"):
+                self._audit(aid, tgt, "ok:clickfix/" + ("auto" if auto else "user"))
+        return out
 
     # ---- job actions (disable/enable a Linux persistence job: systemd unit or cron entry) ----
     CRON_MARK = "# scouter-disabled: "

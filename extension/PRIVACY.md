@@ -34,4 +34,4 @@ You can unpair the agent at any time from the extension's Options, remove the ex
 local storage, and decline the optional `localhost` host permission.
 
 ## Contact
-Questions: privacy@bestcybersolutions.com
+Questions: privacy@bestcyber.co

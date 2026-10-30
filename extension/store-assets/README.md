@@ -13,5 +13,6 @@ Draft marketing images for the Chrome Web Store / Firefox AMO listings. Regenera
 | `promo-tile-440x280.png` | 440×280 | Chrome Web Store small promo tile |
 
 Chrome accepts screenshots at **1280×800** or **640×400**; Firefox AMO takes screenshots at any size.
-These are drafts captured at the dev viewport and letterboxed to spec — swap in higher-resolution
-captures (or crop out the dark bars) before publishing if you want them pixel-perfect.
+The warning/overview shots are captured full-bleed and scaled to spec (01/05 are a clean 1.6-aspect
+upscale; 02/03 are padded on a dark canvas to fit the full content). Good to upload as-is; swap in
+higher-resolution native captures later if you want them razor-sharp.

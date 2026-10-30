@@ -17,22 +17,23 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXT = os.path.dirname(HERE)
-SVG = os.path.join(EXT, "icons", "icon.svg")
 OUTDIR = os.path.join(EXT, "icons")
-SIZES = [16, 32, 48, 128]
+# The 16px toolbar icon uses a simplified source (fewer, bolder blips) so it stays legible when tiny;
+# the larger sizes use the full logo.
+SIZE_SVG = {16: "icon-16.svg", 32: "icon.svg", 48: "icon.svg", 128: "icon.svg"}
 
 
-def via_rsvg(size, out):
-    subprocess.run(["rsvg-convert", "-w", str(size), "-h", str(size), SVG, "-o", out], check=True)
+def via_rsvg(src, size, out):
+    subprocess.run(["rsvg-convert", "-w", str(size), "-h", str(size), src, "-o", out], check=True)
 
 
-def via_cairosvg(size, out):
+def via_cairosvg(src, size, out):
     import cairosvg  # noqa: E401
-    cairosvg.svg2png(url=SVG, write_to=out, output_width=size, output_height=size)
+    cairosvg.svg2png(url=src, write_to=out, output_width=size, output_height=size)
 
 
-def via_inkscape(size, out):
-    subprocess.run(["inkscape", SVG, "--export-type=png", "--export-filename=" + out,
+def via_inkscape(src, size, out):
+    subprocess.run(["inkscape", src, "--export-type=png", "--export-filename=" + out,
                     "-w", str(size), "-h", str(size)], check=True)
 
 
@@ -57,10 +58,11 @@ def main():
               "open any page's devtools and run a canvas render of icons/icon.svg, saving each size.",
               file=sys.stderr)
         return 1
-    for sz in SIZES:
+    for sz, svg in sorted(SIZE_SVG.items()):
+        src = os.path.join(OUTDIR, svg)
         out = os.path.join(OUTDIR, "icon-%d.png" % sz)
-        render(sz, out)
-        print("wrote", out)
+        render(src, sz, out)
+        print("wrote", out, "(from", svg + ")")
     return 0
 
 

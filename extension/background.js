@@ -1,4 +1,4 @@
-// Scouter Web Guard — background service worker (MV3).
+// Scouter Browser Defense — background service worker (MV3).
 //
 // Bridges the content scripts to the LOCAL Scouter agent over loopback HTTP, using a token the user
 // pairs once (stored in chrome.storage). It holds no page content; it only forwards a threat's

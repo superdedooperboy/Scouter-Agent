@@ -1,4 +1,4 @@
-// Scouter Web Guard — MAIN-world hook.
+// Scouter Browser Defense — MAIN-world hook.
 //
 // A content script runs in an *isolated* world and cannot override the page's own objects, so this
 // file is injected into the PAGE's JavaScript world (manifest `world: "MAIN"`). Its only job is to

@@ -1,4 +1,4 @@
-// Scouter Web Guard — isolated-world content script.
+// Scouter Browser Defense — isolated-world content script.
 //
 // Catches browser-delivered scams locally, with no agent and no account:
 //   • ClickFix clipboard write (hard stop)  — a command-shaped payload hits the clipboard  -> MODAL
@@ -200,8 +200,8 @@
     } catch (e) { /* ignore */ }
   }
 
-  var MODAL_ID = "scouter-web-guard-host";
-  var BANNER_ID = "scouter-web-guard-banner";
+  var MODAL_ID = "scouter-browser-defense-host";
+  var BANNER_ID = "scouter-browser-defense-banner";
 
   function mkShadow(id) {
     var old = document.getElementById(id); if (old) { old.remove(); }

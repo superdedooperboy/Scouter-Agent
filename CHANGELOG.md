@@ -68,7 +68,7 @@ with a clear "needs a free key" status instead of erroring. This also restores I
 wide. (Linux gets the feed repair + `block_domain`; its ClickFix host-guard is deferred to the Phase 2
 cross-platform browser extension, since Linux has no real-time exec hook.)
 
-**Browser extension bridge — `/api/ext/*` (both agents).** The Scouter Web Guard browser extension
+**Browser extension bridge — `/api/ext/*` (both agents).** The Scouter Browser Defense browser extension
 (Phase 2) can pair with the local agent over the loopback HTTP server to get threat-intel verdicts and
 request a reversible block. New endpoints: `GET /api/ext/pair-info` (loopback-only HTML showing the
 agent URL + a persistent pairing token), `GET /api/ext/config`, `POST /api/ext/verdict` (cross-ref the

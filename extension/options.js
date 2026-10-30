@@ -1,4 +1,4 @@
-// Scouter Web Guard — options (pair with the local agent).
+// Scouter Browser Defense — options (pair with the local agent).
 "use strict";
 (function () {
   var url = document.getElementById("url");

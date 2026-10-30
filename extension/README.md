@@ -1,4 +1,4 @@
-# Scouter Web Guard (browser extension)
+# Scouter Browser Defense (browser extension)
 
 Phase 2 of Scouter's browser-threat monitoring. A Manifest V3 browser extension that catches the
 **ClickFix** scam — a fake CAPTCHA / "verify you are human" / bogus-error page that tricks you into
@@ -35,7 +35,7 @@ Phase 2 is feature-complete. (Later: surfacing browser threats as first-class ag
 ## Package for the stores
 
 ```
-./tools/pack.sh      # -> dist/scouter-web-guard-chrome-<v>.zip and ...-firefox-<v>.zip
+./tools/pack.sh      # -> dist/scouter-browser-defense-chrome-<v>.zip and ...-firefox-<v>.zip
 ```
 
 Regenerate icons with `python3 tools/make-icons.py`. Submission copy + permission justifications are in

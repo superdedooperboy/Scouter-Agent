@@ -1,8 +1,8 @@
-# Privacy Policy — Scouter Web Guard
+# Privacy Policy — Scouter Browser Defense
 
 _Last updated: 2026-10-29_
 
-Scouter Web Guard is a browser extension that warns you about "ClickFix" paste-and-run command scams
+Scouter Browser Defense is a browser extension that warns you about "ClickFix" paste-and-run command scams
 and credential-phishing pages. It is built to protect your privacy, not to collect your data.
 
 ## What we collect

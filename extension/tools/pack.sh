@@ -17,11 +17,11 @@ done
 cp manifest.json         "$OUT/chrome/manifest.json"
 cp manifest.firefox.json "$OUT/firefox/manifest.json"     # Firefox uses its manifest AS manifest.json
 
-( cd "$OUT/chrome"  && zip -qr "../scouter-web-guard-chrome-$VER.zip"  . )
-( cd "$OUT/firefox" && zip -qr "../scouter-web-guard-firefox-$VER.zip" . )
+( cd "$OUT/chrome"  && zip -qr "../scouter-browser-defense-chrome-$VER.zip"  . )
+( cd "$OUT/firefox" && zip -qr "../scouter-browser-defense-firefox-$VER.zip" . )
 
 echo "built:"
 ls -1 "$OUT"/*.zip
 echo
-echo "Chrome:  upload dist/scouter-web-guard-chrome-$VER.zip to the Chrome Web Store dashboard."
-echo "Firefox: upload dist/scouter-web-guard-firefox-$VER.zip to AMO (or: web-ext sign)."
+echo "Chrome:  upload dist/scouter-browser-defense-chrome-$VER.zip to the Chrome Web Store dashboard."
+echo "Firefox: upload dist/scouter-browser-defense-firefox-$VER.zip to AMO (or: web-ext sign)."

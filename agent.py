@@ -8631,7 +8631,7 @@ class ClickFixGuard:
 
 
 # ---------------------------------------------------------------------------
-# Browser extension bridge (Scouter Web Guard <-> this agent).
+# Browser extension bridge (Scouter Browser Defense <-> this agent).
 # The extension reports browser-delivered threats (ClickFix lure pages / clipboard writes,
 # credential-phishing) over the agent's loopback HTTP server and asks for a threat-intel verdict
 # and, on the user's say-so (or when the agent is armed), a reversible block. It authenticates with
@@ -8690,7 +8690,7 @@ class BrowserThreats:
 # extension's options. A cross-origin web page cannot read this response (same-origin policy), and the
 # loopback Host check kills DNS rebinding, so the token is only ever disclosed to the local user.
 _EXT_PAIR_HTML = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Pair Scouter Web Guard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Pair Scouter Browser Defense</title>
 <style>body{font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;
 max-width:560px;margin:48px auto;padding:0 20px;color:#1f2430}h1{font-size:20px}
 label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;margin:16px 0 4px}
@@ -8699,8 +8699,8 @@ border:1px solid #d7dce5;border-radius:8px;background:#f8fafc}button{font:inheri
 border-radius:8px;background:#2f6fed;color:#fff;cursor:pointer}.note{font-size:12.5px;color:#9a4a00;
 background:#fff8f0;border:1px solid #f1d9bf;border-radius:8px;padding:10px 12px;margin-top:18px}
 .ok{color:#2fa84f;font-size:12px;margin-left:6px}</style></head><body>
-<h1>Pair Scouter Web Guard</h1>
-<p>Open the Scouter Web Guard extension&rsquo;s <b>Options</b>, paste these two values, and click Save.</p>
+<h1>Pair Scouter Browser Defense</h1>
+<p>Open the Scouter Browser Defense extension&rsquo;s <b>Options</b>, paste these two values, and click Save.</p>
 <label>Agent URL</label><div class="row"><input id="u" readonly value="__BASE__"><button onclick="cp('u',this)">Copy</button></div>
 <label>Pairing token</label><div class="row"><input id="t" readonly value="__TOKEN__"><button onclick="cp('t',this)">Copy</button></div>
 <div class="note"><b>Keep this token private.</b> Anyone who has it can report threats to, and request site
@@ -22660,7 +22660,7 @@ def main():
                     help="an exec that exits faster than this (s) is surfaced as an ephemeral "
                          f"process the poll missed (default {ESF_EPHEMERAL_MAX_LIFETIME})")
     ap.add_argument("--no-browser-ext", action="store_true",
-                    help="disable the Scouter Web Guard browser-extension bridge (the loopback "
+                    help="disable the Scouter Browser Defense browser-extension bridge (the loopback "
                          "/api/ext/* pairing + verdict + block endpoints)")
     ap.add_argument("--no-clickfix", action="store_true",
                     help="disable the ClickFix paste-and-run guard (the real-time, clipboard-"

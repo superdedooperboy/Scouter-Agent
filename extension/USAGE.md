@@ -1,10 +1,10 @@
-# Using Scouter Web Guard
+# Using Scouter Browser Defense
 
 A short guide for everyday use. (Developers: see `README.md` for loading/packaging.)
 
 ## What it does
 
-Scouter Web Guard protects you from browser-delivered scams — with **no account and no setup**. Once
+Scouter Browser Defense protects you from browser-delivered scams — with **no account and no setup**. Once
 installed it runs on every page and only speaks up when something is dangerous.
 
 It catches three things:

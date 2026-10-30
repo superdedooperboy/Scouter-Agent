@@ -9,7 +9,7 @@
     background:radial-gradient(120% 120% at 100% 0%, #3b82f6 0%, #1e5fd0 45%, #143e8f 100%);
     color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     display:flex;align-items:center;gap:22px;padding:0 34px;box-sizing:border-box}
-  .tile img{width:104px;height:104px;filter:drop-shadow(0 6px 16px rgba(0,0,0,.35));flex:0 0 auto}
+  .tile .logo{width:104px;height:104px;filter:drop-shadow(0 6px 16px rgba(0,0,0,.35));flex:0 0 auto}
   h1{font-size:30px;line-height:1.1;margin:0;letter-spacing:-.02em}
   p{font-size:15px;line-height:1.4;margin:10px 0 0;color:#eaf1ff;max-width:250px}
   .chips{margin-top:14px;display:flex;gap:7px;flex-wrap:wrap}
@@ -19,9 +19,21 @@
 </head>
 <body>
   <div class="tile">
-    <img src="../icons/icon-128.png" alt="">
+    <svg class="logo" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <g stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 9 H25 Q26.6 9 26.6 11 V15"/>
+        <path d="M5 8 L20 6.4 Q22 6.2 22 8.3 V20 Q22 22.2 20 22.4 L6 23 Q4 23.1 4 21 V9.6 Q4 8.2 5 8 Z" fill="#ffffff" fill-opacity="0.2"/>
+      </g>
+      <g fill="#ffffff">
+        <circle cx="8" cy="11" r="1.9"/>
+        <rect x="10.9" y="9.1" width="3.2" height="3.2" rx="0.4"/>
+        <polygon points="17,9 18.7,12.1 15.3,12.1"/>
+        <polygon points="9.7,14.2 10.62,15.68 10.62,17.52 9.7,19 8.78,17.52 8.78,15.68"/>
+        <polygon points="15,14 15.45,15.19 16.71,15.24 15.72,16.03 16.06,17.26 15,16.55 13.94,17.26 14.28,16.03 13.29,15.24 14.55,15.19"/>
+      </g>
+    </svg>
     <div>
-      <h1>Scouter<br>Web Guard</h1>
+      <h1>Scouter<br>Browser Defense</h1>
       <p>Stops &ldquo;paste-this-command&rdquo; scams &amp; phishing &mdash; right in your browser.</p>
       <div class="chips"><span class="chip">ClickFix</span><span class="chip">Phishing</span><span class="chip">On-device</span></div>
     </div>

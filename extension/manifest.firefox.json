@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Scouter Web Guard",
+  "name": "Scouter Browser Defense",
   "version": "0.4.0",
   "description": "Warns about ClickFix “paste this command” scams before you get caught — runs entirely in your browser, no account needed.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "scouter-web-guard@bestcybersolutions.com",
+      "id": "scouter-browser-defense@bestcybersolutions.com",
       "strict_min_version": "128.0"
     }
   },
@@ -35,7 +35,7 @@
     }
   ],
   "action": {
-    "default_title": "Scouter Web Guard",
+    "default_title": "Scouter Browser Defense",
     "default_popup": "popup.html",
     "default_icon": { "16": "icons/icon-16.png", "32": "icons/icon-32.png" }
   }

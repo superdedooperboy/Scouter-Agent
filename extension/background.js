@@ -74,3 +74,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 });
+
+// First-run onboarding: open the welcome page once, on fresh install. Doubles as the standalone
+// usage guide. (chrome.tabs.create for an own-extension URL needs no "tabs" permission.)
+chrome.runtime.onInstalled.addListener(function (details) {
+  if (details && details.reason === "install") {
+    try { chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") }); } catch (e) { /* ignore */ }
+  }
+});

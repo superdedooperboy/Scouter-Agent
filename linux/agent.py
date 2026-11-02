@@ -16525,6 +16525,22 @@ class Responder:
                 self._audit(aid, tgt, "ok:clickfix/" + ("auto" if auto else "user"))
         return out
 
+    def unblock_target(self, domain=None, ip=None):
+        """Reverse a block_target: find the active ledger entries for these targets and undo them
+        (bypasses the mode gate like any undo). Used by the Mesh fleet-unblock."""
+        targets = {t for t in (domain, ip) if t}
+        if not targets:
+            return {"ok": False, "error": "nothing to unblock"}
+        with self.lock:
+            toks = [t for t, e in self.ledger.items()
+                    if e.get("kind") in ("hosts", "network") and e.get("match") in targets]
+        undone = 0
+        for tok in toks:
+            if self.undo(tok).get("ok"):
+                undone += 1
+        return {"ok": undone > 0, "undone": undone,
+                "error": None if undone else "no active block found for that target"}
+
     # ---- job actions (disable/enable a Linux persistence job: systemd unit or cron entry) ----
     CRON_MARK = "# scouter-disabled: "
 
@@ -18424,6 +18440,20 @@ def make_handler(cache):
                                          bool(payload.get("confirm")))
                 elif op == "undo":
                     res = r.undo((payload.get("token") or "").strip())
+                elif op == "block-target":
+                    # Mesh-authority reversible site/IP block (browser-guard fleet block). Bypasses the
+                    # local mode gate like the extension's own block — this host opted into mesh commands.
+                    tg = payload.get("target") or {}
+                    if not r:
+                        res = {"ok": False, "error": "response engine unavailable"}
+                    else:
+                        done = [b for b in r.block_target(domain=(tg.get("domain") or None),
+                                                          ip=(tg.get("ip") or None), auto=True) if b.get("ok")]
+                        res = {"ok": bool(done), "blocked": done}
+                elif op == "unblock-target":
+                    tg = payload.get("target") or {}
+                    res = (r.unblock_target(domain=(tg.get("domain") or None), ip=(tg.get("ip") or None))
+                           if r else {"ok": False, "error": "response engine unavailable"})
                 else:
                     res = {"ok": False, "error": "unknown op"}
                 if res.get("ok"):

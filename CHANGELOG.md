@@ -6,6 +6,8 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-11-02
+
 ### Added
 
 **Noisy-detection tuning view (Metrics tab) — Gate 1 of the detection-fidelity feature.** A new "Noisy
@@ -78,6 +80,16 @@ authenticate with a persistent `X-Scouter-Ext-Token` (separate from the UI CSRF 
 loopback `Host` check, and deliberately accept a `chrome-extension://` Origin — a web page can't forge
 the custom header cross-origin (CORS preflight) and can't guess the token, and no permissive CORS
 headers are ever sent. `--no-browser-ext` disables the bridge.
+
+**Browser-extension threats become first-class alerts and fleet containment — Phase 3 (both agents).**
+A threat the extension reports (ClickFix, a fake-CAPTCHA lure, or a credential-phishing page) now flows
+into the agent's own detection pipeline: the `BrowserThreats` store exposes a snapshot that `build_graph`
+drains into `detection` nodes (`browser:<kind>:<target>`), so each one becomes a real, triageable alert
+with calibrated severity (ClickFix → high; lure / phishing → medium, bumped when threat-intel confirms
+the destination), an ATT&CK mapping (T1204.004 / T1566.002), and an inline IOC when a feed matched. The
+agent also reports a 7-day browser-threat rollup to the Mesh. New `/api/respond` ops `block-target` and
+`unblock-target` let the Mesh contain or release a flagged domain/IP across remote-enabled hosts, calling
+the reversible `block_target()` / new `unblock_target()` directly (recorded in the undo ledger).
 
 ### Fixed
 

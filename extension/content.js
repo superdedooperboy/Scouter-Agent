@@ -194,10 +194,20 @@
         showModal(opts.sample || "");
       } else if (kind === "lurepage") {
         showBanner("lurepage", opts);
+        agentReport("lurepage", { domain: safeHostname() });   // so it surfaces as a fleet alert too
       } else if (kind === "credform") {
         showBanner("credform", opts);
+        agentReport("phishing", { domain: safeHostname() });
       }
     } catch (e) { /* ignore */ }
+  }
+
+  // Fire-and-forget report to the paired agent so a lure/phishing page becomes a first-class fleet
+  // alert (the clipboard modal reports via agentEnrich). No-op when unpaired. Shows no extra UI.
+  function agentReport(kind, target) {
+    if (!(target && (target.domain || target.ip || target.url))) { return; }
+    agentAsk(Object.assign({ type: "verdict", kind: kind, page_url: safeHref() }, target))
+      .then(function () {}, function () {});
   }
 
   var MODAL_ID = "scouter-browser-defense-host";

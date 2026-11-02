@@ -8030,9 +8030,33 @@ class ExtAuth:
         return bool(header) and secrets.compare_digest(str(header), self.token)
 
 
+BROWSER_EXPLAIN = {
+    "clickfix": "A web page copied a shell command to the clipboard for the user to paste into a "
+                "terminal — the ClickFix scam. Reported by the Scouter Browser Defense extension. "
+                "ATT&CK T1204.004.",
+    "lurepage": "A fake “verify you are human” / CAPTCHA page that tells the visitor to paste "
+                "a command into a shell — the ClickFix lure. Reported by the browser extension.",
+    "phishing": "A credential sign-in form on an untrusted origin (look-alike domain, raw IP, "
+                "punycode, or plain http). Reported by the browser extension. ATT&CK T1566.002.",
+}
+
+
 class BrowserThreats:
-    """Recent browser-guard findings reported by the paired extension (in-memory ring). The local
-    record + config feed; surfacing these as first-class fleet alerts lands in the Mesh phase."""
+    """Browser-guard findings reported by the paired extension (in-memory ring). Beyond the local log
+    + config feed, it raises each recent threat as a first-class 'detection' alert node (snapshot())
+    so it flows through the console, triage/incidents and the Mesh, and summarizes them for the fleet
+    check-in (summary())."""
+
+    TTL = 6 * 3600                       # seconds a reported threat stays a live alert
+    _SEV = {"clickfix": "high", "lurepage": "medium", "phishing": "medium"}
+    _BUMP = {"low": "medium", "medium": "high", "high": "critical", "critical": "critical"}
+    _LABEL = {"clickfix": "ClickFix paste-and-run (browser)",
+              "lurepage": "ClickFix lure page (browser)",
+              "phishing": "Credential-phishing page (browser)"}
+    _RULE = {"clickfix": ("b-browser-clickfix", "T1204.004"),
+             "lurepage": ("b-browser-lure", "T1204.004"),
+             "phishing": ("b-browser-phishing", "T1566.002")}
+    _CONF = {"clickfix": 3, "lurepage": 2, "phishing": 2}
 
     def __init__(self, cap=200):
         self.lock = threading.Lock()
@@ -8045,6 +8069,76 @@ class BrowserThreats:
     def recent(self, n=50):
         with self.lock:
             return list(self.items)[:max(0, int(n))]
+
+    # ---- first-class alert nodes (drained by build_graph) ----
+    def snapshot(self):
+        cutoff = (time.time() - self.TTL) * 1000
+        with self.lock:
+            items = [dict(r) for r in self.items if (r.get("ts") or 0) >= cutoff]
+        seen = {}                                        # dedupe per (kind, target); items are newest-first
+        for r in items:
+            tgt = (r.get("domain") or r.get("ip") or "").strip()
+            if not tgt:
+                continue
+            key = (r.get("kind") or "threat", tgt)
+            cur = seen.get(key)
+            if cur is None:
+                seen[key] = r                            # newest report is the base
+            else:                                        # ...but never downgrade: carry the worst verdict + any block
+                if r.get("verdict") == "malicious" and cur.get("verdict") != "malicious":
+                    cur["verdict"] = "malicious"
+                    cur["feed"] = cur.get("feed") or r.get("feed")
+                if not cur.get("blocked") and r.get("blocked"):
+                    cur["blocked"] = r.get("blocked")
+        return [self._node(k[0], k[1], r) for k, r in seen.items()]
+
+    def _node(self, kind, tgt, r):
+        malicious = r.get("verdict") == "malicious"
+        sev = self._SEV.get(kind, "medium")
+        if malicious:
+            sev = self._BUMP.get(sev, sev)               # intel-confirmed bumps one tier
+        rid, mitre = self._RULE.get(kind, ("b-browser-threat", "T1204.004"))
+        conf = min(4, self._CONF.get(kind, 2) + (1 if malicious else 0))
+        label = self._LABEL.get(kind, "Browser threat")
+        floor = RULE_SEVERITY_FLOOR.get(sev, 50)
+        feed = r.get("feed")
+        reasons = [reason(("Known-malicious " if malicious else "") +
+                          "browser threat reported by Scouter Browser Defense", mitre, floor)]
+        if malicious and feed:
+            reasons.append(reason("Destination %s is on threat-intel feed %s" % (tgt, feed), mitre, 95))
+        blocked = [b for b in (r.get("blocked") or []) if isinstance(b, dict) and b.get("ok")]
+        if blocked:
+            reasons.append(reason("Blocked on this device (reversible)", mitre, 90))
+        detail = {"category": "browser", "source": "Browser Guard", "kind": kind,
+                  "domain": r.get("domain"), "ip": r.get("ip"), "url": r.get("url"), "page": r.get("page"),
+                  "verdict": r.get("verdict"), "feed": feed, "blocked": blocked, "via": "browser-ext",
+                  "ioc": [{"feed": feed, "value": tgt}] if (malicious and feed) else [],
+                  "rule_hits": [{"id": rid, "name": label, "mitre": mitre, "severity": sev,
+                                 "confidence": conf, "builtin": True,
+                                 "explanation": BROWSER_EXPLAIN.get(kind, "")}]}
+        return {"id": "browser:%s:%s" % (kind, tgt), "type": "detection",
+                "label": "%s — %s" % (label, tgt), "score": floor, "severity": sev,
+                "reasons": reasons, "detail": detail}
+
+    # ---- compact rollup for the Mesh check-in ----
+    def summary(self, window_days=7, recent_n=25):
+        cutoff = (time.time() - window_days * 86400) * 1000
+        with self.lock:
+            items = [dict(r) for r in self.items if (r.get("ts") or 0) >= cutoff]
+        by_kind, mal, blk = {}, 0, 0
+        for r in items:
+            k = r.get("kind") or "threat"
+            by_kind[k] = by_kind.get(k, 0) + 1
+            if r.get("verdict") == "malicious":
+                mal += 1
+            if [b for b in (r.get("blocked") or []) if isinstance(b, dict) and b.get("ok")]:
+                blk += 1
+        recent = [{"ts": r.get("ts"), "kind": r.get("kind"),
+                   "target": r.get("domain") or r.get("ip"), "verdict": r.get("verdict"),
+                   "feed": r.get("feed"),
+                   "blocked": bool([b for b in (r.get("blocked") or []) if isinstance(b, dict) and b.get("ok")])}
+                  for r in items[:recent_n]]
+        return {"total": len(items), "malicious": mal, "blocked": blk, "by_kind": by_kind, "recent": recent}
 
 
 # Loopback-only pairing page: shows the agent URL + the ext-token for the user to paste into the
@@ -13682,7 +13776,7 @@ class DecoyStore:
 
 def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downloads=None,
                 auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
-                posture=None, shellhist=None, rules=None, sqldet=None, suppressions=None, incident_store=None,
+                posture=None, shellhist=None, rules=None, sqldet=None, browser_threats=None, suppressions=None, incident_store=None,
                 realtime=None, history=None, decoys=None, responder=None, provenance=None, webshell=None):
     t0 = time.time()
     procs = collect_processes()
@@ -14021,6 +14115,11 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
     # --- SQL-detection nodes (user-authored saved queries that returned rows) ---
     if sqldet:
         for item in sqldet.snapshot():
+            add_node(item)
+
+    # --- browser-guard threats reported by the paired extension (ClickFix / lure / phishing) ---
+    if browser_threats:
+        for item in browser_threats.snapshot():
             add_node(item)
 
     # --- listeners are informational unless the owning process has ANOTHER detection ---
@@ -14710,7 +14809,9 @@ class SnapshotCache:
                                auth=self.auth, filescan=self.filescan, persist=self.persist,
                                tcc=self.tcc, raccess=self.raccess, accounts=self.accounts,
                                posture=self.posture, shellhist=self.shellhist,
-                               rules=self.rules, sqldet=self.sqldet, suppressions=self.suppressions,
+                               rules=self.rules, sqldet=self.sqldet,
+                               browser_threats=getattr(self, "browser_threats", None),
+                               suppressions=self.suppressions,
                                incident_store=self.incidents, realtime=self.realtime,
                                history=self.history, decoys=self.decoys, responder=self.responder,
                                provenance=self.provenance, webshell=self.webshell)
@@ -20234,7 +20335,23 @@ class MeshReporter:
             "vulns": (self.cache.vulns.fleet_summary()           # CTEM-Lite: compact vuln rollup for the fleet view
                       if getattr(self.cache, "vulns", None) and self.cache.vulns.enabled else None),
             "fidelity": self._fidelity_summary(),                # noisy-detection rollup for the fleet fidelity view
+            "browser": self._browser_summary(),                  # browser-guard (extension) threat rollup
         }
+
+    def _browser_summary(self):
+        """A compact 7-day browser-guard rollup for the fleet 'Browser threats' view. Cached ~5 min."""
+        bt = getattr(self.cache, "browser_threats", None)
+        if not bt:
+            return None
+        now = time.time()
+        if getattr(self, "_bt_cache", None) is not None and (now - getattr(self, "_bt_cache_ts", 0)) < 300:
+            return self._bt_cache
+        try:
+            out = bt.summary()
+        except Exception:  # noqa: BLE001 — a reporting extra must never break the check-in
+            return getattr(self, "_bt_cache", None)
+        self._bt_cache, self._bt_cache_ts = out, now
+        return out
 
     def _fidelity_summary(self):
         """A compact 7-day noisy-detection rollup for the fleet fidelity view (Gate 3). The Mesh

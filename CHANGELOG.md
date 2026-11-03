@@ -6,6 +6,26 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-11-03
+
+### Added
+
+**Public-exploit prioritization via the VulnCheck Initial Access Community feed (both agents).** A new
+`InitialAccessFeed` tracks CVEs with a published, weaponized *initial-access* exploit — unauthenticated,
+network-reachable, no user interaction — the kind attackers use to get a foothold. This is a strong
+urgency signal alongside KEV: KEV = *exploited in the wild*, this = *a working public exploit exists*.
+Each finding tied to such a CVE is stamped `exploit_available` and its effective severity is floored to
+**high** (ransomware-KEV still floors to critical), so a flaw with a public exploit outranks a merely
+high CVSS. Exploit-backed CVEs are also merged into the Hunt tab's suggestions (deduped against the KEV
+hunts), carrying the feed's vendor/product/CPE/ATT&CK/port metadata for precise, host-aware keywords.
+
+The feed is sourced from the public, Apache-2.0 repository
+[vulncheck-oss/initial-access-community](https://github.com/vulncheck-oss/initial-access-community):
+the file tree is pulled once, each per-CVE `README.md` frontmatter is parsed locally, and only the CVE +
+software-identity facts are cached. No token is required, nothing about the host leaves the machine, and
+no exploit or detection-rule content is copied. On by default with the rest of vulnerability scanning;
+opt out with `--no-initial-access` (or `--no-vuln`).
+
 ## [1.12.2] — 2026-11-03 (Linux agent only)
 
 ### Added

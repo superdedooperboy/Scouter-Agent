@@ -94,7 +94,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.12.2"
+__version__ = "1.13.0"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -1370,11 +1370,12 @@ def max_severity(a, b):
     return a if SEV_RANK.get(a, 0) >= SEV_RANK.get(b, 0) else b
 
 
-def vuln_boosted_severity(base, max_sev, kev=False, kev_ransomware=False):
+def vuln_boosted_severity(base, max_sev, kev=False, kev_ransomware=False, exploit_available=False):
     """Effective severity for an alert whose process is tied to vulnerable software on the host: the
-    worst of the alert's own severity and the vulnerability's, with a known-exploited (KEV) floor —
-    a flaw being exploited in the wild outranks a theoretical score. Only ever raises, never lowers."""
-    floor = "critical" if kev_ransomware else ("high" if kev else "info")
+    worst of the alert's own severity and the vulnerability's, floored by exploitation evidence —
+    a flaw being exploited in the wild (KEV), or with a public weaponized initial-access exploit
+    (VulnCheck IA), outranks a theoretical score. Only ever raises, never lowers."""
+    floor = "critical" if kev_ransomware else ("high" if (kev or exploit_available) else "info")
     eff = max_severity(base or "info", max_sev or "info")
     return max_severity(eff, floor)
 
@@ -4925,6 +4926,229 @@ def _neg_date(d):
         return 0
 
 
+class InitialAccessFeed:
+    """VulnCheck 'Initial Access Community' intelligence, for exploit-availability prioritization.
+
+    A CVE with a public, weaponized *initial-access* exploit — unauthenticated, network-reachable, no
+    user interaction — is a strong urgency signal, comparable to KEV: it's the kind of flaw attackers use
+    to get a foothold, and a working exploit for it is already published. Its presence floors a finding's
+    severity (see vuln_boosted_severity) and sharpens hunts. Complements KevFeed: KEV = exploited in the
+    wild; this = a working public exploit exists, carrying vendor/product/CPE/ATT&CK/port metadata for
+    precise matching.
+
+    Source: the public, Apache-2.0 repo github.com/vulncheck-oss/initial-access-community. Each
+    feed/cve-*/README.md carries a YAML frontmatter record. We pull the file tree once (one API call),
+    read each README over raw.githubusercontent (not API-rate-limited), parse the frontmatter locally,
+    and cache it. No token, and nothing about the host leaves the machine. We store only the CVE +
+    product metadata (facts) and attribute the source; we copy no exploit or detection-rule content."""
+
+    REPO = "vulncheck-oss/initial-access-community"
+    TREE_URL = "https://api.github.com/repos/%s/git/trees/main?recursive=1" % REPO
+    RAW = "https://raw.githubusercontent.com/%s/main/%%s" % REPO
+    SOURCE_URL = "https://github.com/%s" % REPO
+
+    def __init__(self, enabled=True, interval=86400, cache_file=None):
+        self.enabled = enabled
+        self.interval = max(3600, interval)
+        self.cache_file = cache_file or os.path.join(HERE, "ia-cache.json")
+        self.lock = threading.Lock()
+        self.ia = {}            # CVE (upper) -> record
+        self.last = 0
+        self.error = None
+        self._load_cache()
+        if enabled:
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    # ---- lookup / enrichment ----
+    def lookup(self, cve):
+        if not cve:
+            return None
+        with self.lock:
+            return self.ia.get(str(cve).upper())
+
+    def enrich(self, f):
+        """Stamp initial-access-exploit fields onto a finding / Shodan-vuln dict carrying a 'cve'."""
+        rec = self.lookup(f.get("cve"))
+        f["exploit_available"] = bool(rec)
+        if rec:
+            f["ia_vendor"] = rec.get("vendor")
+            f["ia_product"] = rec.get("product")
+            f["ia_cpe"] = rec.get("cpe")
+            f["ia_mitre"] = rec.get("mitre")
+            f["ia_service"] = rec.get("service")
+            f["ia_port"] = rec.get("port")
+            f["ia_name"] = rec.get("name")
+        return f
+
+    # ---- persistence ----
+    def _load_cache(self):
+        try:
+            with open(self.cache_file) as fh:
+                d = json.load(fh) or {}
+        except (OSError, ValueError):
+            return
+        if isinstance(d.get("ia"), dict):
+            self.ia = {k.upper(): v for k, v in d["ia"].items() if isinstance(v, dict)}
+            self.last = int(d.get("last") or 0)
+
+    def _save_cache(self):
+        try:
+            tmp = self.cache_file + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump({"ia": self.ia, "last": self.last, "source": self.SOURCE_URL}, fh)
+            os.replace(tmp, self.cache_file)
+        except OSError:
+            pass
+
+    # ---- download + parse ----
+    def _http(self, url, timeout=30):
+        req = urllib.request.Request(url, headers={"User-Agent": "Scouter-agent",
+                                                   "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+
+    @staticmethod
+    def _flist(s):
+        """Parse an inline YAML list body like  "a", "b"  (the text inside [...]) into a list."""
+        out = []
+        for a, b in re.findall(r'"([^"]*)"|\'([^\']*)\'', s or ""):
+            v = a or b
+            if v:
+                out.append(v)
+        return out
+
+    @classmethod
+    def _parse(cls, text):
+        """Extract a record from a per-CVE README's YAML frontmatter. Deliberately NOT a general YAML
+        parser (stdlib has none): the frontmatter is template-generated, so we read the specific fields
+        we use with targeted patterns. Returns a record dict, or None if there's no CVE."""
+        m = re.match(r"\s*---\s*\n(.*?)\n---\s*\n", text, re.S)
+        fm = m.group(1) if m else text[:4000]
+
+        def scalar(key):
+            # allow an optional "- " YAML list-item marker before the key (the first key of each
+            # artifact entry sits on the "- vendor: ..." line).
+            mm = re.search(r'(?m)^\s*(?:-\s*)?%s:\s*"?([^"\n\[]+?)"?\s*$' % re.escape(key), fm)
+            return mm.group(1).strip() if mm else None
+
+        def listof(key):
+            # inline flow list:  key: ["a", "b"]
+            mm = re.search(r'(?m)^\s*(?:-\s*)?%s:\s*\[([^\]]*)\]' % re.escape(key), fm)
+            if mm:
+                return cls._flist(mm.group(1))
+            # block list:  key:\n   - a\n   - b   (template uses this for 'product')
+            bm = re.search(r'(?m)^[ \t]*(?:-\s*)?%s:[ \t]*$' % re.escape(key), fm)
+            if not bm:
+                return []
+            items = []
+            for line in fm[bm.end():].split("\n"):
+                if line.strip() == "":
+                    continue
+                lm = re.match(r'^[ \t]+-\s*(.+?)\s*$', line)
+                if not lm:
+                    break  # dedent / next key — end of this list
+                items.append(lm.group(1).strip().strip('"').strip("'"))
+            return items
+
+        cve = scalar("cve")
+        if not cve:
+            return None
+        port = scalar("defaultPort")
+        return {
+            "cve": cve.upper(),
+            "vendor": scalar("vendor"),
+            "name": scalar("artifactName"),
+            "product": listof("product"),
+            "cpe": listof("cpe"),
+            "mitre": listof("mitreAttackTechniques"),
+            "service": scalar("targetService"),
+            "exploit_type": scalar("exploitType"),
+            "added": scalar("dateAdded"),
+            "port": int(port) if (port and port.isdigit()) else None,
+            "artifacts": {k: (scalar(k) == "true") for k in
+                          ("yara", "sigmaRule", "suricataRule", "snortRule", "nmapScript", "pcap")},
+        }
+
+    def refresh(self, force=False):
+        if not self.enabled:
+            return
+        if not force and self.ia and (time.time() - self.last) < self.interval:
+            return
+        try:
+            tree = json.loads(self._http(self.TREE_URL, timeout=30).decode("utf-8", "replace"))
+            readmes = [n.get("path") for n in (tree.get("tree") or [])
+                       if n.get("type") == "blob"
+                       and re.match(r"feed/cve-[^/]+/README\.md$", n.get("path") or "")]
+            out = {}
+            for p in readmes:
+                try:
+                    text = self._http(self.RAW % p, timeout=20).decode("utf-8", "replace")
+                except Exception:  # noqa: BLE001 — skip one bad file, keep the rest
+                    continue
+                rec = self._parse(text)
+                if rec:
+                    out[rec["cve"]] = rec
+            if out:
+                with self.lock:
+                    self.ia, self.last, self.error = out, int(time.time()), None
+                self._save_cache()
+            else:
+                self.error = "initial-access feed returned no records"
+        except Exception as e:  # noqa: BLE001 — a feed hiccup must never break scanning
+            self.error = "could not refresh initial-access feed: %s" % e
+
+    def _loop(self):
+        time.sleep(15)
+        while True:
+            try:
+                self.refresh()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(1800)
+
+    def status(self):
+        return {"enabled": self.enabled, "source": self.SOURCE_URL,
+                "count": len(self.ia), "last": self.last, "error": self.error}
+
+    def recent(self, days=3650):
+        cutoff = time.time() - days * 86400
+        out = []
+        with self.lock:
+            items = list(self.ia.items())
+        for cve, rec in items:
+            try:
+                ts = time.mktime(time.strptime((rec.get("added") or "")[:10], "%Y-%m-%d"))
+            except (ValueError, TypeError):
+                ts = 0
+            if ts >= cutoff or ts == 0:
+                out.append((ts, cve, rec))
+        out.sort(key=lambda x: -x[0])
+        return [(cve, rec) for _ts, cve, rec in out]
+
+    def hunt_suggestions(self, host_tokens=None, limit=40):
+        """Threat-hunts for the initial-access CVEs, reusing KevFeed's keyword/SQL builders. Because each
+        record carries vendor + product, the keyword is usually precise (e.g. 'jenkins', 'gitlab')."""
+        host_tokens = {t.lower() for t in (host_tokens or set()) if t}
+        host_words = set()
+        for t in host_tokens:
+            host_words.update(w for w in re.split(r"[^a-z0-9]+", t) if w)
+        seen_kw, out = set(), []
+        for cve, rec in self.recent():
+            prod_list = rec.get("product") or []
+            prod = prod_list[0] if isinstance(prod_list, list) and prod_list else (rec.get("product") or "")
+            kw = KevFeed.hunt_keyword(prod, rec.get("vendor"), rec.get("name"))
+            if not kw or kw in seen_kw:
+                continue
+            seen_kw.add(kw)
+            out.append({"cve": cve, "name": rec.get("name"), "vendor": rec.get("vendor"),
+                        "product": prod, "keyword": kw, "sql": KevFeed.hunt_sql(kw),
+                        "service": rec.get("service"), "port": rec.get("port"),
+                        "added": (rec.get("added") or "")[:10], "source": "initial-access",
+                        "exploit_available": True, "on_host": kw in host_words})
+        out.sort(key=lambda h: (not h["on_host"], _neg_date(h["added"])))
+        return out[:limit]
+
+
 # --- Curated advisory hunts: operator-dismissable, pinned to the top of the Hunt tab --------------
 # Each advisory bundles ready-to-run, read-only hunts for a specific emerging threat. They surface at
 # the top of the Hunt tab; an operator runs them on demand and can clear (dismiss) any advisory they
@@ -5226,7 +5450,8 @@ class VulnScanner:
     package (resolved through the agent's DpkgIndex)."""
 
     def __init__(self, enabled=True, interval=86400, feed_url=None, history=None,
-                 osv="auto", dpkg_index=None, alert_severity="critical", on_alert=None, kev=None):
+                 osv="auto", dpkg_index=None, alert_severity="critical", on_alert=None, kev=None,
+                 ia=None):
         self.enabled = enabled
         self.interval = max(3600, interval)
         self.history = history
@@ -5239,6 +5464,7 @@ class VulnScanner:
         self.alert_severity = alert_severity         # raise an EDR alert at/above this severity ("off" to disable)
         self.on_alert = on_alert                      # callback(finding) -> notify + SIEM export; set by main
         self.kev = kev                                # shared KevFeed: known-exploited prioritization (or None)
+        self.ia = ia                                  # shared InitialAccessFeed: public-exploit prioritization (or None)
         self._alerted_path = os.path.join(HERE, "vuln-alerted.json")
         self._alerted, self._alert_baselined = self._load_alerted()
         self.lock = threading.Lock()
@@ -5324,6 +5550,10 @@ class VulnScanner:
                 self.kev.enrich(f)                      # known-exploited? (floats to the top + always alerts)
             else:
                 f["kev"] = False
+            if self.ia:
+                self.ia.enrich(f)                       # public initial-access exploit available? (floors severity)
+            else:
+                f["exploit_available"] = False
             f["sig"] = _finding_sig(f)                  # stable id the remediation UI sends back
             r = self.remediation.get(f["sig"])
             if not r:
@@ -5515,6 +5745,7 @@ class VulnScanner:
             "max_sev": max_sev,
             "kev": any(f.get("kev") for f in matched),
             "kev_ransomware": any(f.get("kev_ransomware") for f in matched),
+            "exploit_available": any(f.get("exploit_available") for f in matched),
             "live": any(f.get("live") for f in matched),
             "count": len(matched),
             "findings": [{"component": f.get("component"), "cve": f.get("cve"),
@@ -14956,13 +15187,16 @@ class SnapshotCache:
                     if not ctx:
                         continue
                     eff = vuln_boosted_severity(n.get("severity"), ctx["max_sev"],
-                                                ctx["kev"], ctx["kev_ransomware"])
+                                                ctx["kev"], ctx["kev_ransomware"],
+                                                ctx.get("exploit_available"))
                     n["detail"]["vuln_context"] = ctx
                     n["effective_severity"] = eff
                     top = ctx["findings"][0] if ctx["findings"] else {}
                     kevtag = ((" — known-exploited in the wild (KEV)"
                                + (", used in ransomware" if ctx["kev_ransomware"] else ""))
                               if ctx["kev"] else "")
+                    if ctx.get("exploit_available"):
+                        kevtag += (" — " if not kevtag else "; ") + "public initial-access exploit available"
                     boost = ((" Effective severity raised %s → %s." % (n.get("severity"), eff))
                              if SEV_RANK.get(eff, 0) > SEV_RANK.get(n.get("severity"), 0) else "")
                     n["reasons"].append(reason(
@@ -17396,6 +17630,16 @@ def make_handler(cache):
                         except Exception:  # noqa: BLE001
                             pass
                     hunts = kv.hunt_suggestions(days=days, host_tokens=toks)
+                    ia = getattr(cache, "ia", None)                 # merge VulnCheck initial-access hunts
+                    if ia is not None and ia.enabled:
+                        seen = {h["keyword"] for h in hunts}
+                        for h in ia.hunt_suggestions(host_tokens=toks):
+                            if h["keyword"] not in seen:
+                                hunts.append(h)
+                                seen.add(h["keyword"])
+                        hunts.sort(key=lambda h: (not h.get("on_host"),
+                                                  not h.get("ransomware", False),
+                                                  _neg_date(h.get("added", ""))))
                     self._send_json({"available": True, "days": days, "has_token": kv.has_token(),
                                      "source": kv.source, "count": len(hunts), "hunts": hunts,
                                      "on_host": sum(1 for h in hunts if h["on_host"])})
@@ -21873,6 +22117,9 @@ def main():
     ap.add_argument("--no-vuln", action="store_true",
                     help="disable in-agent vulnerability scanning (APT update currency + dpkg/pip/npm "
                          "inventory + advisory matching). On by default.")
+    ap.add_argument("--no-initial-access", action="store_true",
+                    help="disable the VulnCheck Initial Access Community feed (public initial-access "
+                         "exploit availability, for prioritization + hunts). On by default.")
     ap.add_argument("--vuln-interval", type=int, default=86400,
                     help="seconds between vulnerability scans (default daily; apt-get/pip/npm are slow, "
                          "so this runs on a long timer, never per snapshot).")
@@ -22065,11 +22312,13 @@ def main():
         except Exception:  # noqa: BLE001
             pass
     cache.kev = KevFeed(enabled=not args.no_vuln, interval=args.vuln_interval)   # known-exploited (VulnCheck/CISA)
+    cache.ia = InitialAccessFeed(enabled=not args.no_vuln and not args.no_initial_access,
+                                 interval=args.vuln_interval)   # public initial-access exploits (VulnCheck IA community)
     cache.vulns = VulnScanner(enabled=not args.no_vuln, interval=args.vuln_interval,
                               feed_url=args.vuln_feed_url, history=history, osv=args.vuln_osv,
                               dpkg_index=getattr(fs_sig, "dpkg", None),
                               alert_severity=args.vuln_alert_severity, on_alert=_vuln_on_alert,
-                              kev=cache.kev)
+                              kev=cache.kev, ia=cache.ia)
     cache.vulns.start()
     cache.advisories = AdvisoryHunts()   # curated, dismissable advisory hunts (top of the Hunt tab)
     cache.shodan = ShodanExposure(interval=args.shodan_interval, kev=cache.kev)   # opt-in external attack surface

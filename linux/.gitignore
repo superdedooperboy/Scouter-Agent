@@ -8,6 +8,7 @@ vt-cache.json
 vt-usage.json
 vt-settings.json
 ioc-cache.json
+ia-cache.json
 ioc-feeds.json
 ioc-custom-feeds.json
 ioc-secrets.json

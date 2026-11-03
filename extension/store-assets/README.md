@@ -1,7 +1,7 @@
 # Store assets
 
 Draft marketing images for the Chrome Web Store / Firefox AMO listings. Regenerate the promo tile from
-`tools/promo.html` and screenshots from the `demo/` + `test/` fixtures; see `STORE.md` for the listing.
+`tools/promo.html` and screenshots from the `demo/` + `test/` fixtures.
 
 | File | Size | Use |
 |---|---|---|

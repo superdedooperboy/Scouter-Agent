@@ -26,6 +26,21 @@ software-identity facts are cached. No token is required, nothing about the host
 no exploit or detection-rule content is copied. On by default with the rest of vulnerability scanning;
 opt out with `--no-initial-access` (or `--no-vuln`).
 
+**Initial-access exploits cross-referenced with the host's attack surface + inventory (both agents).**
+Building on the feed above:
+
+- *Exposure cross-ref.* The external attack-surface view now flags any internet-exposed CVE that also
+  has a public initial-access exploit (⚡), floated to the top of the exposure list just below KEV — the
+  sharpest external-exposure signal there is: an internet-reachable service carrying a CVE with a
+  published foothold exploit.
+- *Installed public-exploit software.* The vulnerability scan now surfaces installed software an attacker
+  has a published initial-access exploit for, matched by product/CPE against the inventory (apps/brew on
+  macOS, dpkg/rpm/apk on Linux, plus pip/npm). This is deliberately **version-unconfirmed** — it flags the
+  *product*, not a confirmed-vulnerable version — so it is kept in its own "public-exploit software" view,
+  never raising an alert or changing a process's severity on its own.
+- *Auto-hunts.* Each of those matches auto-runs its process-hunt against the local history database and
+  carries the hit count, turning "installed" into "installed and actually running here."
+
 ## [1.12.2] — 2026-11-03 (Linux agent only)
 
 ### Added

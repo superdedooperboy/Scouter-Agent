@@ -5029,6 +5029,36 @@ class InitialAccessFeed:
         out.sort(key=lambda h: (not h["on_host"], _neg_date(h["added"])))
         return out[:limit]
 
+    @staticmethod
+    def _cpe_product(rec):
+        """The product token from a record's CPE (cpe:2.3:a:vendor:product:…), lowercased, or None.
+        Clean and normalized (e.g. 'tomcat', 'spark', 'systeminformation') — the best token for matching
+        a record to an installed-software name."""
+        for c in (rec.get("cpe") or []):
+            parts = str(c).split(":")
+            if len(parts) >= 5 and parts[4].strip():
+                return parts[4].strip().lower()
+        return None
+
+    def surface_tokens(self):
+        """[(token, rec)] for matching installed software to a public-exploit record, so we can flag
+        that software an attacker has a published *initial-access* exploit for is INSTALLED here. The
+        token is the CPE product (falling back to the first product word), filtered to specific tokens
+        (≥3 chars, not a generic stopword). Version-unconfirmed by nature — an awareness/hunting signal,
+        never a confirmed-vulnerable finding."""
+        out = []
+        with self.lock:
+            recs = list(self.ia.values())
+        for rec in recs:
+            tok = self._cpe_product(rec)
+            if not tok:
+                prod = rec.get("product") or []
+                tok = (prod[0] if isinstance(prod, list) and prod else "") or ""
+                tok = tok.strip().lower()
+            if tok and len(tok) >= 3 and tok not in KevFeed._HUNT_STOP:
+                out.append((tok, rec))
+        return out
+
 
 # --- Curated advisory hunts: operator-dismissable, pinned to the top of the Hunt tab --------------
 # Each advisory bundles ready-to-run, read-only hunts for a specific emerging threat. They surface at
@@ -5236,7 +5266,7 @@ class VulnScanner:
         self._alerted, self._alert_baselined = self._load_alerted()
         self.lock = threading.Lock()
         self._result = {"findings": [], "counts": {}, "os": {}, "scanned": None,
-                        "scanning": False, "error": None, "summary": {}}
+                        "scanning": False, "error": None, "summary": {}, "exploit_surface": []}
         self._stop = False
 
     def start(self):
@@ -5304,6 +5334,67 @@ class VulnScanner:
                                          "%s (%s)" % (name, eco), ver, match_name=name))
         out = self._dedupe(out)
         return out
+
+    def _exploit_surface(self, inv, live_exes=None, confirmed_cves=None):
+        """Installed software that matches a VulnCheck Initial-Access record by product/CPE — software an
+        attacker has a *published foothold exploit* for. This is VERSION-UNCONFIRMED by design: it says
+        "you run X, and a public initial-access exploit for X exists," not "your X is vulnerable." So it's
+        kept OUT of `findings` — it never raises an EDR alert and never floors a process's severity. It's
+        an awareness + hunting signal. Each match also auto-runs its process-hunt against the local
+        history DB (piece 3) and carries the hit count, turning "installed" into "installed and running."
+        CVEs already surfaced as confirmed-vulnerable findings are skipped (P0 already handles those)."""
+        if not self.ia or not getattr(self.ia, "enabled", False):
+            return []
+        tokens = self.ia.surface_tokens()
+        if not tokens:
+            return []
+        live_exes = live_exes or set()
+        live_bases = {os.path.basename(e).lower() for e in live_exes if e}
+        confirmed = {str(c).upper() for c in (confirmed_cves or set()) if c}
+        items = []   # (label, name-to-match, version, kind, bundle-path-or-None)
+        for app in inv.get("apps", []):
+            items.append((app.get("name") or app.get("bundle_id"), app.get("name"),
+                          app.get("version"), "app", app.get("path")))
+        for pkg in inv.get("brew", []):
+            items.append((pkg.get("name"), pkg.get("name"), pkg.get("version"), "brew", None))
+        for pkg in inv.get("packages", []):
+            eco = pkg.get("ecosystem")
+            items.append(("%s (%s)" % (pkg.get("name"), eco), pkg.get("name"),
+                          pkg.get("version"), "pkg:" + (eco or "").lower(), None))
+        out, seen = [], set()
+        for label, name, ver, kind, path in items:
+            words = {w for w in re.split(r"[^a-z0-9]+", (name or "").lower()) if w}
+            if not words:
+                continue
+            for tok, rec in tokens:
+                if tok not in words:                       # whole-word match only (no substrings)
+                    continue
+                cve = (rec.get("cve") or "").upper()
+                if not cve or cve in confirmed or (label, cve) in seen:
+                    continue
+                seen.add((label, cve))
+                live = (self._app_live(path, live_exes) if path
+                        else (name or "").lower() in live_bases)
+                prod_list = rec.get("product") or []
+                prod = prod_list[0] if isinstance(prod_list, list) and prod_list else (rec.get("product") or "")
+                kw = KevFeed.hunt_keyword(prod, rec.get("vendor"), rec.get("name"))
+                sql = KevFeed.hunt_sql(kw) if kw else None
+                hits = None
+                if sql and self.history:                   # piece 3: auto-run the process-hunt locally
+                    try:
+                        hits = len((self.history.query(sql) or {}).get("rows") or [])
+                    except Exception:  # noqa: BLE001 — a hunt hiccup must never break the scan
+                        hits = None
+                out.append({"component": label, "installed_version": ver, "kind": kind, "cve": cve,
+                            "vendor": rec.get("vendor"), "product": tok, "exploit_name": rec.get("name"),
+                            "service": rec.get("service"), "port": rec.get("port"),
+                            "cpe": (rec.get("cpe") or [None])[0], "mitre": rec.get("mitre") or [],
+                            "added": (rec.get("added") or "")[:10], "source": "initial-access",
+                            "version_confirmed": False, "exploit_available": True, "live": bool(live),
+                            "keyword": kw, "hunt_sql": sql, "hunt_hits": hits})
+        # most actionable first: running now, then hunt found something, then most recently added
+        out.sort(key=lambda e: (not e["live"], not (e.get("hunt_hits") or 0), _neg_date(e.get("added", ""))))
+        return out[:50]
 
     @staticmethod
     def _active(f):
@@ -5452,12 +5543,18 @@ class VulnScanner:
             inv = self.inventory.collect()
             self.osv.prepare(inv.get("packages"))       # fetch/index OSV for installed language pkgs
             now = time.time()
-            findings = self._build_findings(osc, inv, self._live_exes())
+            live_exes = self._live_exes()
+            findings = self._build_findings(osc, inv, live_exes)
             self._apply_remediation(findings, now)      # attach decisions, resolve 'patched', re-sort
             self._raise_alerts(findings)                 # EDR alert on new high-sev findings
+            confirmed = {f.get("cve") for f in findings if self._active(f) and f.get("cve")}
+            surface = self._exploit_surface(inv, live_exes, confirmed)   # P1: installed public-exploit software
+            summary = self._summary(findings)
+            summary["exploit_surface"] = len(surface)
+            summary["exploit_surface_live"] = sum(1 for e in surface if e.get("live"))
             result = {"findings": findings, "counts": inv.get("counts", {}),
-                      "os": osc, "scanned": now, "scanning": False,
-                      "error": None, "summary": self._summary(findings)}
+                      "os": osc, "scanned": now, "scanning": False, "exploit_surface": surface,
+                      "error": None, "summary": summary}
         except Exception as e:  # noqa: BLE001
             result = dict(self._result)
             result.update({"scanning": False, "error": str(e)[:200]})
@@ -11710,11 +11807,12 @@ class ShodanExposure:
     KEY_ENV = "SHODAN_API_KEY"
     MODES = ("key", "internetdb")
 
-    def __init__(self, secrets=None, path=SHODAN_SETTINGS_FILE, interval=12 * 3600, kev=None):
+    def __init__(self, secrets=None, path=SHODAN_SETTINGS_FILE, interval=12 * 3600, kev=None, ia=None):
         self.secrets = secrets or SecretStore()
         self.path = path
         self.interval = interval
         self.kev = kev                           # shared KevFeed: flag known-exploited external CVEs
+        self.ia = ia                             # shared InitialAccessFeed: flag exposed CVEs with a public exploit
         self.lock = threading.Lock()
         self.enabled = False
         self.mode = "key"
@@ -11859,6 +11957,7 @@ class ShodanExposure:
         services.sort(key=lambda s: (s["port"] is None, s["port"] or 0))
         vuln_list = list(vulns.values())
         kev_n = self._enrich_kev(vuln_list)                       # flag known-exploited, sort them first
+        ia_n = sum(1 for v in vuln_list if v.get("exploit_available"))
         sev_counts = {}
         for v in vuln_list:
             sev_counts[v["severity"]] = sev_counts.get(v["severity"], 0) + 1
@@ -11871,18 +11970,25 @@ class ShodanExposure:
                         "lat": j.get("latitude"), "lng": j.get("longitude"),
                         "hostnames": (j.get("hostnames") or [])[:8], "tags": j.get("tags") or [],
                         "last_update": j.get("last_update") or "",
-                        "ports": len(services), "vulns": len(vuln_list), "kev": kev_n,
+                        "ports": len(services), "vulns": len(vuln_list), "kev": kev_n, "ia": ia_n,
                         "screenshots": len(screenshots), "by_severity": sev_counts},
             "services": services, "vulns": vuln_list, "screenshots": screenshots}
 
     def _enrich_kev(self, vuln_list):
-        """Stamp KEV on each Shodan CVE and float known-exploited ones to the top. Returns the count."""
+        """Stamp KEV + public-exploit (VulnCheck IA) on each EXPOSED CVE and float the most urgent to
+        the top: known-exploited (KEV) first, then an internet-reachable CVE with a public initial-access
+        exploit, then by CVSS. Returns the KEV count. An exposed service carrying a CVE that already has a
+        published foothold exploit is the sharpest external-exposure signal we can raise."""
         for v in vuln_list:
             if self.kev:
                 self.kev.enrich(v)
             else:
                 v["kev"] = False
-        vuln_list.sort(key=lambda v: (not v.get("kev"),
+            if self.ia:
+                self.ia.enrich(v)                 # exposed CVE with a public initial-access exploit?
+            else:
+                v["exploit_available"] = False
+        vuln_list.sort(key=lambda v: (not v.get("kev"), not v.get("exploit_available"),
                                       -(float(v["cvss"]) if v.get("cvss") is not None else -1), v["cve"]))
         return sum(1 for v in vuln_list if v.get("kev"))
 
@@ -11895,11 +12001,13 @@ class ShodanExposure:
         vuln_list = [{"cve": c, "cvss": None, "severity": "unknown", "summary": "", "verified": False}
                      for c in sorted(cves)]
         kev_n = self._enrich_kev(vuln_list)
+        ia_n = sum(1 for v in vuln_list if v.get("exploit_available"))
         return {
             "source": "internetdb", "ip": ip,
             "summary": {"ip": ip, "org": "", "isp": "", "asn": "", "os": "", "country": "", "city": "",
                         "hostnames": (j.get("hostnames") or [])[:8], "tags": j.get("tags") or [],
                         "last_update": "", "ports": len(services), "vulns": len(vuln_list), "kev": kev_n,
+                        "ia": ia_n,
                         "screenshots": 0, "by_severity": {"unknown": len(vuln_list)} if vuln_list else {},
                         "cpes": cpes[:12]},
             "services": services, "vulns": vuln_list, "screenshots": []}
@@ -23372,7 +23480,7 @@ def main():
                               kev=cache.kev, ia=cache.ia)
     cache.vulns.start()
     cache.advisories = AdvisoryHunts()   # curated, dismissable advisory hunts (top of the Hunt tab)
-    cache.shodan = ShodanExposure(interval=args.shodan_interval, kev=cache.kev)   # opt-in external attack surface
+    cache.shodan = ShodanExposure(interval=args.shodan_interval, kev=cache.kev, ia=cache.ia)   # opt-in external attack surface
     cache.local_control = bool(args.local_control)
     cache.autohunts = AutoHuntStore()      # hunts raised by validated-malicious alerts
     cache.chat = chat                      # chat alerting (unmanaged hosts only)

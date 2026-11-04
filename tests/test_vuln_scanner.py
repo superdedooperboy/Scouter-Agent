@@ -490,6 +490,69 @@ class TestThreatCoverage(unittest.TestCase):
                 con.execute("EXPLAIN " + h["sql"])
 
 
+class TestInitialAccessP1(unittest.TestCase):
+    """VulnCheck Initial-Access P1: attack-surface cross-ref, installed public-exploit software, and
+    the auto-run process-hunt — all on facts/our-own-queries, no network."""
+
+    def _feed(self):
+        import threading
+        f = agent.InitialAccessFeed.__new__(agent.InitialAccessFeed)
+        f.enabled = True
+        f.lock = threading.Lock()
+        f.ia = {
+            "CVE-AAA": {"cve": "CVE-AAA", "vendor": "Apache", "name": "Apache Tomcat RCE",
+                        "product": ["Tomcat"], "cpe": ["cpe:2.3:a:apache:tomcat"], "mitre": ["T1190"],
+                        "service": "HTTP", "port": 8080, "added": "2026-09-01", "artifacts": {}},
+            "CVE-BBB": {"cve": "CVE-BBB", "vendor": "npm", "name": "systeminformation command injection",
+                        "product": ["systeminformation"],
+                        "cpe": ["cpe:2.3:a:systeminformation:systeminformation"], "mitre": [],
+                        "service": "HTTP", "port": 3000, "added": "2026-08-01", "artifacts": {}},
+        }
+        return f
+
+    def test_surface_tokens_from_cpe(self):
+        toks = dict(self._feed().surface_tokens())
+        self.assertIn("tomcat", toks)
+        self.assertIn("systeminformation", toks)
+
+    def test_exploit_surface_matches_product_not_version(self):
+        feed = self._feed()
+        vs = agent.VulnScanner(enabled=False, feed_url=None, osv="off")
+        vs.ia = feed
+        vs.history = type("H", (), {"query": staticmethod(lambda sql: {"rows": [{"n": 1}, {"n": 2}]})})()
+        inv = {"apps": [], "brew": [{"name": "tomcat", "version": "9.0"}, {"name": "wget", "version": "1"}],
+               "packages": [{"ecosystem": "npm", "name": "systeminformation", "version": "5.0"}]}
+        surface = vs._exploit_surface(inv, live_exes={"/usr/local/bin/tomcat"}, confirmed_cves=set())
+        by = {e["component"]: e for e in surface}
+        self.assertIn("tomcat", by)
+        self.assertIn("systeminformation (npm)", by)
+        self.assertNotIn("wget", by)                                   # whole-word: no false match
+        self.assertFalse(by["tomcat"]["version_confirmed"])            # version-unconfirmed by design
+        self.assertTrue(by["tomcat"]["exploit_available"])
+        self.assertTrue(by["tomcat"]["live"])                          # tomcat exe is "running"
+        self.assertEqual(by["tomcat"]["hunt_hits"], 2)                 # auto-hunt ran against history
+
+    def test_exploit_surface_skips_confirmed_cve(self):
+        feed = self._feed()
+        vs = agent.VulnScanner(enabled=False, feed_url=None, osv="off")
+        vs.ia = feed
+        inv = {"apps": [], "brew": [{"name": "tomcat", "version": "9.0"}], "packages": []}
+        surface = vs._exploit_surface(inv, live_exes=set(), confirmed_cves={"CVE-AAA"})
+        self.assertEqual(surface, [])                                  # already a confirmed finding
+
+    def test_shodan_cross_ref_flags_and_sorts(self):
+        feed = self._feed()
+        sh = agent.ShodanExposure.__new__(agent.ShodanExposure)
+        sh.kev = None
+        sh.ia = feed
+        vl = [{"cve": "CVE-AAA", "cvss": 5.0, "severity": "medium"},
+              {"cve": "CVE-NOPE", "cvss": 9.0, "severity": "critical"}]
+        sh._enrich_kev(vl)
+        self.assertEqual(vl[0]["cve"], "CVE-AAA")                      # IA-exploit floats above higher CVSS
+        self.assertTrue(vl[0]["exploit_available"])
+        self.assertFalse(vl[1]["exploit_available"])
+        self.assertEqual(sum(1 for v in vl if v.get("exploit_available")), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

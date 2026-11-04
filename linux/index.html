@@ -4186,18 +4186,24 @@ function vulnDrawHost(){
   ['critical','high','medium','low'].forEach(s=>{ h+='<span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:20px;padding:3px 11px;font-size:12px"><span style="width:9px;height:9px;border-radius:50%;background:'+(SEV_COLOR[s]||'var(--chip)')+'"></span>'+s+' <b>'+(bysev[s]||0)+'</b></span>'; });
   if(sum.kev) h+='<span title="known exploited in the wild (KEV) — top priority" style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--sev-critical);background:var(--sev-critical);color:#0b0e14;border-radius:20px;padding:3px 11px;font-size:12px;font-weight:700">🛑 '+sum.kev+' known exploited'+(sum.kev_ransomware?(' · '+sum.kev_ransomware+' ransomware'):'')+'</span>';
   if(live) h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--sev-high);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--sev-high)">⚡ '+live+' vulnerable &amp; running</span>';
+  if(sum.exploit_surface) h+='<span title="installed software an attacker has a published initial-access exploit for (version unconfirmed)" style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--sev-high);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--sev-high)">⚡ '+sum.exploit_surface+' public-exploit software'+(sum.exploit_surface_live?(' · '+sum.exploit_surface_live+' running'):'')+'</span>';
   if(sum.resolved) h+='<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:20px;padding:3px 11px;font-size:12px;color:var(--good)">✓ '+sum.resolved+' resolved</span>';
   var nk=(cnt.rpm!=null?'rpm':(cnt.apk!=null?'apk':'dpkg'));
   h+='<span class="hint" style="align-self:center">'+(cnt[nk]||0)+' '+nk+' · '+(cnt.packages||0)+' pkgs scanned</span>';
   h+='</div>';
   // --- two-column: findings list + detail panel ---
-  if(!findings.length){ h+='<div class="empty-big" style="color:var(--good)">No known-vulnerable software found in the current inventory.</div>'; box.innerHTML=h; return; }
-  h+='<div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">';
-  h+='<div style="flex:1;min-width:360px">'+vulnTable(active,'active');
-  if(VSHOWRES && resolved.length) h+='<div class="hint" style="margin:12px 0 4px;text-transform:uppercase;letter-spacing:.04em">Resolved</div>'+vulnTable(resolved,'resolved');
-  h+='</div>';
-  h+='<div style="width:380px;flex:none;min-width:320px">'+vulnDetailPanel(findings)+'</div>';
-  h+='</div>';
+  const surface=(d&&d.exploit_surface)||[];
+  if(!findings.length){
+    h+='<div class="empty-big" style="color:var(--good)">No known-vulnerable software found in the current inventory.</div>';
+  } else {
+    h+='<div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">';
+    h+='<div style="flex:1;min-width:360px">'+vulnTable(active,'active');
+    if(VSHOWRES && resolved.length) h+='<div class="hint" style="margin:12px 0 4px;text-transform:uppercase;letter-spacing:.04em">Resolved</div>'+vulnTable(resolved,'resolved');
+    h+='</div>';
+    h+='<div style="width:380px;flex:none;min-width:320px">'+vulnDetailPanel(findings)+'</div>';
+    h+='</div>';
+  }
+  h+=vulnSurface(surface);   // installed software with a public initial-access exploit (version-unconfirmed)
   // --- provenance / honesty ---
   const ecoBits=Object.keys((osv.ecosystems)||{}).map(e=>e+' '+((osv.ecosystems[e]||{}).records||0)).join(' · ');
   h+='<div class="hint" style="margin-top:12px">Advisory sources: APT security currency (authoritative) · '+(feed.url?('custom feed ('+feed.advisories+')'):('built-in '+feed.seed+' example'))+
@@ -4224,6 +4230,28 @@ function vulnTable(rows, kind){
        '<td style="padding:6px 8px">'+state+'</td></tr>';
   });
   return h+'</tbody></table>';
+}
+function vulnSurface(rows){
+  if(!rows || !rows.length) return '';
+  let h='<div style="margin-top:16px;border:1px solid var(--line);border-left:3px solid var(--sev-high);border-radius:8px;background:var(--panel);padding:11px 13px">';
+  h+='<div style="font-size:13px;font-weight:600;color:var(--sev-high)">⚡ Installed software with a public initial-access exploit</div>';
+  h+='<div class="hint" style="margin:3px 0 8px">Software on this host that attackers have a published, weaponized foothold exploit for (VulnCheck Initial Access). This flags the <b>product</b>, not your exact version — confirm whether the installed version is affected. Worst-first: running now, then where a process-hunt found activity.</div>';
+  h+='<table class="vtbl" style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="text-align:left;color:var(--muted);border-bottom:1px solid var(--line)">'+
+     '<th style="padding:5px 8px">Component</th><th style="padding:5px 8px">Installed</th><th style="padding:5px 8px">Exploit (CVE)</th><th style="padding:5px 8px">On host</th></tr></thead><tbody>';
+  rows.forEach(function(e){
+    var runmark = e.live ? '<span title="a process from this software is running now" style="color:var(--sev-high);font-weight:700">⚡ running</span>'
+                 : ((e.hunt_hits) ? '<span title="the process-hunt matched '+e.hunt_hits+' row(s) in history" style="color:var(--sev-medium)">hunt: '+e.hunt_hits+'</span>'
+                 : '<span class="hint" style="margin:0">installed</span>');
+    h+='<tr style="border-bottom:1px solid var(--line)">'+
+       '<td style="padding:5px 8px">'+esc(e.component||'?')+'<div class="hint" style="margin:0">'+esc(e.kind||'')+(e.port?(' · :'+esc(''+e.port)):'')+(e.service?(' · '+esc(e.service)):'')+'</div></td>'+
+       '<td style="padding:5px 8px;font-variant-numeric:tabular-nums">'+esc(e.installed_version||'—')+'</td>'+
+       '<td style="padding:5px 8px"><a href="https://nvd.nist.gov/vuln/detail/'+esc(e.cve)+'" target="_blank" rel="noopener" style="color:var(--accent);font-variant-numeric:tabular-nums">'+esc(e.cve)+'</a>'+
+         '<div class="hint" style="margin:0;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(e.exploit_name||'')+'</div></td>'+
+       '<td style="padding:5px 8px">'+runmark+'</td></tr>';
+  });
+  h+='</tbody></table>';
+  h+='<div class="hint" style="margin-top:7px;font-size:11px">Source: VulnCheck Initial Access Community (public exploits). Facts only — CVE + software identity; no exploit code is used.</div>';
+  return h+'</div>';
 }
 function vulnDetailPanel(findings){
   const f=findings.filter(x=>x.sig===VSEL)[0];
@@ -4335,6 +4363,7 @@ function shoDraw(){
     h+=tile(s.ports||0,'Open ports', s.ports?'var(--sev-medium)':'');
     h+=tile(s.vulns||0,'Known CVEs', s.vulns?'var(--sev-high)':'');
     if(s.kev) h+=tile('<span style="color:var(--sev-critical)">🛑 '+s.kev+'</span>','Known exploited');
+    if(s.ia) h+=tile('<span style="color:var(--sev-high)">⚡ '+s.ia+'</span>','Public exploit');
     if(s.screenshots) h+=tile(s.screenshots,'Screenshots');
     h+='</div>';
     // severity pills (host mode has cvss)
@@ -4379,6 +4408,7 @@ function shoDraw(){
            '<span style="display:inline-block;min-width:54px;text-align:center;background:'+shoSev(v.severity)+';color:#0b0e14;border-radius:5px;padding:0 6px;font-size:10.5px;font-weight:600">'+esc(v.severity||'')+'</span>'+
            '<a href="https://nvd.nist.gov/vuln/detail/'+esc(v.cve)+'" target="_blank" rel="noopener" style="color:var(--accent);font-variant-numeric:tabular-nums">'+esc(v.cve)+'</a>'+
            (v.kev?'<span title="known exploited in the wild'+(v.kev_ransomware?' — ransomware':'')+'" style="background:var(--sev-critical);color:#0b0e14;border-radius:4px;padding:0 5px;font-size:10px;font-weight:700">🛑 KEV</span>':'')+
+           (v.exploit_available?'<span title="a public initial-access exploit exists for this CVE (VulnCheck IA) — an internet-reachable service here carries it" style="background:var(--sev-high);color:#0b0e14;border-radius:4px;padding:0 5px;font-size:10px;font-weight:700">⚡ exploit</span>':'')+
            (v.cvss!=null?'<span class="hint" style="margin:0">CVSS '+esc(''+v.cvss)+'</span>':'')+
            (v.verified?'<span style="color:var(--good);font-size:11px">verified</span>':'')+
            (v.summary?'<span class="hint" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(v.summary)+'</span>':'')+

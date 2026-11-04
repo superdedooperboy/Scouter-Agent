@@ -74,6 +74,17 @@ and unit-tested, with anti-false-positive guards (e.g. a benign libc-linked ELF 
 not fire). Network/wire signatures (Snort/Suricata and on-the-wire YARA) are deliberately out of scope for a
 host agent and parked for the planned v2.0 XDR connectors.
 
+### Changed
+
+**Keychain Safe-Storage detection now catches the account-query form (macOS agent).** `b-chrome-safestorage`
+(critical, T1555.001) matched the service-string form (`security find-generic-password -s "Chrome Safe
+Storage"`) but not the account form — `security find-generic-password -ga "Chrome"` — that an AMOS/Odyssey
+sample was documented using on macOS 26.4+, where Apple's keychain change pushed stealers from copy-and-crack
+toward reading the browser Safe Storage key directly ([pberba](https://pberba.github.io/security/2026/10/20/amos-keychain/)).
+The account form previously tripped only the medium `b-keychain-find`; it is now pinned at critical. Also
+matches the vendor-prefixed account (`-ga "Microsoft Edge"`, `-ga "Google Chrome"`) across Chrome/Chromium/
+Brave/Edge/Arc/Opera/Vivaldi, while a non-browser account (`-ga "GitHub"`) still does not.
+
 ## [1.12.2] — 2026-11-03 (Linux agent only)
 
 ### Added

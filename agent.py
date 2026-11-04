@@ -624,7 +624,9 @@ BUILTIN_RULES = [
     _b("b-chrome-safestorage", "Chrome Safe Storage key read from the Keychain", "critical", "T1555.001",
        [_c("cmdline", "icontains", "security"),
         _c("cmdline", "regex", r"(?i)(find-generic-password|find-internet-password)"),
-        _c("cmdline", "regex", r"(?i)(chrome|brave|edge|arc|opera) safe storage")], match="all"),
+        _c("cmdline", "regex", r"(?i)((chrome|chromium|brave|edge|arc|opera|vivaldi) safe storage"
+                               r"|-\w*a\s+[\"']?(?:(?:microsoft|google)\s+)?"
+                               r"(chrome|chromium|brave|edge|arc|opera|vivaldi)\b)")], match="all"),
     _b("b-tcc-db-read", "TCC database read by a non-Apple process", "high", "T1082",
        [_c("cmdline", "regex", r"com\.apple\.TCC/TCC\.db")]),
     _b("b-apfs-snapshot-mount", "APFS local snapshot mounted (TCC bypass for protected files)",
@@ -1040,7 +1042,7 @@ _BUILTIN_DESC = {
     "b-shub-staging": "The /tmp/shub_ staging prefix named in SentinelOne's SHub Reaper analysis — a direct indicator rather than a heuristic.",
     "b-clicklock-backdoor": 'ClickLock stores its backdoor at ~/Library/Application Support/iCloudsync/iCloud. Apple ships no product by that name.',
     "b-osa-passloop": 'ClickLock kills applications in a loop and re-prompts until the user types their macOS password. An AppleScript password dialog inside a repeat loop is that pattern, and the payoff is a validated login password that unlocks the Keychain offline.',
-    "b-chrome-safestorage": "Reading a browser's Safe Storage key from the login Keychain is what turns copied cookie and password databases into plaintext. Every current macOS stealer does it.",
+    "b-chrome-safestorage": "Reading a browser's Safe Storage key from the login Keychain is what turns copied cookie and password databases into plaintext. Every current macOS stealer does it. Matches both the service-string form (`security find-generic-password -s \"Chrome Safe Storage\"`) and the account form an AMOS/Odyssey sample was observed using on macOS 26.4+ (`security find-generic-password -ga \"Chrome\"`), which otherwise only tripped the medium keychain-find rule.",
     "b-tcc-db-read": 'Direct reads of TCC.db enumerate which applications already hold Full Disk Access — reconnaissance for picking a host process, or a check that a bypass worked.',
     "b-apfs-snapshot-mount": 'Mounting an APFS local snapshot reaches TCC-protected files by a path the policy does not cover; reported against macOS 26 as a working bypass for Keychain and browser data.',
     "b-keychain-copy": "Copying login.keychain-db wholesale exfiltrates every stored secret, ready for offline cracking once the user's password is captured.",

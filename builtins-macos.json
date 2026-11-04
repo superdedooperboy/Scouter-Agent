@@ -265,10 +265,10 @@
     {
      "field": "cmdline",
      "op": "regex",
-     "value": "(?i)(chrome|brave|edge|arc|opera) safe storage"
+     "value": "(?i)((chrome|chromium|brave|edge|arc|opera|vivaldi) safe storage|-\\w*a\\s+[\\\"']?(?:(?:microsoft|google)\\s+)?(chrome|chromium|brave|edge|arc|opera|vivaldi)\\b)"
     }
    ],
-   "description": "Reading a browser's Safe Storage key from the login Keychain is what turns copied cookie and password databases into plaintext. Every current macOS stealer does it.",
+   "description": "Reading a browser's Safe Storage key from the login Keychain is what turns copied cookie and password databases into plaintext. Every current macOS stealer does it. Matches both the service-string form (`security find-generic-password -s \"Chrome Safe Storage\"`) and the account form an AMOS/Odyssey sample was observed using on macOS 26.4+ (`security find-generic-password -ga \"Chrome\"`), which otherwise only tripped the medium keychain-find rule.",
    "confidence": 4,
    "confidence_label": "certain"
   },

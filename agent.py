@@ -92,7 +92,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.12.0"
+__version__ = "1.12.1"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -927,7 +927,9 @@ RULE_CONFIDENCE = {
     "b-forensic-wipe": 4,        # nothing legitimate deletes .fseventsd / the unified-log store / TCC.db
     "b-dns-exfil": 3,            # DNS tunnelling has no benign form
     "b-clipboard-exec": 3,       # pbpaste into a shell — the ClickFix paste-and-run pattern
-    "b-clickfix-paste": 4,       # a remote-exec one-liner that is ALSO on the clipboard — pasted, not typed
+    # b-clickfix-paste is NOT a BUILTIN_RULE: the browser bridge stamps that hit dynamically with
+    # its own confidence (4) at the point it raises the alert. It is also a critical-severity
+    # detection, so the severity seed already yields 4 — a table entry here would merely restate it.
 
     # -- serious if real, but routine administration and developer tooling produce it -------------
     "b-curlpipe": 2,             # rustup / Homebrew / nvm are all installed by curl | sh

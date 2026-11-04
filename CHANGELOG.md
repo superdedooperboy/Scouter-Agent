@@ -6,6 +6,22 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## [1.12.1] — 2026-11-03
+
+### Fixed
+
+**Factory catalogs regenerated so the Mesh seeds `block_domain`.** The browser-defense
+`block_domain` response (shipped in 1.12.0) was a visible action in the agent but was missing from
+the exported `playbook-<plat>.json` factory libraries the Mesh seeds its fleet from — so an enrolled
+host would not have received it. Regenerated both playbooks via `tools/gen-mesh-builtins.py`; no
+rule, floor, or workflow logic changed.
+
+**Confidence table no longer rates a non-existent built-in.** The macOS detection-confidence table
+carried an entry for `b-clickfix-paste`, which is not a `BUILTIN_RULES` rule — the browser bridge
+stamps that hit dynamically with its own confidence. The entry was dead (and, at `certain` for a
+`critical`-severity detection, merely restated the severity seed), so it is removed. No change to how
+any ClickFix detection is scored or acted on.
+
 ## [1.12.0] — 2026-11-02
 
 ### Added

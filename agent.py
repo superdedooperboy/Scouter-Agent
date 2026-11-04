@@ -820,6 +820,9 @@ BUILTIN_RULES = [
     _b("b-lin-server-shell", "Shell spawned by an internet-facing service (possible webshell/RCE)", "critical", "T1505.003",
        [_c("ancestry", "regex", r"(httpd|nginx|apache2?|tomcat|java|node|deno|bun|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|postgres|mysqld)"),
         _c("label", "regex", r"^(sh|bash|zsh|dash|ksh|python3?(\.\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$")], match="all"),
+    _b("b-exiftool-shell", "Shell spawned by ExifTool (metadata-parser exploitation)", "critical", "T1203",
+       [_c("ancestry", "regex", r"\bexiftool\b"),
+        _c("label", "regex", r"^(sh|bash|zsh|dash|ksh|python3?(\.\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$")], match="all"),
     _b("b-litellm-c2", "LiteLLM supply-chain C2 indicator in command line", "critical", "T1195.002",
        [_c("cmdline", "regex", r"(letters9813/pythonclient-test|remote_code_loader\.lock|/codepy(\b|$)|www\.litellm\.dev)")]),
     _b("b-litellm-artifact", "LiteLLM supply-chain malware artifact on disk", "critical", "T1195.002",
@@ -1221,6 +1224,12 @@ _BUILTIN_DESC = {
         "viewer. Those applications open untrusted content; they have no legitimate reason to spawn a shell, so this "
         "is the classic exploitation / malicious-macro / drive-by chain. Lineage-based, so it fires regardless of what "
         "the command line says \u2014 renaming the payload doesn't help.",
+    "b-exiftool-shell": "A shell or interpreter whose ANCESTRY includes exiftool. ExifTool parses untrusted "
+        "uploaded/processed media to read/strip metadata and has no legitimate reason to spawn a shell; a shell under "
+        "it is the classic metadata-parser exploitation chain (a malicious DjVu/image field injected into an ExifTool "
+        "argument), the primitive behind document-conversion RCEs such as the Gotenberg path (CVE-2026-42589) and the "
+        "historic ImageMagick/ExifTool DjVu injection. Lineage-based, so it fires no matter what the shell's command "
+        "line says. Translated from a VulnCheck Initial Access Community process_creation Sigma rule.",
     "b-lin-server-shell": "A shell or interpreter spawned by an internet-facing service (web server, app server, "
         "database). This is the signature of a webshell or successful remote code execution against that service, and "
         "is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells. Covers the "
@@ -6377,6 +6386,22 @@ class WebshellScanner:
                            "sinks": cls["sinks"], "markers": cls["markers"],
                            "finding": cls["finding"], "hashes": {"status": "n/a"}}}
 
+    @staticmethod
+    def _ia_node(path, st, ia, location):
+        sev = ia["severity"]
+        score = {"critical": 92, "high": 82, "medium": 60}.get(sev, 70)
+        base = os.path.basename(path)
+        finding = "%s — %s" % (ia["cve"], ia["name"])
+        txt = "Initial-access exploit artifact on disk: %s (%s)." % (finding, path)
+        return {"id": "ia-artifact:%s:%s" % (ia["cve"], path), "type": "file",
+                "label": "exploit artifact: %s" % base,
+                "score": score, "severity": sev,
+                "reasons": [reason(txt, ia["mitre"], score)],
+                "detail": {"category": "ia-artifact", "path": path, "size": st.st_size,
+                           "mtime": int(st.st_mtime), "cve": ia["cve"], "artifact": ia["name"],
+                           "location": location, "finding": finding, "source": "VulnCheck IAC",
+                           "hashes": {"status": "n/a"}}}
+
     def _collect(self):
         now, scanned, found = int(time.time()), 0, {}
 
@@ -6397,6 +6422,13 @@ class WebshellScanner:
             if cls:
                 loc = "session" if cls["is_session"] else ("webroot" if in_webroot else "drop")
                 n = self._node(p, lst, cls, loc)
+                found[n["id"]] = (now, n)
+            # Same bytes, second pass: a dropped initial-access exploit *binary* artifact (a Fastjson
+            # gadget class, a malicious MATLAB/HDF5 blob, or an ELF reverse-shell .so staged on a Mac).
+            # Byte-magic + unmistakable string combos, so it never collides with the webshell bar above.
+            ia = scan_data_for_ia_artifact(data)
+            if ia:
+                n = self._ia_node(p, lst, ia, "webroot" if in_webroot else "drop")
                 found[n["id"]] = (now, n)
 
         # DROP zones — flat scan; read every bounded regular file, because a disguised shell can wear
@@ -6457,6 +6489,299 @@ class WebshellScanner:
                 if k not in self.flagged:
                     self.flagged[k] = v                        # flag once; keep for TTL even if deleted
             cutoff = now - WEBSHELL_NODE_TTL
+            self.flagged = {k: v for k, v in self.flagged.items() if v[0] >= cutoff}
+            self.scanned = scanned
+
+
+# ---------------------------------------------------------------------------
+# Initial-access exploit-artifact detection (VulnCheck IAC host-translations)
+# ---------------------------------------------------------------------------
+# Host-side signatures translated from the detection content shipped alongside
+# VulnCheck's "Initial Access Community" repo (github.com/vulncheck-oss/
+# initial-access-community, Apache-2.0). We reimplement the *matching logic* in
+# pure Python against the same public indicators; no rule file is copied. These
+# complement the InitialAccessFeed (which prioritizes *vulnerable inventory*):
+# here we look for the forensic trace an exploit leaves on the host it already hit
+# — a dropped payload binary, or a telltale line in an application's own logs.
+#
+# Shared verbatim with the Linux agent; only the default log *paths* below differ
+# (macOS/Homebrew locations). Most of these products are server software a Mac
+# would host only in a dev install, but the signatures are OS-agnostic and the
+# scanners are bounded + read-only, so the parity costs almost nothing.
+
+# (at0/at512 = bytes required at that offset; all = every substring present;
+#  any_of = at least one present; any_groups = at least one group fully present.)
+IA_BINARY_SIGNATURES = (
+    {"cve": "CVE-2026-33032", "name": "ELF reverse-shell shared object (constructor backdoor)",
+     "severity": "critical", "mitre": "T1505",
+     "at0": b"\x7fELF",
+     "all": [b".init_array", b"system", b"fork", b"setsid"],
+     "any_groups": [[b"/dev/tcp/", b"bash -i"], [b"mkfifo", b"s_client"]]},
+    {"cve": "CVE-2026-16723", "name": "Fastjson deserialization gadget class",
+     "severity": "high", "mitre": "T1190",
+     "at0": b"\xca\xfe\xba\xbe",
+     "all": [b"jar:file:/proc/self/fd/",
+             b"Lcom/alibaba/fastjson/annotation/JSONType;", b"RuntimeVisibleAnnotations"]},
+    {"cve": "CVE-2026-66066", "name": "Malicious MATLAB/HDF5 payload",
+     "severity": "high", "mitre": "T1190",
+     "at0": b"MATLAB 5.0",
+     "at512": b"\x89HDF\r\n\x1a\n",
+     "any_of": [b"/proc/", b"/etc/passwd", b"/etc/shadow", b"master.key"]},
+)
+
+
+def scan_data_for_ia_artifact(data):
+    """Return the first IA_BINARY_SIGNATURES match for `data` (bytes), else None. Pure + testable.
+    A signature with no positive condition can never match (guards against an empty rule)."""
+    if not data:
+        return None
+    for sig in IA_BINARY_SIGNATURES:
+        matched = False
+        a0 = sig.get("at0")
+        if a0 is not None:
+            if not data.startswith(a0):
+                continue
+            matched = True
+        a512 = sig.get("at512")
+        if a512 is not None:
+            if data[512:512 + len(a512)] != a512:
+                continue
+            matched = True
+        alls = sig.get("all")
+        if alls:
+            if not all(s in data for s in alls):
+                continue
+            matched = True
+        anyof = sig.get("any_of")
+        if anyof:
+            if not any(s in data for s in anyof):
+                continue
+            matched = True
+        groups = sig.get("any_groups")
+        if groups:
+            if not any(all(s in data for s in g) for g in groups):
+                continue
+            matched = True
+        if matched:
+            return {"cve": sig["cve"], "name": sig["name"],
+                    "severity": sig["severity"], "mitre": sig["mitre"]}
+    return None
+
+
+IA_LOG_MAX_TAIL = 262144             # bytes read per log file (last 256K — recent activity)
+IA_LOG_FILE_CAP = 1000               # log files opened per pass (bounded)
+IA_LOG_NODE_TTL = 24 * 3600          # keep a flagged log artifact ~24h for triage
+
+# Each signature: a group fires when ALL of its conditions hold; the signature fires when ANY group
+# does. Conditions: all=[bytes present], iall=[case-insensitive present], count={needle,min}, regex=
+# [compiled, all must search]. `files` gates on the log's basename (substring, case-insensitive); an
+# empty `files` means "scan every configured log". Translated from VulnCheck IAC YARA/Sigma.
+IA_LOG_SIGNATURES = (
+    {"cve": "CVE-2025-8110", "name": "Gogs PutContents path-traversal RCE", "product": "Gogs",
+     "severity": "high", "mitre": "T1190", "files": ("gogs.log",),
+     "any": [{"all": [b"[ERROR]", b"api/v1/repo/contents.go:", b"PutContents()"]}]},
+    {"cve": "CVE-2026-61500", "name": "HFS SRP-bypass _executeCommand RCE", "product": "HFS",
+     "severity": "critical", "mitre": "T1190", "files": ("access.log",),
+     "any": [{"count": {"needle": b"POST /~/api/loginSrp1", "min": 6},
+              "all": [b"POST /~/api/_executeCommand"]}]},
+    {"cve": "CVE-2026-63030", "name": "WordPress batch upload-plugin webshell drop (wp2shell)",
+     "product": "WordPress", "severity": "high", "mitre": "T1190",
+     "files": ("access.log", "access_log"),
+     "any": [{"iall": [b"/batch/v1", b"action=upload-plugin"]}]},
+    {"cve": "CVE-2026-63077", "name": "TeamCity XStream deserialization RCE", "product": "TeamCity",
+     "severity": "critical", "mitre": "T1190", "files": ("teamcity-server.log",),
+     "any": [{"all": [b"jetbrains.buildServer.agentServer.polling.Error.fromXml",
+                      b"com.thoughtworks.xstream.security.ForbiddenClassException",
+                      b"HSQLMetadataStorage$SchemaMismatchException"]},
+             {"all": [b"jetbrains.buildServer.agentServer.polling.Error.fromXml",
+                      b"org.apache.commons.collections.keyvalue.TiedMapEntry",
+                      b"org.apache.commons.dbcp2.BasicDataSource"]}]},
+    {"cve": "CVE-2026-82329", "name": "JFrog Artifactory JWT 'kid' auth-bypass", "product": "Artifactory",
+     "severity": "high", "mitre": "T1190", "files": (),
+     "any": [{"all": [b"M2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJi"]},
+             {"all": [b"YjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4"]},
+             {"all": [b"ZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1"]}]},
+    {"cve": "CVE-2026-85706", "name": "GitLab arbitrary-file-read via file.path", "product": "GitLab",
+     "severity": "high", "mitre": "T1190", "files": ("api_json.log",),
+     "any": [{"regex": [re.compile(
+         rb'"key":"file\.path","value":"/(etc|root|proc|var/log|var/opt/gitlab/gitlab-rails/etc'
+         rb'|opt/gitlab/embedded/service/gitlab-rails/config|home/git/gitlab/config)/')]}]},
+    {"cve": "CVE-2021-21315", "name": "systeminformation getServices command injection",
+     "product": "systeminformation", "severity": "high", "mitre": "T1190",
+     "files": ("access.log", "access_log"),
+     "any": [{"regex": [re.compile(
+         rb"/api/getServices\?[^\r\n]{0,512}(name%5[Bb]%5[Dd]=%24%28|name\[\]=\$\("
+         rb"|name%5[Bb]%5[Dd]=%60|name\[\]=`)")]}]},
+    {"cve": "CVE-2026-34197", "name": "ActiveMQ Jolokia DiscoveryNetworkConnector RCE", "product": "ActiveMQ",
+     "severity": "high", "mitre": "T1190", "files": ("activemq.log",),
+     "any": [{"all": [b"Establishing network connection from", b"vm://localhost",
+                      b"DiscoveryNetworkConnector:NC:BrokerService[localhost] started",
+                      b"ERROR | Failed to load: URL [http"]}]},
+    {"cve": "CVE-2026-73570", "name": "Zimbra postfix VRFY command pipelining RCE", "product": "Zimbra/postfix",
+     "severity": "high", "mitre": "T1190", "files": ("maillog", "mail.log"),
+     "any": [{"all": [b"improper command pipelining after VRFY", b"Service status change",
+                      b"changed from stopped to running"]}]},
+    {"cve": "CVE-2026-48939", "name": "iCagenda Joomla unrestricted .php upload", "product": "Joomla/iCagenda",
+     "severity": "high", "mitre": "T1190", "files": ("access.log", "access_log"),
+     "any": [{"all": [b"jform[file]"], "regex": [re.compile(rb"\.(php|pht|phar)", re.I)]}]},
+    {"cve": "CVE-2026-25939", "name": "FUXA onRunScript / set-script command execution", "product": "FUXA",
+     "severity": "critical", "mitre": "T1190", "files": (),
+     "any": [{"all": [b"/api/projectData", b'"cmd"', b'"set-script"', b'"mode"',
+                      b'"SERVER"', b'"parameters"']},
+             {"all": [b"/api/scheduler", b'"action":"onRunScript"', b'"eventTrigger"',
+                      b'"actoptions"']}]},
+)
+
+
+def scan_log_data_for_ia(data, filename=""):
+    """Return the first IA_LOG_SIGNATURES match for `data` (the bytes of a log, typically its tail),
+    else None. `filename` gates signatures on the log's basename when given. Pure + testable."""
+    if not data:
+        return None
+    base = os.path.basename(filename).lower() if filename else ""
+    low = None                                  # lazy lower-cased copy, only if an iall needs it
+    for sig in IA_LOG_SIGNATURES:
+        files = sig.get("files")
+        if files and base and not any(f in base for f in files):
+            continue
+        for group in sig["any"]:
+            alls = group.get("all")
+            if alls and not all(s in data for s in alls):
+                continue
+            iall = group.get("iall")
+            if iall:
+                if low is None:
+                    low = data.lower()
+                if not all(s.lower() in low for s in iall):
+                    continue
+            cnt = group.get("count")
+            if cnt and data.count(cnt["needle"]) < cnt["min"]:
+                continue
+            rxs = group.get("regex")
+            if rxs and not all(r.search(data) for r in rxs):
+                continue
+            return {"cve": sig["cve"], "name": sig["name"], "product": sig.get("product", ""),
+                    "severity": sig["severity"], "mitre": sig["mitre"]}
+    return None
+
+
+# Known log files of the affected products, macOS/Homebrew locations (Intel /usr/local + Apple-Silicon
+# /opt/homebrew + system paths). Globs are re-expanded each pass. Add paths/globs with --ia-log-file.
+IA_LOG_SCAN_FILES = (
+    "/var/log/apache2/access_log", "/var/log/mail.log",
+    "/usr/local/var/log/httpd/access_log", "/usr/local/var/log/nginx/access.log",
+    "/opt/homebrew/var/log/httpd/access_log", "/opt/homebrew/var/log/nginx/access.log",
+    "/usr/local/var/log/activemq/activemq.log", "/opt/homebrew/var/log/activemq/activemq.log",
+    "/usr/local/var/log/gogs/gogs.log", "/opt/homebrew/var/log/gogs/gogs.log",
+)
+IA_LOG_SCAN_GLOBS = (
+    "/usr/local/var/log/*access*", "/opt/homebrew/var/log/*access*",
+    "/usr/local/var/log/httpd/*access*", "/opt/homebrew/var/log/httpd/*access*",
+    "/usr/local/var/log/nginx/*access*", "/opt/homebrew/var/log/nginx/*access*",
+    "/Applications/TeamCity*/logs/teamcity-server.log",
+    os.path.expanduser("~/Library/Logs/TeamCity/teamcity-server.log"),
+)
+
+
+class IALogScanner:
+    """Bounded, read-only tail-scanner over the known application log files of the products covered by
+    IA_LOG_SIGNATURES. It looks for the forensic trace an initial-access exploit leaves in a product's
+    own logs (e.g. a TeamCity XStream gadget stack-trace, HFS SRP-bypass + _executeCommand, a GitLab
+    arbitrary-file-read path). Each (CVE, file) pair is flagged once and kept ~24h for triage. Signatures
+    are host-translations of VulnCheck IAC detection content (Apache-2.0); no rule file is copied."""
+
+    def __init__(self, enabled=True, interval=300, files=IA_LOG_SCAN_FILES,
+                 globs=IA_LOG_SCAN_GLOBS, extra=None):
+        self.enabled = enabled
+        self.interval = max(60, interval)
+        self.files = tuple(files)
+        self.globs = tuple(globs) + tuple(extra or ())    # extras may be plain paths or globs
+        self.lock = threading.Lock()
+        self.flagged = {}                 # nid -> (first_flagged_ts, node)
+        self.scanned = 0
+        self.started = False
+
+    def start(self):
+        if not self.enabled or self.started:
+            return
+        self.started = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                self._collect()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(self.interval)
+
+    def snapshot(self):
+        with self.lock:
+            return [n for _, n in self.flagged.values()]
+
+    def summary(self):
+        with self.lock:
+            return {"enabled": True, "scanned": self.scanned, "flagged": len(self.flagged),
+                    "signatures": len(IA_LOG_SIGNATURES)}
+
+    def _paths(self):
+        seen, out = set(), []
+        for f in self.files:
+            if f not in seen:
+                seen.add(f)
+                out.append(f)
+        for g in self.globs:
+            for p in glob.glob(g):
+                if p not in seen:
+                    seen.add(p)
+                    out.append(p)
+        return out
+
+    @staticmethod
+    def _node(path, st, ia):
+        sev = ia["severity"]
+        score = {"critical": 92, "high": 82, "medium": 60}.get(sev, 70)
+        base = os.path.basename(path)
+        finding = "%s — %s" % (ia["cve"], ia["name"])
+        txt = ("Initial-access exploit trace in an application log: %s (%s). The %s log shows the "
+               "forensic signature of this exploit." % (finding, path, ia.get("product") or "server"))
+        return {"id": "ia-log:%s:%s" % (ia["cve"], path), "type": "file",
+                "label": "exploit log trace: %s" % base,
+                "score": score, "severity": sev,
+                "reasons": [reason(txt, ia["mitre"], score)],
+                "detail": {"category": "ia-log", "path": path, "size": st.st_size,
+                           "mtime": int(st.st_mtime), "cve": ia["cve"], "artifact": ia["name"],
+                           "product": ia.get("product", ""), "finding": finding,
+                           "source": "VulnCheck IAC", "hashes": {"status": "n/a"}}}
+
+    def _collect(self):
+        now, scanned, found = int(time.time()), 0, {}
+        for p in self._paths():
+            if scanned >= IA_LOG_FILE_CAP:
+                break
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode) or st.st_size == 0:
+                continue
+            try:
+                with open(p, "rb") as f:
+                    if st.st_size > IA_LOG_MAX_TAIL:
+                        f.seek(st.st_size - IA_LOG_MAX_TAIL)
+                    data = f.read(IA_LOG_MAX_TAIL)
+            except OSError:
+                continue
+            scanned += 1
+            ia = scan_log_data_for_ia(data, p)
+            if ia:
+                n = self._node(p, st, ia)
+                found[n["id"]] = (now, n)
+        with self.lock:
+            for k, v in found.items():
+                if k not in self.flagged:
+                    self.flagged[k] = v                    # flag once; keep for TTL even if rotated away
+            cutoff = now - IA_LOG_NODE_TTL
             self.flagged = {k: v for k, v in self.flagged.items() if v[0] >= cutoff}
             self.scanned = scanned
 
@@ -14629,7 +14954,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
                 auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                 posture=None, shellhist=None, rules=None, sqldet=None, browser_threats=None, suppressions=None,
                 responder=None, esf=None, incident_store=None, history=None, decoys=None,
-                provenance=None, webshell=None):
+                provenance=None, webshell=None, ialog=None):
     t0 = time.time()
     procs = collect_processes()
     net = collect_network()
@@ -14965,6 +15290,11 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         for item in webshell.snapshot():
             add_node(item)
 
+    # --- initial-access exploit-log traces (VulnCheck IAC host-translations) ---
+    if ialog:
+        for item in ialog.snapshot():
+            add_node(item)
+
     # --- ESF real-time nodes (ephemeral exec-and-exit processes + new files in watched dirs) ---
     if esf:
         for item in esf.snapshot():
@@ -15172,6 +15502,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         "shell": shellhist.summary() if shellhist else {"enabled": False},
         "provenance": provenance.summary() if provenance else {"enabled": False},
         "webshell": webshell.summary() if webshell else {"enabled": False},
+        "ialog": ialog.summary() if ialog else {"enabled": False},
         "esf": esf.summary() if esf else {"enabled": False},
         "incidents": incidents_meta,
         "rules": {"enabled": bool(rules), "builtin": len(BUILTIN_RULES),
@@ -15198,7 +15529,7 @@ class SnapshotCache:
                  posture=None, shellhist=None, rules=None, sqldet=None, vr=None, responder=None,
                  lifecycle=None, ai=None, suppressions=None, ntfy=None, esf=None, incidents=None,
                  exporter=None, attack=None, decoys=None, provenance=None, webshell=None,
-                 accepted=None):
+                 ialog=None, accepted=None):
         self.interval = interval
         self.no_sig = no_sig
         self.sig = SignatureChecker(enabled=not no_sig)
@@ -15229,6 +15560,7 @@ class SnapshotCache:
         self.decoys = decoys
         self.provenance = provenance
         self.webshell = webshell
+        self.ialog = ialog
         self.accepted = accepted             # analyst-accepted "known noise" dets (fidelity view)
         self.lock = threading.Lock()
         self.data = None
@@ -15273,7 +15605,7 @@ class SnapshotCache:
                                suppressions=self.suppressions, responder=self.responder,
                                esf=self.esf, incident_store=self.incidents,
                                history=self.history, decoys=self.decoys,
-                               provenance=self.provenance, webshell=self.webshell)
+                               provenance=self.provenance, webshell=self.webshell, ialog=self.ialog)
             if self.history:
                 data["meta"]["history"] = self.history.stats()
             if self.decoys:
@@ -23154,6 +23486,12 @@ def main():
                     help="extra DROP dir to webshell-scan, loose bar (repeatable; e.g. a custom session.save_path)")
     ap.add_argument("--webshell-webroot", action="append", default=[], metavar="DIR",
                     help="extra WEBROOT to webshell-scan, strict bar (repeatable; e.g. a non-standard docroot)")
+    ap.add_argument("--no-ia-log-scan", action="store_true",
+                    help="disable the initial-access exploit-log scan (VulnCheck IAC host-translations)")
+    ap.add_argument("--ia-log-interval", type=int, default=300,
+                    help="seconds between initial-access exploit-log scans (default 300)")
+    ap.add_argument("--ia-log-file", action="append", default=[], metavar="PATH",
+                    help="extra log file or glob to scan for initial-access exploit traces (repeatable)")
     ap.add_argument("--no-esf", action="store_true",
                     help="disable real-time Endpoint Security events (eslogger; needs sudo, macOS 13+)")
     ap.add_argument("--esf-ephemeral-secs", type=float, default=ESF_EPHEMERAL_MAX_LIFETIME,
@@ -23385,6 +23723,9 @@ def main():
                                dirs=tuple(WEBSHELL_SCAN_DIRS) + tuple(args.webshell_dir or ()),
                                webroots=_ws_webroots)
     webshell.start()
+    ialog = IALogScanner(enabled=not args.no_ia_log_scan, interval=args.ia_log_interval,
+                         extra=tuple(args.ia_log_file or ()))
+    ialog.start()
     esf = ESFCollector(history=history, enabled=not args.no_esf,
                        ephemeral_lifetime=args.esf_ephemeral_secs)
     esf.start()
@@ -23438,7 +23779,7 @@ def main():
                           rules=rules, sqldet=sqldet, vr=vr, responder=responder,
                           lifecycle=lifecycle, ai=ai, suppressions=suppressions, ntfy=ntfy, esf=esf,
                           incidents=incidents, exporter=exporter, attack=attack, decoys=decoys,
-                          provenance=provenance, webshell=webshell, accepted=accepted)
+                          provenance=provenance, webshell=webshell, ialog=ialog, accepted=accepted)
     cache.analyses = analyses          # exposed to the ai-analyze handler + the /api/ai-analysis reader
     cache.updater = updater            # served by /api/health + /api/update
     cache.ioc = ioc                    # IOC-feed matcher, for the browser-extension verdict endpoint
@@ -23578,6 +23919,11 @@ def main():
               f"PHP/JSP/ASP/Perl/Python, every {args.webshell_interval}s")
     else:
         print("│  Webshell:   off")
+    if ialog.enabled:
+        print(f"│  IA logs:    {len(IA_LOG_SIGNATURES)} exploit-log signature(s) (VulnCheck IAC), "
+              f"every {args.ia_log_interval}s")
+    else:
+        print("│  IA logs:    off")
     if tcc.enabled:
         ts = tcc.summary()
         access = ("reading TCC.db" if ts["accessible"]

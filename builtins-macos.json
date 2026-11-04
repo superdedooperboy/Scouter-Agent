@@ -1,6 +1,6 @@
 {
  "platform": "macOS",
- "count": 113,
+ "count": 114,
  "rules": [
   {
    "id": "b-revshell",
@@ -2254,6 +2254,31 @@
     }
    ],
    "description": "A shell or interpreter spawned by an internet-facing service (web server, app server, database). This is the signature of a webshell or successful remote code execution against that service, and is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells. Covers the PHP web-worker set (php-fpm, php-cgi, FrankenPHP, LiteSpeed, and mod_php via apache/httpd), so a PHP2Shell (CVE-2026-109618 / CVE-2026-109619) RCE that lands a shell is caught here. The Node runtime family (node, deno, bun) is covered too, so a Node2Shell (CVE-2026-111497) or any Node app RCE that spawns a shell is caught the same way.",
+   "confidence": 4,
+   "confidence_label": "certain"
+  },
+  {
+   "id": "b-exiftool-shell",
+   "name": "Shell spawned by ExifTool (metadata-parser exploitation)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "critical",
+   "mitre": "T1203",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "ancestry",
+     "op": "regex",
+     "value": "\\bexiftool\\b"
+    },
+    {
+     "field": "label",
+     "op": "regex",
+     "value": "^(sh|bash|zsh|dash|ksh|python3?(\\.\\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$"
+    }
+   ],
+   "description": "A shell or interpreter whose ANCESTRY includes exiftool. ExifTool parses untrusted uploaded/processed media to read/strip metadata and has no legitimate reason to spawn a shell; a shell under it is the classic metadata-parser exploitation chain (a malicious DjVu/image field injected into an ExifTool argument), the primitive behind document-conversion RCEs such as the Gotenberg path (CVE-2026-42589) and the historic ImageMagick/ExifTool DjVu injection. Lineage-based, so it fires no matter what the shell's command line says. Translated from a VulnCheck Initial Access Community process_creation Sigma rule.",
    "confidence": 4,
    "confidence_label": "certain"
   },

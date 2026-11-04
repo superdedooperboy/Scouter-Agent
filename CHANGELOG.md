@@ -41,11 +41,13 @@ Building on the feed above:
 - *Auto-hunts.* Each of those matches auto-runs its process-hunt against the local history database and
   carries the hit count, turning "installed" into "installed and actually running here."
 
-**Initial-access exploit-artifact detection on the host (Linux agent).** Where the feed above prioritizes
+**Initial-access exploit-artifact detection on the host (both agents).** Where the feed above prioritizes
 *vulnerable inventory*, this looks for the forensic trace an exploit leaves on a host it has already hit.
 Three complementary surfaces, all host-translations of the detection content that ships alongside the same
 VulnCheck Initial Access Community repo (Apache-2.0 — the matching logic is reimplemented in pure Python;
-no rule file is copied):
+no rule file is copied). The signatures are OS-agnostic; the one platform difference is the exploit-log
+scanner's default log paths (Linux `/var/log` + `/opt`; macOS Homebrew `/opt/homebrew` + `/usr/local` +
+system paths):
 
 - *ExifTool metadata-parser exploitation.* A new critical built-in rule (`b-exiftool-shell`, T1203) fires
   when a shell or interpreter is spawned with `exiftool` in its ancestry. ExifTool parses untrusted uploaded
@@ -56,7 +58,9 @@ no rule file is copied):
   exploit **binaries** in its drop dirs and webroots using byte-magic + unmistakable string combinations: an
   ELF reverse-shell shared object with a constructor backdoor (CVE-2026-33032), a Fastjson deserialization
   gadget class (CVE-2026-16723), and a malicious MATLAB/HDF5 payload (CVE-2026-66066). Same bytes already
-  read for the webshell pass, so there is no extra I/O.
+  read for the webshell pass, so there is no extra I/O. The Fastjson and MATLAB signatures are cross-platform;
+  the ELF one is harmless on macOS (its magic never matches a Mach-O file) but still flags an ELF payload
+  staged on a Mac.
 - *Application-log exploit traces.* A new bounded, read-only tail-scanner (`IALogScanner`) reads the known
   log files of the affected products and matches the telltale line an exploit leaves behind — eleven
   signatures spanning Gogs (CVE-2025-8110), HFS (CVE-2026-61500), WordPress (CVE-2026-63030), TeamCity

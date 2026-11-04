@@ -2046,6 +2046,18 @@ function renderDetail(id){
             ['confidence', det.markers&&det.markers.length?'named-shell signature':(det.strict?'high (input→sink)':'disguised drop')],
             ['markers', (det.markers||[]).join(', ')],
             ['sinks', (det.sinks||[]).join(', ')]);
+    else if(det.category==='ia-artifact') kv.push(
+            ['finding', det.finding||det.artifact||''],
+            ['cve', det.cve||''],
+            ['artifact', det.artifact||''],
+            ['zone', det.location==='webroot'?'webroot':'drop dir'],
+            ['source', det.source||'VulnCheck IAC']);
+    else if(det.category==='ia-log') kv.push(
+            ['finding', det.finding||det.artifact||''],
+            ['cve', det.cve||''],
+            ['product', det.product||''],
+            ['artifact', det.artifact||''],
+            ['source', det.source||'VulnCheck IAC']);
     if(det.via==='esf') kv.push(['capture','⚡ real-time (Endpoint Security)'],['event',det.event],
             ['written by',det.source_app||'(unknown)']);
   } else if(n.type==='detection'){
@@ -3823,8 +3835,13 @@ function sensorCards(m){
   const ws=m.webshell||{};
   if(ws.enabled){
     push('Host inventory','Webshell scan', ws.flagged?'warn':'ok', `${ws.flagged||0} flagged`,
-         `Content-scanning ${(ws.dirs||[]).length} drop dir(s) + ${(ws.webroots||[]).length} webroot(s) · PHP/JSP/ASP/Perl/Python · ${ws.scanned||0} file(s) last pass`);
+         `Content-scanning ${(ws.dirs||[]).length} drop dir(s) + ${(ws.webroots||[]).length} webroot(s) · webshells + initial-access exploit binaries (ELF/Java/HDF5) · ${ws.scanned||0} file(s) last pass`);
   } else push('Host inventory','Webshell scan','off','—','Disabled with --no-webshell-scan.');
+  const il=m.ialog||{};
+  if(il.enabled){
+    push('Host inventory','Exploit-log scan', il.flagged?'warn':'ok', `${il.flagged||0} flagged`,
+         `Tail-scanning application logs for initial-access exploit traces · ${il.signatures||0} signature(s) (VulnCheck IAC) · ${il.scanned||0} log(s) last pass`);
+  } else push('Host inventory','Exploit-log scan','off','—','Disabled with --no-ia-log-scan.');
   const ra=m.raccess||{};
   if(ra.enabled){ const svc=(ra.services_on||[]).length;
     push('Host inventory','Remote access', svc?'warn':'ok', `${svc} service(s) on · ${ra.authorized_keys||0} authorized_keys`,

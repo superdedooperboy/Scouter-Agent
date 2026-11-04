@@ -1690,7 +1690,7 @@
     {
      "field": "ancestry",
      "op": "regex",
-     "value": "\\b(httpd|nginx|apache2|tomcat|java|node|deno|bun|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|postgres|mysqld|redis-server)\\b"
+     "value": "\\b(httpd|nginx|apache2|tomcat|java|node|deno|bun|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|cwpsrv|cwp-php\\w*|postgres|mysqld|redis-server)\\b"
     },
     {
      "field": "label",

@@ -6,6 +6,29 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## [1.12.2] — 2026-11-03 (Linux agent only)
+
+### Added
+
+**CWP2Shell advisory hunts — the Control Web Panel pre-auth RCE chain (CVE-2026-73695 + 9 more).**
+A new critical advisory in the Hunt tab for the ten CWP (CentOS Web Panel) flaws VulnCheck disclosed on
+2026-11-03. CWP ships on tens of thousands of internet-facing hosting servers; an unauthenticated
+module-dispatch local-file-include on the user panel (port 2083) runs code as the hosting PHP user, and
+the root-owned loopback user API (`127.0.0.1:2302`) then gives two independent paths to root. The
+advisory bundles five ready-to-run, read-only hunts (each with its Velociraptor/VQL twin for fleet-wide
+use): fingerprint the CWP surface on the host, catch a CWP/web worker that spawned a shell (the pre-auth
+RCE), catch a root shell spawned by the user API (the escalation), flag the loopback relay to
+`127.0.0.1:2302`, and surface `.php` webshell artifacts in world-writable paths or a CWP docroot. The
+advisory is operator-dismissable like the others.
+
+### Fixed
+
+**Webshell/RCE detection now covers CWP's custom service binaries.** The critical "shell spawned by an
+internet-facing service" rule (`b-lin-server-shell`, T1505.003) matched stock `nginx`/`php-fpm` but not
+CWP's own nginx build (`cwpsrv`) or its bundled PHP (`cwp-php*`). Added them to the rule's ancestry
+allow-list so the root shells the CWP user API spawns are caught even when the panel is fronted by its
+custom server rather than stock components.
+
 ## [1.12.1] — 2026-11-03
 
 ### Fixed

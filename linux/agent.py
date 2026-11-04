@@ -94,7 +94,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.12.1"
+__version__ = "1.12.2"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -728,7 +728,7 @@ BUILTIN_RULES = [
        [_c("ancestry", "regex", r"\b(firefox|chrome|chromium|thunderbird|evolution|libreoffice|soffice|evince|okular|slack|discord)\b"),
         _c("label", "regex", r"^(sh|bash|zsh|dash|ksh|python3?(\.\d+)?|perl|ruby|php|node|curl|wget|nc|ncat|socat)$")], match="all"),
     _b("b-lin-server-shell", "Shell spawned by an internet-facing service (possible webshell/RCE)", "critical", "T1505.003",
-       [_c("ancestry", "regex", r"\b(httpd|nginx|apache2|tomcat|java|node|deno|bun|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|postgres|mysqld|redis-server)\b"),
+       [_c("ancestry", "regex", r"\b(httpd|nginx|apache2|tomcat|java|node|deno|bun|gunicorn|uwsgi|php-fpm|php-cgi|frankenphp|lsphp|cwpsrv|cwp-php\w*|postgres|mysqld|redis-server)\b"),
         _c("label", "regex", r"^(sh|bash|zsh|dash|ksh|python3?(\.\d+)?|perl|ruby|php|node|curl|wget|nc|ncat|socat)$")], match="all"),
     _b("b-litellm-c2", "LiteLLM supply-chain C2 indicator in command line", "critical", "T1195.002",
        [_c("cmdline", "regex", r"(letters9813/pythonclient-test|remote_code_loader\.lock|/codepy(\b|$)|www\.litellm\.dev)")]),
@@ -4930,6 +4930,119 @@ def _neg_date(d):
 # the top of the Hunt tab; an operator runs them on demand and can clear (dismiss) any advisory they
 # don't need — the dismissal persists per host, and dismissed advisories can be restored.
 ADVISORY_HUNTS = [
+    {
+        "id": "cwp2shell-2026-11", "severity": "critical", "published": "2026-11-03",
+        "title": "CWP2Shell — Control Web Panel pre-auth RCE to root (CVE-2026-73695 + 9 more)",
+        "summary": "Ten disclosed flaws in Control Web Panel (CWP, formerly CentOS Web Panel), which ships on "
+            "tens of thousands of internet-facing hosting servers. An unauthenticated module-dispatch "
+            "local-file-include on the user panel (port 2083) runs code as the hosting PHP user; from there the "
+            "root-owned loopback user API (127.0.0.1:2302) gives two independent paths to root, via command "
+            "injection or a SQL-injection auth bypass. One valid account name is the only precondition. Fixed in "
+            "CWP 1.29/1.30 — upgrade, and keep the panels (2083/2031/2087) and the user API (2302) off the public "
+            "internet. These hunts find the CWP surface on this host and the post-exploitation signal.",
+        "references": ["https://www.vulncheck.com/blog/control-web-panel-pre-auth-module-dispatch-rce",
+                       "https://github.com/vulncheck-oss/initial-access-community"],
+        "hunts": [
+            {"name": "CWP control-panel surface on this host",
+             "why": "Where the exposure is — CWP's user panel (2083), admin panel (2031/2087) and the root-owned "
+                    "user API (127.0.0.1:2302), plus its custom nginx (cwpsrv) and bundled PHP under /usr/local/cwp.",
+             "sql": "SELECT proc_name, exe, laddr, lport, state,\n"
+                    "       datetime(last_seen,'unixepoch','localtime') AS last_seen\n"
+                    "FROM connections\n"
+                    "WHERE lport IN ('2083','2031','2087','2302')\n"
+                    "   OR lower(proc_name) LIKE 'cwpsrv%' OR lower(proc_name) LIKE 'cwp-php%'\n"
+                    "   OR lower(exe) LIKE '/usr/local/cwp%'\n"
+                    "ORDER BY last_seen DESC",
+             "vql": "SELECT Pid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                    "WHERE Name =~ '(?i)^(cwpsrv|cwp-php\\w*)$' OR Exe =~ '(?i)/usr/local/cwp/'\n"
+                    "LIMIT 200"},
+            {"name": "A CWP/web worker that spawned a shell (pre-auth RCE)",
+             "why": "The Finding-1 signal — the user panel includes an attacker-named module before auth, so a "
+                    "cwpsrv/php worker runs a shell (the phpini_editor rm -f and protected_directory sed -i sinks).",
+             "sql": "SELECT name, exe, cmdline, user, ppid_name,\n"
+                    "       datetime(last_seen,'unixepoch','localtime') AS last_seen\n"
+                    "FROM processes\n"
+                    "WHERE (lower(ppid_name) LIKE 'cwpsrv%' OR lower(ppid_name) LIKE 'cwp-php%'\n"
+                    "       OR lower(ppid_name) LIKE '%php-fpm%' OR lower(ppid_name) LIKE '%php-cgi%'\n"
+                    "       OR lower(ppid_name) IN ('php','lsphp','frankenphp','nginx'))\n"
+                    "  AND lower(name) IN ('sh','bash','zsh','dash','ksh','python','python3','perl','ruby',\n"
+                    "                      'curl','wget','nc','ncat','socat','id','whoami','uname','sed','grep')\n"
+                    "ORDER BY last_seen DESC",
+             "vql": "-- a cwp/web worker (parent) that spawned a shell/interpreter (child)\n"
+                    "SELECT * FROM foreach(\n"
+                    "  row={ SELECT Pid AS ChildPid, Name AS ChildName, Username AS ChildUser,\n"
+                    "               CommandLine AS ChildCmd, Ppid AS ChildPpid FROM pslist()\n"
+                    "        WHERE Name =~ '(?i)^(sh|bash|zsh|dash|ksh|python3?|perl|ruby|curl|wget|nc|ncat|socat|id|whoami|uname|sed|grep)$' },\n"
+                    "  query={ SELECT ChildPid, ChildName, ChildUser, ChildCmd, Pid AS ParentPid, Name AS ParentName\n"
+                    "          FROM pslist()\n"
+                    "          WHERE Pid = ChildPpid\n"
+                    "            AND Name =~ '(?i)(cwpsrv|cwp-php\\w*|php-fpm|php-cgi|php|lsphp|frankenphp|nginx)' })\n"
+                    "LIMIT 200"},
+            {"name": "A root shell spawned by the CWP user API (escalation to root)",
+             "why": "The Finding-2/3 signal — the loopback user API runs as root and splices request input into a "
+                    "root shell (mysql < file, ( echo ; echo ) | passwd <user>, grep -c '<user>:' /etc/passwd).",
+             "sql": "SELECT name, exe, cmdline, user, ppid_name,\n"
+                    "       datetime(last_seen,'unixepoch','localtime') AS last_seen\n"
+                    "FROM processes\n"
+                    "WHERE user='root'\n"
+                    "  AND (lower(ppid_name) LIKE 'cwpsrv%' OR lower(ppid_name) LIKE 'cwp-php%'\n"
+                    "       OR lower(ppid_name) LIKE '%php-fpm%' OR lower(ppid_name) LIKE '%php%')\n"
+                    "  AND (lower(name) IN ('passwd','mysql','grep','sh','bash','dash')\n"
+                    "       OR lower(cmdline) LIKE '%/etc/passwd%'\n"
+                    "       OR lower(cmdline) LIKE '%--defaults-extra-file%')\n"
+                    "ORDER BY last_seen DESC",
+             "vql": "-- a root child (passwd/mysql/grep/shell) whose parent is a cwp/web service\n"
+                    "SELECT * FROM foreach(\n"
+                    "  row={ SELECT Pid AS ChildPid, Name AS ChildName, Username AS ChildUser,\n"
+                    "               CommandLine AS ChildCmd, Ppid AS ChildPpid FROM pslist()\n"
+                    "        WHERE Username = 'root'\n"
+                    "          AND Name =~ '(?i)^(passwd|mysql|grep|sh|bash|dash)$' },\n"
+                    "  query={ SELECT ChildPid, ChildName, ChildUser, ChildCmd, Pid AS ParentPid, Name AS ParentName\n"
+                    "          FROM pslist()\n"
+                    "          WHERE Pid = ChildPpid\n"
+                    "            AND Name =~ '(?i)(cwpsrv|cwp-php\\w*|php-fpm|php-cgi|php|lsphp|frankenphp)' })\n"
+                    "LIMIT 200"},
+            {"name": "Loopback escalation relay to the root user API (127.0.0.1:2302)",
+             "why": "The hinge of the chain — a hosting-user/web process connecting to the root user API on "
+                    "loopback is how a hosting-user foothold reaches root. On a healthy box its only clients are "
+                    "CWP's own panel plumbing.",
+             "sql": "SELECT proc_name, exe, laddr, lport, raddr, rport,\n"
+                    "       datetime(last_seen,'unixepoch','localtime') AS last_seen\n"
+                    "FROM connections\n"
+                    "WHERE rport='2302' AND (raddr LIKE '127.%' OR raddr='::1')\n"
+                    "UNION ALL\n"
+                    "SELECT proc_name, exe, '' AS laddr, '' AS lport, raddr, rport,\n"
+                    "       datetime(ts,'unixepoch','localtime') AS last_seen\n"
+                    "FROM conn_events\n"
+                    "WHERE rport='2302' AND (raddr LIKE '127.%' OR raddr='::1')\n"
+                    "ORDER BY last_seen DESC",
+             "vql": "SELECT Pid, Name, Username, Laddr, Raddr, Status FROM netstat()\n"
+                    "WHERE Raddr.Port = 2302 AND Raddr.IP =~ '^(127\\.|::1)'\n"
+                    "LIMIT 200"},
+            {"name": "Webshell artifacts in world-writable paths or a CWP docroot",
+             "why": "The phpini_editor arbitrary-write plants a quote-free .php webshell the traversal include then "
+                    "runs — typically in /tmp, /dev/shm, a home public_html, or the CWP services tree.",
+             "sql": "SELECT 'on disk' AS seen, path,\n"
+                    "       datetime(mtime,'unixepoch','localtime') AS t\n"
+                    "FROM files\n"
+                    "WHERE (path LIKE '/tmp/%' OR path LIKE '/var/tmp/%' OR path LIKE '/dev/shm/%'\n"
+                    "       OR path LIKE '/home/%/public_html/%' OR path LIKE '/usr/local/cwpsrv/%')\n"
+                    "  AND (path LIKE '%.php' OR path LIKE '%.phtml')\n"
+                    "UNION ALL\n"
+                    "SELECT 'file event' AS seen, path,\n"
+                    "       datetime(ts,'unixepoch','localtime') AS t\n"
+                    "FROM file_events\n"
+                    "WHERE (path LIKE '/tmp/%' OR path LIKE '/var/tmp/%' OR path LIKE '/dev/shm/%'\n"
+                    "       OR path LIKE '/home/%/public_html/%' OR path LIKE '/usr/local/cwpsrv/%')\n"
+                    "  AND (path LIKE '%.php' OR path LIKE '%.phtml')\n"
+                    "ORDER BY t DESC",
+             "vql": "SELECT OSPath, Name, Size, Mtime FROM glob(globs=[\n"
+                    "  '/tmp/**/*.php', '/var/tmp/**/*.php', '/dev/shm/**/*.php',\n"
+                    "  '/home/*/public_html/**/*.php', '/usr/local/cwpsrv/var/services/**/*.php'])\n"
+                    "WHERE NOT IsDir\n"
+                    "LIMIT 500"},
+        ],
+    },
     {
         "id": "php2shell-2026-10", "severity": "critical", "published": "2026-10-21",
         "title": "PHP2Shell — unauthenticated RCE (CVE-2026-109618 / CVE-2026-109619)",

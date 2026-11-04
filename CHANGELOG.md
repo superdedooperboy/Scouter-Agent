@@ -41,6 +41,35 @@ Building on the feed above:
 - *Auto-hunts.* Each of those matches auto-runs its process-hunt against the local history database and
   carries the hit count, turning "installed" into "installed and actually running here."
 
+**Initial-access exploit-artifact detection on the host (Linux agent).** Where the feed above prioritizes
+*vulnerable inventory*, this looks for the forensic trace an exploit leaves on a host it has already hit.
+Three complementary surfaces, all host-translations of the detection content that ships alongside the same
+VulnCheck Initial Access Community repo (Apache-2.0 — the matching logic is reimplemented in pure Python;
+no rule file is copied):
+
+- *ExifTool metadata-parser exploitation.* A new critical built-in rule (`b-exiftool-shell`, T1203) fires
+  when a shell or interpreter is spawned with `exiftool` in its ancestry. ExifTool parses untrusted uploaded
+  media and has no legitimate reason to spawn a shell; a shell under it is the primitive behind
+  document-conversion RCEs such as the Gotenberg path (CVE-2026-42589) and the classic image/DjVu injection.
+  Lineage-based, so renaming the payload does not help.
+- *Dropped exploit binaries.* The existing (bounded, read-only) webshell content scan now also flags dropped
+  exploit **binaries** in its drop dirs and webroots using byte-magic + unmistakable string combinations: an
+  ELF reverse-shell shared object with a constructor backdoor (CVE-2026-33032), a Fastjson deserialization
+  gadget class (CVE-2026-16723), and a malicious MATLAB/HDF5 payload (CVE-2026-66066). Same bytes already
+  read for the webshell pass, so there is no extra I/O.
+- *Application-log exploit traces.* A new bounded, read-only tail-scanner (`IALogScanner`) reads the known
+  log files of the affected products and matches the telltale line an exploit leaves behind — eleven
+  signatures spanning Gogs (CVE-2025-8110), HFS (CVE-2026-61500), WordPress (CVE-2026-63030), TeamCity
+  (CVE-2026-63077), JFrog Artifactory (CVE-2026-82329), GitLab (CVE-2026-85706), `systeminformation`
+  (CVE-2021-21315), ActiveMQ (CVE-2026-34197), Zimbra/postfix (CVE-2026-73570), Joomla/iCagenda
+  (CVE-2026-48939) and FUXA (CVE-2026-25939). On by default; opt out with `--no-ia-log-scan`, add extra log
+  paths/globs with `--ia-log-file`.
+
+Pure-byte and pure-string matchers (`scan_data_for_ia_artifact`, `scan_log_data_for_ia`) are kept separate
+and unit-tested, with anti-false-positive guards (e.g. a benign libc-linked ELF or a single HFS probe does
+not fire). Network/wire signatures (Snort/Suricata and on-the-wire YARA) are deliberately out of scope for a
+host agent and parked for the planned v2.0 XDR connectors.
+
 ## [1.12.2] — 2026-11-03 (Linux agent only)
 
 ### Added

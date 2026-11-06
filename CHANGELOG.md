@@ -74,6 +74,17 @@ and unit-tested, with anti-false-positive guards (e.g. a benign libc-linked ELF 
 not fire). Network/wire signatures (Snort/Suricata and on-the-wire YARA) are deliberately out of scope for a
 host agent and parked for the planned v2.0 XDR connectors.
 
+**ExifTool metadata-parser RCE advisory hunt (both agents).** A new critical advisory pinned to the top of
+the Hunt tab, the retroactive companion to the `b-exiftool-shell` real-time rule: where the rule fires live,
+the advisory lets an operator sweep recorded history for the same chain. Three ready-to-run, read-only hunts,
+each with its Velociraptor/VQL twin — (1) where ExifTool runs and what drives it; (2) a shell or interpreter
+spawned under ExifTool, correlated across the exec-event history (a parent/child self-join) *and* the live
+process tree so a chain is caught whether it is running now or only in the record; (3) ExifTool invoked by an
+internet-facing service (nginx/Apache/PHP/Node/Python/Ruby/Java or a document-conversion worker such as
+Gotenberg/LibreOffice/ImageMagick), the exposure that makes the parse reachable. A schema-validation test runs
+every advisory hunt's SQL against the history schema, with a functional check that the exploitation hunt
+catches both the history and live chains and does not fire on a benign shell.
+
 ### Changed
 
 **Keychain Safe-Storage detection now catches the account-query form (macOS agent).** `b-chrome-safestorage`

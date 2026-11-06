@@ -5194,6 +5194,92 @@ class InitialAccessFeed:
 # don't need — the dismissal persists per host, and dismissed advisories can be restored.
 ADVISORY_HUNTS = [
     {
+        "id": "exiftool-shell-2026-11", "severity": "critical", "published": "2026-11-06",
+        "title": "ExifTool metadata-parser RCE — a shell spawned under ExifTool",
+        "summary": "ExifTool reads and strips metadata from untrusted media, so it sits in upload, thumbnailing "
+            "and document-conversion pipelines where it parses attacker-supplied files. A crafted field "
+            "(the classic DjVu/image injection) turns that parse into code execution as the pipeline user — the "
+            "primitive behind the historic ImageMagick/ExifTool DjVu RCE (CVE-2021-22204) and recent "
+            "document-conversion chains such as Gotenberg (CVE-2026-42589). There is never a legitimate reason for "
+            "ExifTool to spawn a shell, so a shell or interpreter anywhere under it is the exploitation signal. "
+            "These hunts find where ExifTool runs, whether a service drives it, and any shell spawned beneath it.",
+        "references": ["https://nvd.nist.gov/vuln/detail/CVE-2021-22204",
+                       "https://github.com/vulncheck-oss/initial-access-community"],
+        "hunts": [
+            {"name": "ExifTool on this host and how it is driven",
+             "why": "Where the exposure is — the exiftool binary (or a perl invocation of it) and what spawned it; a "
+                    "web/app/document-conversion parent means it is fed untrusted uploads.",
+             "sql": "SELECT 'running' AS seen, name, exe, cmdline, user, ppid_name,\n"
+                    "       datetime(last_seen,'unixepoch','localtime') AS t\n"
+                    "FROM processes\n"
+                    "WHERE lower(name) LIKE '%exiftool%' OR lower(exe) LIKE '%exiftool%'\n"
+                    "   OR lower(cmdline) LIKE '%exiftool%'\n"
+                    "UNION ALL\n"
+                    "SELECT 'executed' AS seen, '' AS name, exe, cmdline, '' AS user, '' AS ppid_name,\n"
+                    "       datetime(ts,'unixepoch','localtime') AS t\n"
+                    "FROM exec_events WHERE lower(exe) LIKE '%exiftool%' OR lower(cmdline) LIKE '%exiftool%'\n"
+                    "ORDER BY t DESC",
+             "vql": "SELECT Pid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                    "WHERE Name =~ '(?i)exiftool' OR Exe =~ '(?i)exiftool' OR CommandLine =~ '(?i)\\bexiftool\\b'\n"
+                    "LIMIT 200"},
+            {"name": "A shell or interpreter spawned under ExifTool (exploitation)",
+             "why": "The highest-fidelity signal — ExifTool parses data and must never spawn a shell; a shell, "
+                    "interpreter or network tool beneath it is the metadata-injection RCE firing.",
+             "sql": "WITH ex AS (\n"
+                    "  SELECT id, pid, ppid, exe, cmdline, ts FROM exec_events\n"
+                    "  WHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 2592000)\n"
+                    "SELECT datetime(c.ts,'unixepoch','localtime') AS t,\n"
+                    "       c.exe AS child_exe, c.cmdline AS child_cmdline, p.exe AS parent_exe, p.cmdline AS parent_cmdline\n"
+                    "FROM ex c JOIN ex p ON c.ppid = p.pid\n"
+                    "WHERE (lower(p.exe) LIKE '%exiftool%' OR lower(p.cmdline) LIKE '%exiftool%')\n"
+                    "  AND (lower(c.exe) LIKE '%/sh' OR lower(c.exe) LIKE '%/bash' OR lower(c.exe) LIKE '%/zsh'\n"
+                    "       OR lower(c.exe) LIKE '%/dash' OR lower(c.exe) LIKE '%/ksh'\n"
+                    "       OR lower(c.exe) LIKE '%/python' OR lower(c.exe) LIKE '%/python3'\n"
+                    "       OR lower(c.exe) LIKE '%/perl' OR lower(c.exe) LIKE '%/ruby' OR lower(c.exe) LIKE '%/php'\n"
+                    "       OR lower(c.exe) LIKE '%/node'\n"
+                    "       OR lower(c.exe) LIKE '%/curl' OR lower(c.exe) LIKE '%/wget'\n"
+                    "       OR lower(c.exe) LIKE '%/nc' OR lower(c.exe) LIKE '%/ncat' OR lower(c.exe) LIKE '%/socat')\n"
+                    "UNION ALL\n"
+                    "SELECT datetime(last_seen,'unixepoch','localtime') AS t,\n"
+                    "       exe AS child_exe, cmdline AS child_cmdline, ppid_name AS parent_exe, '' AS parent_cmdline\n"
+                    "FROM processes\n"
+                    "WHERE lower(ppid_name) LIKE '%exiftool%'\n"
+                    "  AND lower(name) IN ('sh','bash','zsh','dash','ksh','python','python3','perl','ruby','php',\n"
+                    "                      'node','curl','wget','nc','ncat','socat')\n"
+                    "ORDER BY t DESC",
+             "vql": "-- a shell/interpreter (child) whose parent is exiftool (or a perl running exiftool)\n"
+                    "SELECT * FROM foreach(\n"
+                    "  row={ SELECT Pid AS ChildPid, Name AS ChildName, Username AS ChildUser,\n"
+                    "               CommandLine AS ChildCmd, Ppid AS ChildPpid FROM pslist()\n"
+                    "        WHERE Name =~ '(?i)^(sh|bash|zsh|dash|ksh|python3?|perl|ruby|php|node|curl|wget|nc|ncat|socat)$' },\n"
+                    "  query={ SELECT ChildPid, ChildName, ChildUser, ChildCmd, Pid AS ParentPid, Name AS ParentName, CommandLine AS ParentCmd\n"
+                    "          FROM pslist()\n"
+                    "          WHERE Pid = ChildPpid\n"
+                    "            AND (Name =~ '(?i)exiftool' OR Exe =~ '(?i)exiftool' OR CommandLine =~ '(?i)\\bexiftool\\b') })\n"
+                    "LIMIT 200"},
+            {"name": "ExifTool invoked by an internet-facing service (upload pipeline)",
+             "why": "The exposure that makes exploitation reachable — ExifTool whose parent is a web/app server or a "
+                    "document-conversion service is parsing files that arrive from the outside.",
+             "sql": "SELECT name, exe, cmdline, user, ppid_name,\n"
+                    "       datetime(last_seen,'unixepoch','localtime') AS last_seen\n"
+                    "FROM processes\n"
+                    "WHERE (lower(name) LIKE '%exiftool%' OR lower(exe) LIKE '%exiftool%' OR lower(cmdline) LIKE '%exiftool%')\n"
+                    "  AND (lower(ppid_name) IN ('nginx','httpd','apache','apache2','php','php-fpm','php-cgi','lsphp',\n"
+                    "                            'node','python','python3','ruby','java','gotenberg','unoconv','soffice',\n"
+                    "                            'libreoffice','imagemagick','convert','magick','gs')\n"
+                    "       OR lower(ppid_name) LIKE '%php-fpm%' OR lower(ppid_name) LIKE '%gotenberg%')\n"
+                    "ORDER BY last_seen DESC",
+             "vql": "-- exiftool (child) whose parent is a web/app/document-conversion service\n"
+                    "SELECT * FROM foreach(\n"
+                    "  row={ SELECT Pid AS EtPid, Name AS EtName, Username AS EtUser, CommandLine AS EtCmd, Ppid AS EtPpid FROM pslist()\n"
+                    "        WHERE Name =~ '(?i)exiftool' OR Exe =~ '(?i)exiftool' OR CommandLine =~ '(?i)\\bexiftool\\b' },\n"
+                    "  query={ SELECT EtPid, EtName, EtUser, EtCmd, Name AS ParentName FROM pslist()\n"
+                    "          WHERE Pid = EtPpid\n"
+                    "            AND Name =~ '(?i)^(nginx|httpd|apache2?|php(-fpm|-cgi)?|lsphp|node|python3?|ruby|java|gotenberg|unoconv|soffice|libreoffice|convert|magick|gs)$' })\n"
+                    "LIMIT 200"},
+        ],
+    },
+    {
         "id": "cwp2shell-2026-11", "severity": "critical", "published": "2026-11-03",
         "title": "CWP2Shell — Control Web Panel pre-auth RCE to root (CVE-2026-73695 + 9 more)",
         "summary": "Ten disclosed flaws in Control Web Panel (CWP, formerly CentOS Web Panel), which ships on "

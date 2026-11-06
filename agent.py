@@ -12443,12 +12443,22 @@ def build_auth_map(history, geo, extip, days=30):
            # external IP. The Mesh places these at the host's observed connection IP, so device
            # logins map fleet-wide without each agent having to make its own outbound lookup.
            "device_events": [],
+           # Flat, auditable list of EVERY auth event in the window (remote + device, mapped or not),
+           # newest-first — so the Authentications tab can show a table even when nothing is placeable
+           # on the map (e.g. device-only logins with external-IP resolution off). Each carries `pk`,
+           # the map-point key it belongs to (empty = unmapped), so a selected point filters the table.
+           "events": [], "events_trunc": False,
            "totals": {"remote_ok": 0, "remote_fail": 0, "device_ok": 0, "device_fail": 0}}
     if not history:
         return out
     rows = history.recent_auths(days)
     dev = out["external_ip"]
     agg = {}
+
+    def _pk(layer, success, country, lat, lng):
+        return "%s|%d|%s|%s|%s" % (layer, 1 if success else 0, country or "",
+                                   "" if lat is None else round(lat, 1),
+                                   "" if lng is None else round(lng, 1))
 
     def add(layer, success, lat, lng, country, place, user, ts, source, method):
         k = (layer, bool(success), country or "",
@@ -12458,6 +12468,7 @@ def build_auth_map(history, geo, extip, days=30):
         if not p:
             p = {"layer": layer, "success": bool(success), "lat": lat, "lng": lng,
                  "country": country, "place": place, "count": 0,
+                 "pk": _pk(layer, success, country, lat, lng),
                  "users": set(), "sources": set(), "events": [], "last_ts": 0}
             agg[k] = p
         p["count"] += 1
@@ -12468,6 +12479,15 @@ def build_auth_map(history, geo, extip, days=30):
         if len(p["events"]) < 200:         # recent events for drill-in (rows arrive newest-first)
             p["events"].append([ts or 0, user or "", source or "", 1 if success else 0, method or ""])
         p["last_ts"] = max(p["last_ts"], ts or 0)
+        return p["pk"]
+
+    def add_event(ts, user, source, success, method, cat, loc, pk):
+        if len(out["events"]) >= 800:      # bounded audit list (newest-first; rows arrive newest-first)
+            out["events_trunc"] = True
+            return
+        out["events"].append({"ts": ts or 0, "user": user or "", "source": source or "",
+                              "ok": 1 if success else 0, "method": method or "",
+                              "cat": cat, "loc": loc or "", "pk": pk or ""})
 
     for r in rows:
         src = (r.get("source") or "").strip()
@@ -12482,21 +12502,25 @@ def build_auth_map(history, geo, extip, days=30):
                 rec = None
             country = (rec or {}).get("country")
             lat, lng = (rec or {}).get("lat"), (rec or {}).get("lng")
+            place = (rec or {}).get("summary") or country or ""
             if not country and lat is None:
                 out["unmapped"]["remote"] += 1
+                add_event(ts, user, src, success, method, "remote", "", "")
             else:
-                add("remote", success, lat, lng, country,
-                    (rec or {}).get("summary") or country or src, user, ts, src, method)
+                pk = add("remote", success, lat, lng, country, place or src, user, ts, src, method)
+                add_event(ts, user, src, success, method, "remote", place or country or "", pk)
         else:
             out["totals"]["device_ok" if success else "device_fail"] += 1
             if len(out["device_events"]) < 400:        # fleet-side placement material (newest-first)
                 out["device_events"].append([ts or 0, user or "", src or "local",
                                              1 if success else 0, method or ""])
             if dev.get("resolved"):
-                add("device", success, dev.get("lat"), dev.get("lng"), dev.get("country"),
-                    dev.get("place"), user, ts, src or "local", method)
+                pk = add("device", success, dev.get("lat"), dev.get("lng"), dev.get("country"),
+                         dev.get("place"), user, ts, src or "local", method)
+                add_event(ts, user, src or "local", success, method, "device", dev.get("place") or "", pk)
             else:
                 out["unmapped"]["device"] += 1
+                add_event(ts, user, src or "local", success, method, "device", "", "")
 
     for p in agg.values():
         p["users"] = sorted(p["users"])[:20]

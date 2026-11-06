@@ -85,6 +85,16 @@ The account form previously tripped only the medium `b-keychain-find`; it is now
 matches the vendor-prefixed account (`-ga "Microsoft Edge"`, `-ga "Google Chrome"`) across Chrome/Chromium/
 Brave/Edge/Arc/Opera/Vivaldi, while a non-browser account (`-ga "GitHub"`) still does not.
 
+**Authentications tab now has an auditable table under the map (both agents).** The tab previously surfaced
+individual auth records only by clicking a map point — and device (local console/sudo/terminal) logins only
+became map points when "Resolve device location by external IP" was on (off by default). So a workstation
+whose logins are all local showed an empty map and *no* way to read its authentication history. The tab now
+renders a **Recent authentications** table below the map — Time / Result / User / Source / Method / Location —
+listing every event in the window, mapped or not, so auth is auditable regardless of the external-IP setting.
+It honors the Remote/Device and Show-failed filters; selecting a map point narrows the table to that location
+(✕ show all clears it). Backed by a new flat `events[]` in `/api/auth-map` (bounded to the most recent 800),
+each row tagged with its map-point key so selection filtering is exact.
+
 ## [1.12.2] — 2026-11-03 (Linux agent only)
 
 ### Added

@@ -3712,11 +3712,11 @@ function authDraw(){
   h+='<div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:11px;color:var(--muted)">'+
      authLeg(AUTH_COLORS.remoteOk,'remote · success')+authLeg(AUTH_COLORS.remoteFail,'remote · failed')+
      authLeg(AUTH_COLORS.deviceOk,'device · success')+authLeg(AUTH_COLORS.deviceFail,'device · failed')+
-     '<span style="opacity:.7">dot size = number of events · click a point for details</span></div>';
-  h+='<div id="authDetail" style="margin-top:10px"></div>';
+     '<span style="opacity:.7">dot size = number of events · click a point to filter the table below</span></div>';
+  h+='<div id="authTable" style="margin-top:12px"></div>';
   box.innerHTML=h;
   authDrawSvg();
-  if(authSel!=null) authRenderDetail();
+  authRenderTable();
 }
 function authDrawSvg(){
   const host=document.getElementById('authMap'), d=authData, w=authWorld; if(!host||!d||!w) return;
@@ -3754,33 +3754,48 @@ function authDrawSvg(){
     (um.device?um.device+' device event(s) not placed (enable device location above)':'')+'</div>';
 }
 function authSelectPoint(i){
-  authSel=i; authDrawSvg(); authRenderDetail();
-  const dd=document.getElementById('authDetail'); if(dd) dd.scrollIntoView({block:'nearest',behavior:'smooth'});
+  authSel=i; authDrawSvg(); authRenderTable();
+  const dd=document.getElementById('authTable'); if(dd) dd.scrollIntoView({block:'nearest',behavior:'smooth'});
 }
-function authCloseDetail(){ authSel=null; const dd=document.getElementById('authDetail'); if(dd) dd.innerHTML=''; authDrawSvg(); }
-function authRenderDetail(){
-  const host=document.getElementById('authDetail'); if(!host) return;
-  const p=authData&&authData.points&&authData.points[authSel];
-  if(!p){ host.innerHTML=''; return; }
-  const col=authPointColor(p);
+function authClearSel(){ authSel=null; authDrawSvg(); authRenderTable(); }
+// One table under the map, always present, so authentications are auditable even when nothing is
+// placeable (device-only logins with external-IP resolution off). Reflects the Remote/Device + failed
+// filters; when a map point is selected it narrows to that point's events, else it shows the window.
+function authRenderTable(){
+  const host=document.getElementById('authTable'), d=authData; if(!host||!d) return;
+  const sel=(authSel!=null && d.points)? d.points[authSel] : null;
+  let evs=(d.events||[]).filter(e=> authLayers[e.cat] && (authShowFailed || e.ok));
+  if(sel) evs=evs.filter(e=> e.pk && e.pk===sel.pk);
   let h='<div style="border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:10px 12px;max-width:960px">';
-  h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span style="width:10px;height:10px;border-radius:50%;background:'+col+';flex:none"></span>'+
-     '<b>'+esc(p.place||p.country||'Unknown location')+'</b><span class="hint" style="font-size:12px">· '+(p.layer==='device'?'device':'remote')+' · '+(p.success?'successful':'failed')+
-     ' · '+p.count+' event(s)'+(p.events_trunc?' (latest '+(p.events||[]).length+' shown)':'')+'</span>'+
-     '<span style="flex:1"></span><span class="lnk" style="cursor:pointer;font-size:14px" title="Close" onclick="authCloseDetail()">✕</span></div>';
-  h+='<div style="max-height:260px;overflow:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">'+
+  h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">';
+  if(sel){
+    const col=authPointColor(sel);
+    h+='<span style="width:10px;height:10px;border-radius:50%;background:'+col+';flex:none"></span>'+
+       '<b>'+esc(sel.place||sel.country||'Unknown location')+'</b>'+
+       '<span class="hint" style="font-size:12px">· '+(sel.layer==='device'?'device':'remote')+' · '+(sel.success?'successful':'failed')+' · '+evs.length+' shown</span>'+
+       '<span style="flex:1"></span><span class="lnk" style="cursor:pointer;font-size:12px" onclick="authClearSel()">✕ show all</span>';
+  } else {
+    h+='<b>Recent authentications</b><span class="hint" style="font-size:12px">· last '+(authDays===365?'year':authDays+' days')+' · '+evs.length+' event(s)'+(d.events_trunc?' (latest 800)':'')+'</span>';
+  }
+  h+='</div>';
+  if(!evs.length){
+    h+='<div class="hint" style="font-size:12px">No authentications match the current filters.</div></div>';
+    host.innerHTML=h; return;
+  }
+  h+='<div style="max-height:340px;overflow:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">'+
      '<thead><tr style="text-align:left;color:var(--muted)">'+
-     ['Time','User','Source','Method','Status'].map(c=>'<th style="padding:3px 8px;position:sticky;top:0;background:var(--panel)">'+c+'</th>').join('')+
+     ['Time','Result','User','Source','Method','Location'].map(c=>'<th style="padding:3px 8px;position:sticky;top:0;background:var(--panel)">'+c+'</th>').join('')+
      '</tr></thead><tbody>';
-  (p.events||[]).forEach(e=>{
-    const ts=e[0], user=e[1], src=e[2], ok=e[3], method=e[4];
-    const dt=ts?new Date(ts*1000).toLocaleString():'—';
+  evs.forEach(e=>{
+    const dt=e.ts?new Date(e.ts*1000).toLocaleString():'—';
+    const loc=e.loc||(e.cat==='device'?'this device':'—');
     h+='<tr style="border-top:1px solid var(--line)">'+
        '<td style="padding:3px 8px;white-space:nowrap">'+esc(dt)+'</td>'+
-       '<td style="padding:3px 8px">'+esc(user||'—')+'</td>'+
-       '<td style="padding:3px 8px;font-family:var(--mono,monospace)">'+esc(src||'—')+'</td>'+
-       '<td style="padding:3px 8px">'+esc(method||'—')+'</td>'+
-       '<td style="padding:3px 8px;color:'+(ok?'var(--good)':'var(--sev-critical)')+'">'+(ok?'success':'failed')+'</td></tr>';
+       '<td style="padding:3px 8px;color:'+(e.ok?'var(--good)':'var(--sev-critical)')+'">'+(e.ok?'success':'failed')+'</td>'+
+       '<td style="padding:3px 8px">'+esc(e.user||'—')+'</td>'+
+       '<td style="padding:3px 8px;font-family:var(--mono,monospace)">'+esc(e.source||'—')+'</td>'+
+       '<td style="padding:3px 8px">'+esc(e.method||'—')+'</td>'+
+       '<td style="padding:3px 8px">'+esc(loc)+' <span style="opacity:.6;font-size:10px">'+esc(e.cat)+'</span></td></tr>';
   });
   h+='</tbody></table></div></div>';
   host.innerHTML=h;

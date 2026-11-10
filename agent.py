@@ -92,7 +92,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -512,6 +512,10 @@ RULE_FIELD_HINTS = {
     "shell": ["user", "command", "matched", "file"],
     "provenance": ["category", "pkgid", "version", "kind", "name", "mountpoint",
                    "bus", "fstype", "image_path", "install_path", "volume"],
+    "ai-agent": ["name", "cli", "path", "scope", "running"],
+    "ai-runtime": ["runtime", "port", "bind", "finding"],
+    "ai-mcp": ["server", "client", "finding", "url_host", "command", "package", "scope"],
+    "ai-context": ["path", "client", "finding", "sha256"],
 }
 # Starter rules seeded into rules.json on first run so the Detections tab isn't empty.
 # High-precision ones ship ENABLED; broader / parameterised ones ship DISABLED as
@@ -8512,6 +8516,667 @@ class SecurityPostureCollector:
 
 
 # ---------------------------------------------------------------------------
+# AI Surface Inventory (Phase 1 of AI-agent-abuse detection). "AI abuse" is three
+# unrelated threats — Living off AI (an attacker drives a trusted agent CLI),
+# AI-orchestrated malware (malware calls an LLM API at runtime), and a hijacked
+# agent (prompt injection / poisoned MCP tool / tampered instruction file). The
+# naive detector ("a process named claude did X") fires on every developer, so the
+# organizing principle is INVENTORY, DON'T ALARM: a known agent is catalogued on
+# sight and severity only climbs when its lineage or egress turns bad (later phases).
+#
+# This collector enumerates the host's AI surface read-only and emits a scored node
+# ONLY for the four genuine exposures (remote/npx-fetched MCP server, a local LLM
+# runtime reachable off-host, an agent config/instruction file an attacker could
+# rewrite). The full inventory lives in meta.ai_surface + /api/ai-surface and the
+# AI Surface view, exactly like SecurityPostureCollector exposes meta.config.
+#
+# Privacy walls (hard requirements): MCP server env blocks are captured as KEY NAMES
+# only (never values); remote MCP urls keep the HOST only (never querystring tokens);
+# instruction/agent files are captured as path + sha256 + mtime + size (never content).
+# ---------------------------------------------------------------------------
+
+# Agent CLIs we recognize (exact executable basename -> product). Ambiguous short
+# names (e.g. a bare "q") are deliberately excluded here and detected via marker paths
+# below, so we never flag an unrelated binary that merely shares a name.
+AI_AGENT_CLIS = {
+    "claude": "Claude Code",
+    "cursor-agent": "Cursor Agent",
+    "aider": "Aider",
+    "codex": "OpenAI Codex CLI",
+    "gemini": "Gemini CLI",
+    "copilot": "GitHub Copilot CLI",
+    "goose": "Goose",
+    "cline": "Cline",
+    "continue": "Continue",
+    "windsurf": "Windsurf",
+    "sgpt": "Shell GPT",
+    "chatgpt": "ChatGPT CLI",
+    "llm": "llm (CLI)",
+    "open-interpreter": "Open Interpreter",
+    "interpreter": "Open Interpreter",
+    "opencode": "OpenCode",
+}
+
+# Local LLM runtimes: executable basename -> (product, default listening port).
+AI_RUNTIMES = {
+    "ollama": ("Ollama", 11434),
+    "lms": ("LM Studio (CLI)", 1234),
+    "llama-server": ("llama.cpp server", 8080),
+    "llama-cpp-server": ("llama.cpp server", 8080),
+    "vllm": ("vLLM", 8000),
+    "localai": ("LocalAI", 8080),
+    "jan": ("Jan", 1337),
+    "gpt4all": ("GPT4All", 4891),
+    "text-generation-launcher": ("TGI", 8080),
+}
+# Well-known runtime ports — a listener here is a runtime even if we don't know the proc.
+# Deliberately limited to ports with little collision risk: 8000/5000/1337 are left out
+# because they are shared by uvicorn/Flask/AirPlay and would misread a dev server or an
+# Apple service as an LLM runtime (vLLM/Jan/LocalAI are still caught by process name).
+AI_RUNTIME_PORTS = {11434: "Ollama", 1234: "LM Studio", 4891: "GPT4All"}
+
+# Static LLM-API endpoint set (Q2: shipped built-in + refreshable feed). Exact hosts
+# plus suffix matches for the cloud providers whose host carries a region/resource.
+LLM_ENDPOINTS = {
+    "api.openai.com": "OpenAI",
+    "api.anthropic.com": "Anthropic",
+    "generativelanguage.googleapis.com": "Google Gemini",
+    "aiplatform.googleapis.com": "Google Vertex AI",
+    "api.x.ai": "xAI",
+    "openrouter.ai": "OpenRouter",
+    "api.deepseek.com": "DeepSeek",
+    "api.mistral.ai": "Mistral",
+    "api.cohere.ai": "Cohere",
+    "api.cohere.com": "Cohere",
+    "api.groq.com": "Groq",
+    "api.perplexity.ai": "Perplexity",
+    "api.together.xyz": "Together AI",
+    "api.fireworks.ai": "Fireworks AI",
+    "api.anyscale.com": "Anyscale",
+    "api-inference.huggingface.co": "Hugging Face",
+    "api.endpoints.huggingface.cloud": "Hugging Face",
+}
+LLM_ENDPOINT_SUFFIXES = {
+    ".openai.azure.com": "Azure OpenAI",
+    ".cognitiveservices.azure.com": "Azure AI",
+    ".amazonaws.com": "AWS Bedrock",   # narrowed to bedrock-runtime.* at match time
+}
+
+
+def _ai_home():
+    return os.path.expanduser("~")
+
+
+def _world_writable(path):
+    """True if `path` (or the directory holding it) is writable by group/other without a
+    sticky bit — i.e. a user other than the owner could rewrite the file. T1574 vector."""
+    try:
+        st = os.stat(path)
+        if st.st_mode & 0o022:
+            return True
+        d = os.path.dirname(path) or "."
+        dst = os.stat(d)
+        # other/group-writable dir, no sticky bit -> file can be replaced by another user
+        if (dst.st_mode & 0o022) and not (dst.st_mode & 0o1000):
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _read_json_lenient(path, cap=2_000_000):
+    """Bounded, comment-tolerant JSON read for MCP/editor config files (many are JSONC).
+    Returns the parsed object or None. Never raises."""
+    try:
+        if os.path.getsize(path) > cap:
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        pass
+    # light JSONC cleanup: strip // and /* */ comments and trailing commas, then retry
+    try:
+        no_block = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
+        no_line = re.sub(r"(^|[^:])//[^\n\r]*", r"\1", no_block)
+        no_trail = re.sub(r",(\s*[}\]])", r"\1", no_line)
+        return json.loads(no_trail)
+    except ValueError:
+        return None
+
+
+def _mcp_config_paths():
+    """(path, client, scope) for every MCP-config location we parse. User-scope configs
+    are fixed; project-scope ones are discovered under a bounded set of dev roots."""
+    home = _ai_home()
+    mac = sys.platform == "darwin"
+    app_sup = os.path.join(home, "Library", "Application Support") if mac \
+        else os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(home, ".config")))
+    out = [
+        (os.path.join(home, ".claude.json"), "Claude Code", "user"),
+        (os.path.join(app_sup, "Claude", "claude_desktop_config.json"), "Claude Desktop", "user"),
+        (os.path.join(home, ".cursor", "mcp.json"), "Cursor", "user"),
+        (os.path.join(home, ".codeium", "windsurf", "mcp_config.json"), "Windsurf", "user"),
+        (os.path.join(app_sup, "Code", "User", "globalStorage",
+                      "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json"),
+         "Cline", "user"),
+        (os.path.join(home, ".config", "github-copilot", "mcp.json"), "Copilot", "user"),
+        (os.path.join(home, ".gemini", "settings.json"), "Gemini CLI", "user"),
+    ]
+    # project-scope MCP configs under bounded dev roots (depth-limited so we never walk $HOME)
+    for root in _ai_project_roots():
+        for rel, client in ((".cursor/mcp.json", "Cursor"),
+                            (".vscode/mcp.json", "VS Code"),
+                            (".mcp.json", "Claude Code")):
+            out.append((os.path.join(root, rel), client, "project"))
+    return out
+
+
+_AI_PROJECT_ROOTS_CACHE = {"ts": 0.0, "roots": []}
+
+
+def _ai_project_roots(limit=60):
+    """A bounded list of likely project directories to check for project-scope AI config
+    (.mcp.json, CLAUDE.md, .cursorrules …). We look one level deep under a few common dev
+    parents so discovery is real but can never turn into a full-disk walk."""
+    now = time.time()
+    if _AI_PROJECT_ROOTS_CACHE["roots"] and now - _AI_PROJECT_ROOTS_CACHE["ts"] < 600:
+        return _AI_PROJECT_ROOTS_CACHE["roots"]
+    home = _ai_home()
+    parents = [home] + [os.path.join(home, d) for d in
+                        ("Documents", "Projects", "projects", "src", "code", "dev",
+                         "git", "repos", "workspace", "work", "Developer")]
+    roots, seen = [], set()
+    for parent in parents:
+        if not os.path.isdir(parent):
+            continue
+        try:
+            entries = sorted(os.scandir(parent), key=lambda e: e.name)
+        except OSError:
+            continue
+        for e in entries:
+            if len(roots) >= limit:
+                break
+            if not e.name.startswith(".") and e.is_dir(follow_symlinks=False):
+                rp = os.path.realpath(e.path)
+                if rp not in seen:
+                    seen.add(rp)
+                    roots.append(e.path)
+    _AI_PROJECT_ROOTS_CACHE.update(ts=now, roots=roots)
+    return roots
+
+
+# Agent instruction / rules files: (relative glob, product). Captured as hash+mtime only.
+AI_CONTEXT_FILES = [
+    ("CLAUDE.md", "Claude Code"),
+    ("CLAUDE.local.md", "Claude Code"),
+    ("AGENTS.md", "Agent (AGENTS.md)"),
+    ("GEMINI.md", "Gemini CLI"),
+    (".cursorrules", "Cursor"),
+    (".windsurfrules", "Windsurf"),
+    (".clinerules", "Cline"),
+    (".github/copilot-instructions.md", "GitHub Copilot"),
+    (".aider.conf.yml", "Aider"),
+]
+
+
+class LLMEndpointFeed:
+    """The LLM-API endpoint intelligence the AI-surface egress baseline (and the Phase-2
+    egress rule) match against. Ships a static built-in set (LLM_ENDPOINTS) and OPTIONALLY
+    merges a refreshable JSON feed so new providers land without an agent release (Q2: both).
+    Offline-safe: with no feed URL it simply serves the built-in set."""
+
+    def __init__(self, enabled=True, interval=86400, feed_url=None, cache_file=None):
+        self.enabled = enabled
+        self.interval = max(3600, interval)
+        self.feed_url = feed_url
+        self.cache_file = cache_file
+        self.lock = threading.Lock()
+        self.extra = {}          # host -> provider, from the feed
+        self.last_update = None
+        self.last_error = None
+        self.started = False
+        if cache_file:
+            try:
+                with open(cache_file, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                self.extra = {str(k): str(v) for k, v in (data.get("endpoints") or {}).items()}
+                self.last_update = data.get("updated")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def start(self):
+        if not self.enabled or self.started or not self.feed_url:
+            return
+        self.started = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                self._refresh()
+            except Exception as e:  # noqa: BLE001
+                self.last_error = str(e)
+            time.sleep(self.interval)
+
+    def _refresh(self):
+        if not self.feed_url:
+            return
+        req = urllib.request.Request(self.feed_url, headers={"User-Agent": "Scouter/AI-surface"})
+        with urllib.request.urlopen(req, timeout=20) as r:  # nosec - operator-supplied feed
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        endpoints = {}
+        src = data.get("endpoints") if isinstance(data, dict) else data
+        if isinstance(src, dict):
+            endpoints = {str(k).lower(): str(v) for k, v in src.items()}
+        elif isinstance(src, list):
+            endpoints = {str(h).lower(): "feed" for h in src}
+        with self.lock:
+            self.extra = endpoints
+            self.last_update = time.strftime("%Y-%m-%d %H:%M:%S")
+            self.last_error = None
+        if self.cache_file:
+            try:
+                with open(self.cache_file, "w", encoding="utf-8") as fh:
+                    json.dump({"updated": self.last_update, "endpoints": endpoints}, fh)
+            except OSError:
+                pass
+
+    def endpoints(self):
+        """Combined {host: provider} (static built-ins plus any feed additions)."""
+        with self.lock:
+            merged = dict(LLM_ENDPOINTS)
+            merged.update(self.extra)
+            return merged
+
+    def provider_for_host(self, host):
+        host = (host or "").lower().rstrip(".")
+        if not host:
+            return None
+        eps = self.endpoints()
+        if host in eps:
+            return eps[host]
+        for suf, prov in LLM_ENDPOINT_SUFFIXES.items():
+            if host.endswith(suf):
+                if suf == ".amazonaws.com" and not host.startswith("bedrock-runtime."):
+                    continue
+                return prov
+        return None
+
+    def status(self):
+        with self.lock:
+            return {"enabled": self.enabled, "static": len(LLM_ENDPOINTS),
+                    "feed": len(self.extra), "feed_url": bool(self.feed_url),
+                    "updated": self.last_update, "error": self.last_error}
+
+
+class AISurfaceCollector:
+    """Read-only inventory of the host's AI surface — agent CLIs, local LLM runtimes, MCP
+    servers, and agent instruction files — plus a best-effort LLM-egress baseline. Mirrors
+    SecurityPostureCollector: snapshot() emits scored nodes ONLY for the four real exposures
+    (full inventory in meta.ai_surface + /api/ai-surface). Everything is catalogued; severity
+    only appears where lineage or reachability is genuinely risky.
+
+    Findings (ATT&CK-mapped): F1 remote-url MCP server (T1567); F2 MCP server fetched at launch
+    via npx/uvx (T1195); F3 local LLM runtime listening off-loopback (T1133, high); F4 MCP
+    config or instruction file an attacker could rewrite — world-writable (T1574, high)."""
+
+    NPX_FETCHERS = ("npx", "npx.cmd", "uvx", "bunx", "pnpm", "pnpx", "dlx", "deno")
+
+    def __init__(self, enabled=True, interval=600, endpoints=None, context_roots=None):
+        self.enabled = enabled
+        self.interval = max(60, interval)
+        self.endpoints = endpoints        # LLMEndpointFeed (optional)
+        self.extra_roots = list(context_roots or [])
+        self.lock = threading.Lock()
+        self.items = {}                   # scored finding nodes only
+        self.inv = {}                     # full inventory (for meta + /api/ai-surface)
+        self.started = False
+
+    def start(self):
+        if not self.enabled or self.started:
+            return
+        self.started = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                self._collect()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(self.interval)
+
+    def snapshot(self):
+        with self.lock:
+            return list(self.items.values())
+
+    def summary(self):
+        with self.lock:
+            inv = self.inv
+            return {"enabled": True,
+                    "agents": len(inv.get("agents", [])),
+                    "runtimes": len(inv.get("runtimes", [])),
+                    "mcp": len(inv.get("mcp", [])),
+                    "context": len(inv.get("context", [])),
+                    "egress": len(inv.get("egress", [])),
+                    "endpoints": inv.get("endpoints", {}),
+                    "flagged": len(self.items)}
+
+    def detail(self):
+        with self.lock:
+            return {"enabled": True, **self.inv, "flagged": len(self.items)}
+
+    @staticmethod
+    def _finding(ntype, key, label, score, mitre, txt, detail):
+        return {"id": f"ai:{key}", "type": ntype, "label": label, "score": score,
+                "severity": severity_for(score), "reasons": [reason(txt, mitre, score)],
+                "detail": {"source": "AI surface", **detail}}
+
+    # -- C1: agent CLIs (installed and/or running) ---------------------------
+    def _gather_agents(self, procs):
+        found = {}   # name -> record
+        for name, product in AI_AGENT_CLIS.items():
+            path = shutil.which(name)
+            if path:
+                found[name] = {"name": product, "cli": name, "path": path,
+                               "running": False, "pids": [], "scope": "installed"}
+        # marker-path products that we don't match by a (too-generic) basename
+        qmarks = [os.path.join(_ai_home(), "Library", "Application Support", "amazon-q"),
+                  os.path.join(_ai_home(), ".aws", "amazonq"),
+                  os.path.join(_ai_home(), ".local", "share", "amazon-q")]
+        for m in qmarks:
+            if os.path.exists(m):
+                found.setdefault("amazon-q", {"name": "Amazon Q", "cli": "q",
+                                              "path": m, "running": False, "pids": [],
+                                              "scope": "installed"})
+                break
+        # running processes
+        for pid, p in procs.items():
+            base = os.path.basename((p.get("exe") or "").strip()) or \
+                os.path.basename((p.get("cmdline") or "").split(" ")[0])
+            key = base.lower()
+            if key in AI_AGENT_CLIS:
+                rec = found.setdefault(key, {"name": AI_AGENT_CLIS[key], "cli": key,
+                                             "path": p.get("exe", ""), "running": False,
+                                             "pids": [], "scope": "running"})
+                rec["running"] = True
+                rec["pids"].append(pid)
+                if rec["scope"] == "installed":
+                    rec["scope"] = "running"
+        return sorted(found.values(), key=lambda r: r["name"].lower())
+
+    # -- C2: local LLM runtimes (process and/or listening port) --------------
+    def _gather_runtimes(self, procs, net):
+        runtimes = {}
+        # listeners by port/address
+        listeners = {}   # (addr, port) info
+        for pid, conns in net.items():
+            for c in conns:
+                if (c.get("state") or "").upper() != "LISTEN":
+                    continue
+                try:
+                    lport = int(c.get("lport") or 0)
+                except (TypeError, ValueError):
+                    lport = 0
+                laddr = c.get("laddr") or ""
+                if lport in AI_RUNTIME_PORTS:
+                    key = f"port:{lport}"
+                    r = runtimes.setdefault(key, {"name": AI_RUNTIME_PORTS[lport],
+                                                  "process": "", "port": lport, "binds": set(),
+                                                  "listening": True, "public": False, "pids": []})
+                    r["binds"].add(laddr)
+                    if pid not in r["pids"]:
+                        r["pids"].append(pid)
+        # runtimes by process name
+        for pid, p in procs.items():
+            base = os.path.basename((p.get("exe") or "").strip()).lower()
+            if base in AI_RUNTIMES:
+                product, port = AI_RUNTIMES[base]
+                key = f"proc:{base}"
+                r = runtimes.setdefault(key, {"name": product, "process": base, "port": port,
+                                              "binds": set(), "listening": False,
+                                              "public": False, "pids": []})
+                r["process"] = base
+                if pid not in r["pids"]:
+                    r["pids"].append(pid)
+                # fold in a matching port-listener record
+                pk = f"port:{port}"
+                if pk in runtimes:
+                    r["binds"] |= runtimes[pk]["binds"]
+                    r["listening"] = True
+                    del runtimes[pk]
+        out = []
+        for r in runtimes.values():
+            binds = r.pop("binds", set())
+            r["bind"] = sorted(binds)
+            r["public"] = any(not _is_loopback_addr(b) for b in binds) if binds else False
+            out.append(r)
+        return sorted(out, key=lambda r: r["name"].lower())
+
+    # -- C3: MCP servers (read-only parse; env KEY NAMES only, url HOST only) --
+    def _gather_mcp(self):
+        servers = []
+        for path, client, scope in _mcp_config_paths():
+            if not os.path.isfile(path):
+                continue
+            data = _read_json_lenient(path)
+            if not isinstance(data, dict):
+                continue
+            writable = _world_writable(path)
+            blocks = []
+            for key in ("mcpServers", "servers"):
+                if isinstance(data.get(key), dict):
+                    blocks.append(data[key])
+            # ~/.claude.json carries per-project server maps too
+            projs = data.get("projects")
+            if isinstance(projs, dict):
+                for pdata in projs.values():
+                    if isinstance(pdata, dict) and isinstance(pdata.get("mcpServers"), dict):
+                        blocks.append(pdata["mcpServers"])
+            for block in blocks:
+                for sname, sdef in block.items():
+                    if not isinstance(sdef, dict):
+                        continue
+                    servers.append(self._mcp_record(sname, sdef, client, scope, path, writable))
+        return servers
+
+    def _mcp_record(self, sname, sdef, client, scope, path, writable):
+        env_keys = sorted(sdef["env"].keys()) if isinstance(sdef.get("env"), dict) else []
+        command = sdef.get("command") or ""
+        args = sdef.get("args") if isinstance(sdef.get("args"), list) else []
+        url = sdef.get("url") or sdef.get("serverUrl") or ""
+        ttype = (sdef.get("type") or sdef.get("transport") or "").lower()
+        rec = {"name": sname, "client": client, "scope": scope, "source": path,
+               "env_keys": env_keys, "writable": writable, "transport": "stdio",
+               "command": os.path.basename(command) if command else "", "package": "",
+               "url_host": "", "fetched": False}
+        if url or ttype in ("sse", "http", "streamable-http", "websocket"):
+            rec["transport"] = "remote"
+            if url:
+                try:
+                    rec["url_host"] = urllib.parse.urlparse(url).hostname or ""
+                except Exception:  # noqa: BLE001
+                    rec["url_host"] = ""
+        else:
+            cmdbase = os.path.basename(command).lower()
+            cmdbase = cmdbase[:-4] if cmdbase.endswith(".cmd") else cmdbase
+            if cmdbase in self.NPX_FETCHERS or (cmdbase == "pnpm" and "dlx" in args):
+                rec["fetched"] = True
+                # first non-flag arg is the fetched package
+                for a in args:
+                    if isinstance(a, str) and a and not a.startswith("-") and a not in ("dlx", "run", "x"):
+                        rec["package"] = a
+                        break
+        return rec
+
+    # -- C4: agent instruction / rules files (path + sha256 + mtime only) -----
+    def _gather_context(self):
+        out, seen = [], set()
+        roots = [_ai_home()] + _ai_project_roots() + self.extra_roots
+        for root in roots:
+            for rel, product in AI_CONTEXT_FILES:
+                path = os.path.join(root, rel)
+                rp = os.path.realpath(path)
+                if rp in seen or not os.path.isfile(path):
+                    continue
+                seen.add(rp)
+                try:
+                    st = os.stat(path)
+                    if st.st_size > 5_000_000:
+                        digest, note = "", "oversize"
+                    else:
+                        with open(path, "rb") as fh:
+                            digest, note = hashlib.sha256(fh.read()).hexdigest(), ""
+                except OSError:
+                    continue
+                out.append({"path": path, "client": product, "sha256": digest,
+                            "mtime": int(st.st_mtime), "size": st.st_size,
+                            "writable": _world_writable(path), "note": note})
+        return out
+
+    # -- C5: LLM-egress baseline (best-effort; the scoring rule is Phase 2) ----
+    def _gather_egress(self, procs, net):
+        if not self.endpoints:
+            return []
+        ipmap = self._endpoint_ip_map()
+        if not ipmap:
+            return []
+        out = []
+        for pid, conns in net.items():
+            p = procs.get(pid, {})
+            for c in conns:
+                ra = c.get("raddr") or ""
+                prov = ipmap.get(ra)
+                if prov:
+                    out.append({"pid": pid,
+                                "proc": os.path.basename(p.get("exe", "")) or str(pid),
+                                "raddr": ra, "rport": c.get("rport", ""), "provider": prov})
+        return out
+
+    _IPCACHE = {"ts": 0.0, "map": {}}
+
+    def _endpoint_ip_map(self):
+        """Resolve the known LLM endpoint hosts to a {ip: provider} map, cached ~1h and
+        timeout-bounded. Best-effort: resolution failures just shrink the map."""
+        now = time.time()
+        if self._IPCACHE["map"] and now - self._IPCACHE["ts"] < 3600:
+            return self._IPCACHE["map"]
+        ipmap = {}
+        old = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(2.0)
+        try:
+            for host, prov in self.endpoints.endpoints().items():
+                try:
+                    for res in socket.getaddrinfo(host, None):
+                        ipmap[res[4][0]] = prov
+                except OSError:
+                    continue
+        finally:
+            socket.setdefaulttimeout(old)
+        self._IPCACHE.update(ts=now, map=ipmap)
+        return ipmap
+
+    def _collect(self):
+        procs = collect_processes()
+        net = collect_network()
+        agents = self._gather_agents(procs)
+        runtimes = self._gather_runtimes(procs, net)
+        mcp = self._gather_mcp()
+        context = self._gather_context()
+        egress = self._gather_egress(procs, net)
+
+        items = {}
+        # F4(config): one finding per world-writable MCP config FILE (the file is the exposure,
+        # not each server in it), keyed by path so a multi-server file flags once.
+        for src in sorted({s["source"] for s in mcp if s["writable"]}):
+            clients = sorted({s["client"] for s in mcp if s["source"] == src})
+            n = self._finding(
+                "ai-mcp", f"mcpfile:{src}".replace(" ", "_"),
+                f"MCP config writable by others: {os.path.basename(src)}", 70, "T1574",
+                "This MCP configuration lives in a file other users can modify — an attacker who "
+                "rewrites it can make the agent launch an arbitrary command or point it at a hostile "
+                "server the next time it runs",
+                {"category": "ai-mcp", "finding": "world-writable-config", "path": src,
+                 "clients": clients})
+            items[n["id"]] = n
+        # F1 / F2: per MCP server (remote endpoint / unpinned npx-fetched package)
+        for s in mcp:
+            tag = f"mcp:{s['client']}:{s['name']}".replace(" ", "_")
+            if s["transport"] == "remote":
+                n = self._finding(
+                    "ai-mcp", f"{tag}:remote",
+                    f"Remote MCP server: {s['name']} ({s['client']})", 45, "T1567",
+                    "An MCP server reached over the network can send the tools and context the agent "
+                    f"hands it off-host{(' to ' + s['url_host']) if s['url_host'] else ''}; confirm the "
+                    "endpoint is one you control",
+                    {"category": "ai-mcp", "finding": "remote-mcp", "server": s["name"],
+                     "client": s["client"], "url_host": s["url_host"], "env_keys": s["env_keys"],
+                     "scope": s["scope"], "path": s["source"]})
+                items[n["id"]] = n
+            elif s["fetched"]:
+                n = self._finding(
+                    "ai-mcp", f"{tag}:npx",
+                    f"MCP server fetched at launch: {s['name']} ({s['client']})", 42, "T1195.002",
+                    f"This MCP server is downloaded and run on each launch via {s['command']}"
+                    f"{(' (' + s['package'] + ')') if s['package'] else ''} — the code is not pinned, "
+                    "so a compromised or typosquatted package becomes agent-run code",
+                    {"category": "ai-mcp", "finding": "npx-fetched-mcp", "server": s["name"],
+                     "client": s["client"], "command": s["command"], "package": s["package"],
+                     "env_keys": s["env_keys"], "scope": s["scope"], "path": s["source"]})
+                items[n["id"]] = n
+        # F3: local runtime reachable off-loopback
+        for r in runtimes:
+            if r["listening"] and r["public"]:
+                n = self._finding(
+                    "ai-runtime", f"runtime:{r['name']}:{r['port']}".replace(" ", "_"),
+                    f"Local LLM runtime exposed on the network: {r['name']}", 70, "T1133",
+                    f"{r['name']} is listening on {', '.join(r['bind']) or '0.0.0.0'}:{r['port']} — "
+                    "reachable beyond this host, usually unauthenticated, which exposes the model, any "
+                    "loaded files, and free inference (and a prompt-injection path) to the network",
+                    {"category": "ai-runtime", "finding": "runtime-exposed", "runtime": r["name"],
+                     "bind": r["bind"], "port": r["port"], "pids": r["pids"]})
+                items[n["id"]] = n
+        # F4(context): instruction file writable by others
+        for cfile in context:
+            if cfile["writable"]:
+                n = self._finding(
+                    "ai-context", f"ctx:{cfile['path']}".replace(" ", "_"),
+                    f"Agent instructions writable by others: {os.path.basename(cfile['path'])}",
+                    70, "T1574",
+                    f"{cfile['path']} ({cfile['client']}) steers what the agent does and can be modified "
+                    "by another user — a planted instruction is a prompt-injection / agent-hijack primitive",
+                    {"category": "ai-context", "finding": "world-writable-context",
+                     "path": cfile["path"], "client": cfile["client"], "sha256": cfile["sha256"]})
+                items[n["id"]] = n
+
+        inv = {"generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "agents": agents, "runtimes": runtimes, "mcp": mcp,
+               "context": context, "egress": egress,
+               "endpoints": (self.endpoints.status() if self.endpoints
+                             else {"enabled": False, "static": len(LLM_ENDPOINTS)}),
+               "counts": {"agents": len(agents), "runtimes": len(runtimes),
+                          "mcp": len(mcp), "context": len(context),
+                          "egress": len(egress), "findings": len(items)}}
+        with self.lock:
+            self.items, self.inv = items, inv
+
+
+def _is_loopback_addr(addr):
+    """True for a bind address that is not reachable from off-host (loopback / unspecified-
+    as-localhost is handled by the caller; here * and 0.0.0.0 count as NON-loopback)."""
+    a = (addr or "").strip().lower()
+    if a in ("127.0.0.1", "::1", "localhost"):
+        return True
+    if a.startswith("127."):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Shell history — suspicious commands recorded in zsh/bash history files. The poster
 # lists ~/.zsh_history etc. as execution evidence; this scans them for attacker one-
 # liners (curl|sh, base64 decode, reverse shells, Gatekeeper-strip, defense-disable,
@@ -15066,7 +15731,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
                 auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                 posture=None, shellhist=None, rules=None, sqldet=None, browser_threats=None, suppressions=None,
                 responder=None, esf=None, incident_store=None, history=None, decoys=None,
-                provenance=None, webshell=None, ialog=None):
+                provenance=None, webshell=None, ialog=None, aisurf=None):
     t0 = time.time()
     procs = collect_processes()
     net = collect_network()
@@ -15407,6 +16072,11 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         for item in ialog.snapshot():
             add_node(item)
 
+    # --- AI-surface exposures (remote/npx MCP, exposed LLM runtime, writable agent config) ---
+    if aisurf:
+        for item in aisurf.snapshot():
+            add_node(item)
+
     # --- ESF real-time nodes (ephemeral exec-and-exit processes + new files in watched dirs) ---
     if esf:
         for item in esf.snapshot():
@@ -15615,6 +16285,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         "provenance": provenance.summary() if provenance else {"enabled": False},
         "webshell": webshell.summary() if webshell else {"enabled": False},
         "ialog": ialog.summary() if ialog else {"enabled": False},
+        "ai_surface": aisurf.summary() if aisurf else {"enabled": False},
         "esf": esf.summary() if esf else {"enabled": False},
         "incidents": incidents_meta,
         "rules": {"enabled": bool(rules), "builtin": len(BUILTIN_RULES),
@@ -15641,7 +16312,7 @@ class SnapshotCache:
                  posture=None, shellhist=None, rules=None, sqldet=None, vr=None, responder=None,
                  lifecycle=None, ai=None, suppressions=None, ntfy=None, esf=None, incidents=None,
                  exporter=None, attack=None, decoys=None, provenance=None, webshell=None,
-                 ialog=None, accepted=None):
+                 ialog=None, aisurf=None, accepted=None):
         self.interval = interval
         self.no_sig = no_sig
         self.sig = SignatureChecker(enabled=not no_sig)
@@ -15673,6 +16344,7 @@ class SnapshotCache:
         self.provenance = provenance
         self.webshell = webshell
         self.ialog = ialog
+        self.aisurf = aisurf
         self.accepted = accepted             # analyst-accepted "known noise" dets (fidelity view)
         self.lock = threading.Lock()
         self.data = None
@@ -15717,7 +16389,8 @@ class SnapshotCache:
                                suppressions=self.suppressions, responder=self.responder,
                                esf=self.esf, incident_store=self.incidents,
                                history=self.history, decoys=self.decoys,
-                               provenance=self.provenance, webshell=self.webshell, ialog=self.ialog)
+                               provenance=self.provenance, webshell=self.webshell, ialog=self.ialog,
+                               aisurf=self.aisurf)
             if self.history:
                 data["meta"]["history"] = self.history.stats()
             if self.decoys:
@@ -18181,7 +18854,8 @@ class MeshReporter:
                       "/api/groups", "/api/rules", "/api/suppressions", "/api/playbook",
                       "/api/alert-history", "/api/ai-analysis", "/api/health", "/api/sensors",
                       "/api/export", "/api/ioc-feeds", "/api/geoip", "/api/respond", "/api/ai",
-                      "/api/decoys", "/api/auth-map", "/api/vulns"}   # fleet CONFIG read (Phase B) + Mesh auth map + vuln scan
+                      "/api/decoys", "/api/auth-map", "/api/vulns",
+                      "/api/ai-surface"}   # fleet CONFIG read (Phase B) + Mesh auth map + vuln scan + AI surface
     VIEW_MAX_BYTES = 6 * 1024 * 1024          # cap a relayed view body (stays under the mesh ingest cap)
     # POST endpoints the mesh may drive on demand for REMOTE MANAGEMENT — only when the operator opted
     # this host into remote commands (--mesh-commands), gated by the mesh admin token.
@@ -21325,6 +21999,11 @@ def make_handler(cache):
                 if vs and "rescan=1" in self.path:
                     threading.Thread(target=vs.scan, daemon=True).start()
                 self._send_json(vs.status() if vs else {"enabled": False})
+            elif path == "/api/ai-surface":
+                # Full AI-surface inventory (agents / runtimes / MCP servers / instruction files /
+                # LLM-egress baseline). Whitelisted read-only so the mesh can fan it across the fleet.
+                ais = getattr(cache, "ai_surface", None)
+                self._send_json(ais.detail() if ais else {"enabled": False})
             elif path == "/api/vr":
                 self._send_json(cache.vr.status() if cache.vr
                                 else {"enabled": False, "available": False, "running": False})
@@ -23604,6 +24283,18 @@ def main():
                     help="seconds between initial-access exploit-log scans (default 300)")
     ap.add_argument("--ia-log-file", action="append", default=[], metavar="PATH",
                     help="extra log file or glob to scan for initial-access exploit traces (repeatable)")
+    ap.add_argument("--no-ai-surface", action="store_true",
+                    help="disable the AI-surface inventory (agent CLIs, LLM runtimes, MCP servers, "
+                         "instruction files + LLM-egress baseline)")
+    ap.add_argument("--ai-surface-interval", type=int, default=600,
+                    help="seconds between AI-surface inventory scans (default 600)")
+    ap.add_argument("--ai-context-dir", action="append", default=[], metavar="DIR",
+                    help="extra project root to scan for agent instruction files (CLAUDE.md etc.; repeatable)")
+    ap.add_argument("--no-llm-endpoint-feed", action="store_true",
+                    help="use only the built-in LLM-endpoint set (don't refresh it from a feed URL)")
+    ap.add_argument("--llm-endpoint-feed-url", default=None, metavar="URL",
+                    help="optional JSON feed of additional LLM-API endpoint hosts to merge into the "
+                         "AI-surface egress baseline")
     ap.add_argument("--no-esf", action="store_true",
                     help="disable real-time Endpoint Security events (eslogger; needs sudo, macOS 13+)")
     ap.add_argument("--esf-ephemeral-secs", type=float, default=ESF_EPHEMERAL_MAX_LIFETIME,
@@ -23838,6 +24529,15 @@ def main():
     ialog = IALogScanner(enabled=not args.no_ia_log_scan, interval=args.ia_log_interval,
                          extra=tuple(args.ia_log_file or ()))
     ialog.start()
+    llm_endpoints = LLMEndpointFeed(
+        enabled=not args.no_llm_endpoint_feed,
+        feed_url=args.llm_endpoint_feed_url or None,
+        cache_file=os.path.join(HERE, "llm-endpoints.json"))
+    llm_endpoints.start()
+    aisurf = AISurfaceCollector(enabled=not args.no_ai_surface,
+                                interval=args.ai_surface_interval, endpoints=llm_endpoints,
+                                context_roots=tuple(args.ai_context_dir or ()))
+    aisurf.start()
     esf = ESFCollector(history=history, enabled=not args.no_esf,
                        ephemeral_lifetime=args.esf_ephemeral_secs)
     esf.start()
@@ -23891,7 +24591,10 @@ def main():
                           rules=rules, sqldet=sqldet, vr=vr, responder=responder,
                           lifecycle=lifecycle, ai=ai, suppressions=suppressions, ntfy=ntfy, esf=esf,
                           incidents=incidents, exporter=exporter, attack=attack, decoys=decoys,
-                          provenance=provenance, webshell=webshell, ialog=ialog, accepted=accepted)
+                          provenance=provenance, webshell=webshell, ialog=ialog,
+                          aisurf=aisurf, accepted=accepted)
+    cache.ai_surface = aisurf          # full AI-surface inventory, served by /api/ai-surface
+    cache.llm_endpoints = llm_endpoints
     cache.analyses = analyses          # exposed to the ai-analyze handler + the /api/ai-analysis reader
     cache.updater = updater            # served by /api/health + /api/update
     cache.ioc = ioc                    # IOC-feed matcher, for the browser-extension verdict endpoint
@@ -24036,6 +24739,14 @@ def main():
               f"every {args.ia_log_interval}s")
     else:
         print("│  IA logs:    off")
+    if aisurf.enabled:
+        _eps = llm_endpoints.status()
+        print(f"│  AI surface: agent CLIs + LLM runtimes + MCP servers + instruction files, "
+              f"every {args.ai_surface_interval}s")
+        print(f"│              LLM-egress set: {_eps['static']} built-in"
+              f"{(' + %d feed' % _eps['feed']) if _eps['feed'] else ''} endpoint(s)")
+    else:
+        print("│  AI surface: off")
     if tcc.enabled:
         ts = tcc.summary()
         access = ("reading TCC.db" if ts["accessible"]

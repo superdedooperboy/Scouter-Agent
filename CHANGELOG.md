@@ -6,6 +6,49 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-11-10
+
+### Added
+
+**AI Surface Inventory — Phase 1 of AI-agent-abuse detection (both agents).** A new read-only
+`AISurfaceCollector` catalogues the host's AI surface: the agent CLIs installed or running
+(Claude Code, Cursor, Aider, Codex, Gemini, Copilot, Goose, Cline, Windsurf, Amazon Q, …), local
+LLM runtimes and the interface they listen on (Ollama, LM Studio, llama.cpp, vLLM, Jan, GPT4All, …),
+MCP servers declared across every client's config (Claude Code/Desktop, Cursor, VS Code, Cline,
+Windsurf, Copilot, Gemini — user- and project-scope), and the agent instruction files that steer
+behavior (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`, `.windsurfrules`, `copilot-instructions.md`, …).
+The organizing principle is **inventory, don't alarm**: a known agent is catalogued on sight and
+never alerted on — the full inventory lives in `meta.ai_surface`, the new `/api/ai-surface` endpoint,
+and a dedicated **AI Surface** tab.
+
+Severity is raised only for the four genuine exposures, each ATT&CK-mapped:
+
+- **Remote MCP server** (medium, T1567) — an MCP server reached over the network can send the agent's
+  tools and context off-host; the server's **host** is captured (never a querystring token).
+- **MCP server fetched at launch** (medium, T1195.002) — a server run via `npx`/`uvx`/`bunx` on every
+  launch is unpinned code; a compromised or typosquatted package becomes agent-run code.
+- **Local LLM runtime reachable off-loopback** (high, T1133) — a model server bound to `0.0.0.0`/a LAN
+  address is usually unauthenticated and exposes the model, loaded files, free inference, and a
+  prompt-injection path to the network. (A loopback-bound runtime is catalogued, not flagged.)
+- **Agent config or instruction file an attacker could rewrite** (high, T1574) — a world-writable MCP
+  config or instruction file is a direct agent-hijack / prompt-injection primitive.
+
+Ships with a built-in **LLM-API endpoint set** (OpenAI, Anthropic, Google, xAI, DeepSeek, Mistral,
+Cohere, Groq, Perplexity, Together, Fireworks, Azure OpenAI, AWS Bedrock, Hugging Face, …) used for a
+best-effort LLM-egress baseline, refreshable from an optional feed (`--llm-endpoint-feed-url`). Port-
+based runtime detection is deliberately limited to unambiguous ports (11434/1234/4891) so an AirPlay
+or dev-server listener is never misread as a runtime.
+
+**Privacy walls (hard requirements):** MCP `env` blocks are captured as **key names only**, never
+values; remote MCP urls keep the **host only**, never a token; instruction files are captured as
+**path + SHA-256 + mtime only**, never their content.
+
+On by default (opt out with `--no-ai-surface`); `--ai-surface-interval` (default 600s),
+`--ai-context-dir` adds project roots, `--no-llm-endpoint-feed` pins to the built-in set.
+`tests/test_ai_surface.py` (8 tests each side) covers the four findings, the two privacy walls, the
+system-port false-positive guard, and the collector contract. The companion Mesh console gains a fleet
+**AI Surface** rollup (console 0.7.59).
+
 ## [1.13.0] — 2026-11-03
 
 ### Added

@@ -336,6 +336,7 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   #metrics{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:16px}
   #auth{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:16px}
   #vulns{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:16px}
+  #aisurface{position:absolute;inset:0;overflow:auto;display:none;background:var(--bg);padding:16px}
   #metrics .mcardrow{text-align:left}
   #metrics .mcard{display:inline-block;vertical-align:top;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:0 10px 10px 0;min-width:180px;text-align:left}
   #metrics .mcard h3{margin:0 0 2px;font-size:13px}
@@ -512,6 +513,10 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   .kv{display:grid;grid-template-columns:84px 1fr;gap:3px 8px;font-size:12px;margin:8px 0}
   .kv .k{color:var(--muted)}
   .kv .v{word-break:break-word;font-variant-numeric:tabular-nums}
+  .aisurf-tbl{width:100%;border-collapse:collapse;font-size:12px}
+  .aisurf-tbl th{text-align:left;padding:4px 10px 4px 0;color:var(--muted);font-weight:600;border-bottom:1px solid var(--line);white-space:nowrap}
+  .aisurf-tbl td{padding:5px 10px 5px 0;vertical-align:top;border-bottom:1px solid var(--line)}
+  .aisurf-tbl code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
     background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:7px 8px;
     word-break:break-all;white-space:pre-wrap;margin:6px 0;max-height:160px;overflow:auto}
@@ -961,6 +966,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <button id="tabSensors" onclick="showTab('sensors')">Sensors<span id="senBadge" class="tabbadge" style="display:none"></span></button>
       <button id="tabMetrics" onclick="showTab('metrics')">Metrics</button>
       <button id="tabVulns" onclick="showTab('vulns')">Vulnerabilities</button>
+      <button id="tabAiSurface" onclick="showTab('aisurface')">AI Surface<span id="aiSurfBadge" class="tabbadge" style="display:none"></span></button>
       <button id="tabAttack" onclick="showTab('attack')">ATT&amp;CK</button>
       <button id="tabGroups" onclick="showTab('groups')">Threat Groups</button>
     </div>
@@ -1248,6 +1254,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
     <div id="timeline"></div>
     <div id="metrics"></div>
     <div id="vulns"><div id="shodanBox"></div><div id="vulnMain"></div></div>
+    <div id="aisurface"><div id="aiSurfMain"></div></div>
     <div id="auth"></div>
     <div id="incidents"></div>
     <div id="attack"></div>
@@ -3008,8 +3015,8 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
 // ---- tabs / meta ----
 function showTab(t){
   currentTab=t;
-  document.getElementById('app').classList.toggle('nodetail', t==='metrics'||t==='auth'||t==='vulns');  // reclaim the unused right rail
-  for(const [tab,btn] of [['graph','tabGraph'],['tree','tabTree'],['hunt','tabHunt'],['timeline','tabTimeline'],['alerts','tabAlerts'],['incidents','tabIncidents'],['detections','tabDetections'],['response','tabResponse'],['sensors','tabSensors'],['metrics','tabMetrics'],['vulns','tabVulns'],['auth','tabAuth'],['attack','tabAttack'],['groups','tabGroups']])
+  document.getElementById('app').classList.toggle('nodetail', t==='metrics'||t==='auth'||t==='vulns'||t==='aisurface');  // reclaim the unused right rail
+  for(const [tab,btn] of [['graph','tabGraph'],['tree','tabTree'],['hunt','tabHunt'],['timeline','tabTimeline'],['alerts','tabAlerts'],['incidents','tabIncidents'],['detections','tabDetections'],['response','tabResponse'],['sensors','tabSensors'],['metrics','tabMetrics'],['vulns','tabVulns'],['aisurface','tabAiSurface'],['auth','tabAuth'],['attack','tabAttack'],['groups','tabGroups']])
     document.getElementById(btn).classList.toggle('on',t===tab);
   document.getElementById('auth').style.display=t==='auth'?'block':'none';
   document.getElementById('alerts').style.display=t==='alerts'?'block':'none';
@@ -3024,6 +3031,7 @@ function showTab(t){
   document.getElementById('timeline').style.display=t==='timeline'?'block':'none';
   document.getElementById('metrics').style.display=t==='metrics'?'block':'none';
   document.getElementById('vulns').style.display=t==='vulns'?'block':'none';
+  document.getElementById('aisurface').style.display=t==='aisurface'?'block':'none';
   const zc=document.querySelector('.zoomctl'); if(zc) zc.style.display=t==='graph'?'':'none';
   if(t==='graph'){ rebuildView(); if(!graphFitted){ graphFitted=true; setTimeout(fitView,350); } }  // lazily render + fit on first view
   else { running=false; updateViewStatus(lastViewShown, lastViewTotal); }  // stop sim + hide chip off-graph
@@ -3036,6 +3044,7 @@ function showTab(t){
   if(t==='timeline') openTimeline();
   if(t==='metrics') renderMetrics();
   if(t==='vulns') renderVulns();
+  if(t==='aisurface') renderAiSurface();
   if(t==='auth') renderAuthMap();
   if(t==='incidents') openIncidents();   // one-shot load + render; no auto-refresh (use the Refresh button)
   if(t==='attack') renderAttack();
@@ -3052,6 +3061,109 @@ function kevLineHTML(){ var k=KEVSTAT; if(!k||k.available===false) return '';
     (k.error?(' · <span style="color:var(--sev-high)">'+esc(k.error)+'</span>'):'')+'. A CVE flagged 🛑 KEV is known-exploited in the wild and is prioritized above higher-CVSS-but-unexploited findings.</div>'; }
 function kevSetToken(){ var t=prompt('VulnCheck community API token (free at vulncheck.com/settings/tokens). Leave blank to clear and use the free CISA KEV:',''); if(t===null) return;
   fetch('/api/kev',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t.trim()})}).then(r=>r.json()).then(d=>{ if(d&&d.ok===false){ alert(d.error||'failed'); return; } loadKev(function(){ if(VHOST) vulnDrawHost(); renderShodanExposure(); }); }).catch(()=>{}); }
+// ---- AI Surface inventory -------------------------------------------------
+var AISURF=null;
+function aiSevColor(s){ return s==='high'?'var(--sev-high)':(s==='medium'?'var(--sev-medium)':(s==='low'?'var(--sev-low)':'var(--sev-info)')); }
+function aiTile(n,label){ return '<div style="flex:1;min-width:92px;text-align:center;border:1px solid var(--line);border-radius:8px;padding:8px 4px;background:var(--panel2)">'+
+  '<b style="display:block;font-size:20px;font-variant-numeric:tabular-nums">'+n+'</b><span style="color:var(--muted);font-size:11px">'+label+'</span></div>'; }
+function aiChip(txt,col){ return '<span style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;border:1px solid '+col+';color:'+col+';white-space:nowrap">'+esc(txt)+'</span>'; }
+function aiSurfSection(title,sub,rows,rowFn,heads){
+  let h='<div style="margin-top:14px"><div style="font-weight:700">'+esc(title)+' <span class="hint" style="font-weight:400">· '+rows.length+'</span></div>'+
+    '<div class="hint" style="margin:2px 0 6px;max-width:680px">'+esc(sub)+'</div>';
+  if(!rows.length){ return h+'<div class="hint" style="padding:4px 0">None found.</div></div>'; }
+  h+='<div style="overflow-x:auto"><table class="aisurf-tbl">'+
+     '<thead><tr>'+heads.map(x=>'<th>'+esc(x)+'</th>').join('')+'</tr></thead><tbody>';
+  rows.forEach(r=>{ h+='<tr>'+rowFn(r)+'</tr>'; });
+  h+='</tbody></table></div></div>';
+  return h;
+}
+function renderAiSurface(){
+  const box=document.getElementById('aiSurfMain'); if(!box) return;
+  if(!AISURF) box.innerHTML='<div class="hint">Enumerating AI surface…</div>';
+  fetch('/api/ai-surface').then(r=>r.json()).then(d=>{ AISURF=d; aiSurfDraw(); })
+    .catch(e=>{ box.innerHTML='<div class="hint">Error: '+esc(''+e)+'</div>'; });
+}
+function aiSurfDraw(){
+  const box=document.getElementById('aiSurfMain'); if(!box) return;
+  const d=AISURF||{};
+  if(d.enabled===false){ box.innerHTML='<div class="hint">AI-surface inventory is disabled (started with <code>--no-ai-surface</code>).</div>'; return; }
+  const c=d.counts||{}, finds=(d.flagged!=null?d.flagged:(c.findings||0));
+  let h='';
+  h+='<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:8px">';
+  h+='<div><div style="font-size:15px;font-weight:700">AI Surface Inventory</div>'+
+     '<div class="hint" style="margin-top:2px;max-width:640px">Every AI agent, local model runtime, MCP server and instruction file on this host — catalogued read-only. '+
+     'A known agent is not an alert; severity is raised only where an exposure is real (a reachable runtime, a remotely-served or unpinned MCP server, or a config an attacker could rewrite).</div></div>';
+  h+='<div class="hint" style="white-space:nowrap">Scanned '+esc(d.generated||'—')+'</div></div>';
+  // count tiles
+  h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">'+
+     aiTile(c.agents||0,'Agent CLIs')+aiTile(c.runtimes||0,'LLM runtimes')+aiTile(c.mcp||0,'MCP servers')+
+     aiTile(c.context||0,'Instruction files')+aiTile(c.egress||0,'LLM egress')+
+     '<div style="flex:1;min-width:92px;text-align:center;border:1px solid '+(finds?'var(--sev-high)':'var(--line)')+';border-radius:8px;padding:8px 4px;background:'+(finds?'var(--tint-hot-bg)':'var(--panel2)')+'">'+
+     '<b style="display:block;font-size:20px;font-variant-numeric:tabular-nums;color:'+(finds?'var(--sev-high)':'var(--txt)')+'">'+finds+'</b><span style="color:var(--muted);font-size:11px">Exposures</span></div></div>';
+  // findings (the scored ai-* nodes already in the live snapshot)
+  h+='<div style="font-weight:700;margin:12px 0 6px">Exposures</div>';
+  h+=aiSurfFindingsHTML();
+  // --- Agent CLIs ---
+  h+=aiSurfSection('Agent CLIs','Installed or running AI coding agents. Catalogued, not flagged.',
+     (d.agents||[]), a=>{
+       const run=a.running?aiChip('running','var(--good)'):aiChip(a.scope==='installed'?'installed':'seen','var(--muted)');
+       return '<td>'+esc(a.name)+'</td><td><code>'+esc(a.cli||'')+'</code></td><td>'+run+'</td><td class="hint" style="word-break:break-all">'+esc(a.path||'')+'</td>';
+     }, ['Product','Command','State','Path']);
+  // --- Runtimes ---
+  h+=aiSurfSection('Local LLM runtimes','Model servers running on this host and the interface they listen on.',
+     (d.runtimes||[]), r=>{
+       const reach=r.public?aiChip('network-reachable','var(--sev-high)'):aiChip('loopback','var(--good)');
+       return '<td>'+esc(r.name)+'</td><td style="font-variant-numeric:tabular-nums">'+esc(''+(r.port||'?'))+'</td><td><code>'+esc((r.bind||[]).join(', ')||'—')+'</code></td><td>'+(r.listening?reach:'<span class="hint">not listening</span>')+'</td>';
+     }, ['Runtime','Port','Bind','Reachability']);
+  // --- MCP servers ---
+  h+=aiSurfSection('MCP servers','Model Context Protocol servers the agents can call. Env is shown as key names only — never values.',
+     (d.mcp||[]), s=>{
+       let flags=[];
+       if(s.transport==='remote') flags.push(aiChip('remote','var(--sev-medium)'));
+       if(s.fetched) flags.push(aiChip('npx-fetched','var(--sev-medium)'));
+       if(s.writable) flags.push(aiChip('writable','var(--sev-high)'));
+       const detail = s.transport==='remote' ? ('host: '+esc(s.url_host||'—'))
+                      : (s.package ? ('pkg: '+esc(s.package)) : ('cmd: '+esc(s.command||'—')));
+       const envk=(s.env_keys||[]).length?('<span class="hint" title="'+esc((s.env_keys||[]).join(', '))+'">'+(s.env_keys.length)+' env key'+(s.env_keys.length>1?'s':'')+'</span>'):'<span class="hint">—</span>';
+       return '<td>'+esc(s.name)+'</td><td>'+esc(s.client||'')+'</td><td>'+esc(s.transport||'')+'</td><td class="hint">'+detail+'</td><td>'+envk+'</td><td>'+(flags.join(' ')||'')+'</td>';
+     }, ['Server','Client','Transport','Detail','Env','']);
+  // --- Instruction files ---
+  h+=aiSurfSection('Agent instruction files','Files that steer agent behavior. Recorded as path + SHA-256 + mtime only — contents are never read into Scouter.',
+     (d.context||[]), x=>{
+       const w=x.writable?aiChip('writable','var(--sev-high)'):'';
+       return '<td class="hint" style="word-break:break-all">'+esc(x.path)+'</td><td>'+esc(x.client||'')+'</td><td><code>'+esc((x.sha256||'').slice(0,12))+'</code></td><td class="hint">'+esc(vAgo(x.mtime))+'</td><td>'+w+'</td>';
+     }, ['Path','Client','SHA-256','Modified','']);
+  // --- LLM egress ---
+  if((d.egress||[]).length){
+    h+=aiSurfSection('LLM API egress (baseline)','Current connections to known LLM-API endpoints. Informational now — the Phase-2 rule flags a non-AI process reaching these.',
+       (d.egress||[]), g=>'<td><code>'+esc(g.proc||'')+'</code></td><td>'+esc(g.provider||'')+'</td><td class="hint" style="font-variant-numeric:tabular-nums">'+esc((g.raddr||'')+':'+(g.rport||''))+'</td>',
+       ['Process','Provider','Remote']);
+  }
+  // --- endpoint set status ---
+  const ep=d.endpoints||{};
+  h+='<div class="hint" style="margin-top:12px">LLM-egress endpoint set: <b>'+(ep.static||0)+'</b> built-in'+
+     (ep.feed?(' + <b>'+ep.feed+'</b> from feed'):'')+' endpoint host(s)'+
+     (ep.updated?(' · refreshed '+esc(ep.updated)):'')+'.</div>';
+  box.innerHTML=h;
+  // badge on the tab
+  const b=document.getElementById('aiSurfBadge');
+  if(b){ if(finds){ b.textContent=finds; b.style.display=''; } else b.style.display='none'; }
+}
+function aiSurfFindingsHTML(){
+  // the scored exposures are the ai-* nodes in the live snapshot we already keep in RAW
+  let nodes=[]; try{ nodes=(raw&&raw.nodes||[]).filter(n=>n.type&&n.type.indexOf('ai-')===0); }catch(e){}
+  if(!nodes.length) return '<div class="hint" style="margin:4px 0 2px">No exposures — every item below is catalogued as expected.</div>';
+  nodes.sort((a,b)=>(b.score||0)-(a.score||0));
+  let h='';
+  nodes.forEach(n=>{
+    const col=aiSevColor(n.severity), rz=(n.reasons&&n.reasons[0])||{};
+    h+='<div style="border:1px solid var(--line);border-left:3px solid '+col+';border-radius:7px;padding:8px 10px;margin:6px 0;background:var(--panel2)">'+
+       '<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><b>'+esc(n.label)+'</b>'+
+       '<span>'+aiChip(n.severity,col)+(rz.mitre?(' '+aiChip(rz.mitre,'var(--muted)')):'')+'</span></div>'+
+       '<div class="hint" style="margin-top:4px">'+esc(rz.text||'')+'</div></div>';
+  });
+  return h;
+}
 function renderVulns(){
   renderShodanExposure();
   loadKev(function(){ if(VHOST) vulnDrawHost(); });

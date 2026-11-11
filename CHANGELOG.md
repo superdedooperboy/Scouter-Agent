@@ -114,8 +114,27 @@ hidden scores high). The Mesh fleet view surfaces the hidden-instruction exposur
 **MCP map** (console 0.7.61). *(The agent-local AI Surface tab is macOS-only for now; the Linux agent
 serves the same data at `/api/ai-surface`, visible fleet-wide through the Mesh.)*
 
-Still **held** for release: Phases 1–4 land in the same 1.14.0; the version is not published until the
-remaining planned phases (audit-log intelligence, response/fleet) are implemented.
+**Agent audit-log intelligence — Phase 5 of AI-agent-abuse detection (both agents, OPT-IN).** An AI
+coding agent keeps a local transcript of everything it did, including the shell commands it executed —
+so if an attacker drove the agent (living-off-AI), those commands are recorded there. A new opt-in
+`AIAuditCollector` parses the local transcripts (`~/.claude/projects/**/*.jsonl`, Codex sessions, the
+Aider chat history) for executed commands matching the same attacker patterns the shell-history
+collector uses (`SHELL_RULES` — reverse shells, keychain/credential reads, defense-disable, `curl|sh`,
+persistence, exfil) and surfaces each with a **sanitised, secret-scrubbed excerpt** for on-host triage.
+
+It is **off by default** and, because transcripts contain source code and secrets, **nothing it reads
+ever leaves the host except category counts**. The split is enforced in the endpoints: the full
+sanitised findings are served only at `/api/ai-audit`, which is deliberately **not** in the Mesh relay
+whitelist, while `/api/ai-audit-summary` (category/technique **counts only** — no excerpts, no paths)
+is whitelisted so the fleet can tally it. Excerpts are scrubbed of API keys, tokens, JWTs, credential
+assignments and URL userinfo, and the user's home path is collapsed to `~`. Enable with `--ai-audit`
+(`--ai-audit-interval`, default 900s; `--ai-audit-all-users` with root). The macOS AI Surface tab gains
+a local **AI audit-log** panel; the Mesh fleet view gains a counts-only AI-audit rollup (console
+0.7.62). `tests/test_ai_surface.py` covers the sanitiser, the structure-agnostic command extraction,
+the counts-only-vs-excerpts split, the disabled-leaks-nothing contract, and the whitelist boundary.
+
+Still **held** for release: Phases 1–5 land in the same 1.14.0; the version is not published until the
+remaining planned phase (response & fleet) is implemented.
 
 ## [1.13.0] — 2026-11-03
 

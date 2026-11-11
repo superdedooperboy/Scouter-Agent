@@ -9850,6 +9850,231 @@ class ShellHistoryCollector:
 
 
 # ---------------------------------------------------------------------------
+# Phase 5 — AI-agent audit-log intelligence (OPT-IN, LOCAL-ONLY)
+# ---------------------------------------------------------------------------
+# An AI coding agent keeps a local transcript of what it did, including the shell commands it executed.
+# If an attacker drove the agent (living-off-AI), those dangerous commands are recorded there. This
+# collector parses the transcripts for executed commands matching the SAME attacker patterns the
+# shell-history collector uses (SHELL_RULES) and surfaces each with a SANITISED, secret-scrubbed
+# excerpt for on-host triage. Transcripts contain source code and secrets, so this is OFF by default;
+# nothing it reads ever leaves the host except category COUNTS (meta.ai_audit -> Mesh). The full
+# excerpts are served only on the local console at /api/ai-audit, which is deliberately NOT in the
+# Mesh relay whitelist.
+
+AI_AUDIT_JSONL_ROOTS = (
+    ("Claude Code", os.path.join(".claude", "projects")),
+    ("Codex", os.path.join(".codex", "sessions")),
+    ("Codex", os.path.join(".codex", "history")),
+)
+AI_AUDIT_LINE_FILES = (
+    ("Aider", ".aider.chat.history.md"),
+)
+AI_AUDIT_MAX_FILE = 12_000_000
+AI_AUDIT_MAX_FILES = 400
+AI_AUDIT_NODE_TTL = 86400
+
+_AI_AUDIT_SECRET_RE = re.compile(
+    r"(?i)(sk-ant-[A-Za-z0-9_\-]{8,}|sk-[A-Za-z0-9]{12,}|AKIA[0-9A-Z]{12,}|"
+    r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9\-]{10,}|"
+    r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{6,}|"
+    r"(?:Bearer|Authorization:)\s+\S+|\b[A-Fa-f0-9]{32,}\b)")
+_AI_AUDIT_ASSIGN_RE = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|CREDENTIAL)[A-Z0-9_]*)\s*=\s*"
+    r"('[^']*'|\"[^\"]*\"|\S+)")
+
+
+def _ai_audit_sanitize(cmd, home=None):
+    """Collapse a command to a single line and strip secrets, credential assignments, URL userinfo and
+    the user's home path. Returns a bounded, privacy-safe excerpt — never the raw transcript text."""
+    s = " ".join((cmd or "").split())
+    s = _AI_AUDIT_ASSIGN_RE.sub(lambda m: m.group(1) + "=<redacted>", s)
+    s = _AI_AUDIT_SECRET_RE.sub("<redacted>", s)
+    s = re.sub(r"(https?://)[^/@\s]+@", r"\1<redacted>@", s)
+    if home:
+        s = s.replace(home, "~")
+    return s[:240] + ("…" if len(s) > 240 else "")
+
+
+def _ai_audit_commands(obj):
+    """Yield command strings from a parsed transcript JSON object: the value of any "command" key found
+    anywhere in the structure (a Bash tool call's `input.command` is reached by the recursive walk).
+    Structure-agnostic so it survives schema drift across agents."""
+    stack = [obj]
+    seen = 0
+    while stack and seen < 5000:
+        cur = stack.pop()
+        seen += 1
+        if isinstance(cur, dict):
+            cmd = cur.get("command")
+            if isinstance(cmd, str) and cmd.strip():
+                yield cmd
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+
+
+class AIAuditCollector:
+    """OPT-IN, LOCAL-ONLY. Parses local AI-agent transcripts for executed dangerous commands and keeps
+    a sanitised excerpt of each. summary() returns category COUNTS only (safe for meta -> Mesh);
+    detail() returns the sanitised findings for the local console (/api/ai-audit, not relay-whitelisted).
+    Off unless explicitly enabled."""
+
+    def __init__(self, enabled=False, interval=900, home_only=True):
+        self.enabled = enabled
+        self.interval = max(120, interval)
+        self.home_only = home_only
+        self.lock = threading.Lock()
+        self.items = {}
+        self.counts = {"by_category": {}, "by_mitre": {}, "transcripts_scanned": 0, "findings": 0}
+        self._seen_mtime = {}
+        self.generated = None
+        self.started = False
+
+    def start(self):
+        if not self.enabled or self.started:
+            return
+        self.started = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                self._collect()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(self.interval)
+
+    def _homes(self):
+        here = os.path.expanduser("~")
+        if self.home_only or os.geteuid() != 0:
+            return [here]
+        homes = {here}
+        try:
+            for u in os.listdir("/home"):
+                p = os.path.join("/home", u)
+                if os.path.isdir(p) and not u.startswith("."):
+                    homes.add(p)
+        except OSError:
+            pass
+        if os.path.isdir("/root"):
+            homes.add("/root")
+        return sorted(homes)
+
+    def _transcript_paths(self):
+        out = []          # (source, path, home)
+        for home in self._homes():
+            for source, rel in AI_AUDIT_JSONL_ROOTS:
+                root = os.path.join(home, rel)
+                if not os.path.isdir(root):
+                    continue
+                for dirpath, _dirs, files in os.walk(root):
+                    for fn in files:
+                        if fn.endswith(".jsonl"):
+                            out.append((source, os.path.join(dirpath, fn), home))
+                            if len(out) >= AI_AUDIT_MAX_FILES:
+                                return out
+            for source, rel in AI_AUDIT_LINE_FILES:
+                p = os.path.join(home, rel)
+                if os.path.isfile(p):
+                    out.append((source, p, home))
+        return out
+
+    def _scan_jsonl(self, path):
+        cmds = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line[0] not in "{[":
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        continue
+                    cmds.extend(_ai_audit_commands(obj))
+        except OSError:
+            return []
+        return cmds
+
+    def _scan_lines(self, path):
+        cmds = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    s = line.strip().lstrip("$ ").strip()
+                    if s:
+                        cmds.append(s)
+        except OSError:
+            return []
+        return cmds
+
+    def _collect(self):
+        found = {}
+        by_cat, by_mitre = {}, {}
+        scanned = 0
+        now = time.time()
+        for source, path, home in self._transcript_paths():
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            if st.st_size > AI_AUDIT_MAX_FILE:
+                continue
+            scanned += 1
+            cmds = (self._scan_jsonl(path) if path.endswith(".jsonl")
+                    else self._scan_lines(path))
+            rel_path = (path.replace(home, "~", 1) if home and path.startswith(home) else path)
+            for cmd in cmds:
+                hit = match_shell_rule(cmd)
+                if not hit:
+                    continue
+                label, mitre, score = hit
+                excerpt = _ai_audit_sanitize(cmd, home)
+                sig = "%s|%s|%s" % (source, label, excerpt)
+                by_cat[label] = by_cat.get(label, 0) + 1
+                by_mitre[mitre] = by_mitre.get(mitre, 0) + 1
+                node = {"id": "aiaudit:" + hashlib.sha256(sig.encode()).hexdigest()[:16],
+                        "source": source, "transcript": rel_path,
+                        "category": label, "mitre": mitre, "score": score,
+                        "severity": severity_for(score), "excerpt": excerpt}
+                first = self.items.get(sig, (now, None))[0]
+                found[sig] = (first, node)
+        for sig, (ts, node) in self.items.items():
+            if sig not in found and now - ts < AI_AUDIT_NODE_TTL:
+                found[sig] = (ts, node)
+        with self.lock:
+            self.items = found
+            self.counts = {"by_category": by_cat, "by_mitre": by_mitre,
+                           "transcripts_scanned": scanned, "findings": len(found)}
+            self.generated = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    def summary(self):
+        """COUNTS ONLY — safe to publish to the Mesh via meta. No excerpts, no paths."""
+        with self.lock:
+            if not self.enabled:
+                return {"enabled": False}
+            return {"enabled": True, "generated": self.generated,
+                    "transcripts_scanned": self.counts["transcripts_scanned"],
+                    "findings": self.counts["findings"],
+                    "by_category": dict(self.counts["by_category"]),
+                    "by_mitre": dict(self.counts["by_mitre"])}
+
+    def detail(self):
+        """Full sanitised findings — LOCAL CONSOLE ONLY (/api/ai-audit is not relay-whitelisted)."""
+        with self.lock:
+            if not self.enabled:
+                return {"enabled": False,
+                        "note": "AI audit-log intelligence is off. Enable with --ai-audit; it stays "
+                                "on this host and the Mesh receives category counts only."}
+            items = sorted((n for _, n in self.items.values()),
+                           key=lambda n: (-n["score"], n["source"]))
+            return {"enabled": True, "generated": self.generated,
+                    "transcripts_scanned": self.counts["transcripts_scanned"],
+                    "findings": items, "counts": {"by_category": dict(self.counts["by_category"]),
+                                                  "total": len(items)}}
+
+
+# ---------------------------------------------------------------------------
 # Browser extension bridge (Scouter Browser Defense <-> this agent).
 # The extension reports browser-delivered threats (ClickFix lure pages / clipboard writes,
 # credential-phishing) over the agent's loopback HTTP server and asks for a threat-intel verdict
@@ -15743,7 +15968,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
                 auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                 posture=None, shellhist=None, rules=None, sqldet=None, browser_threats=None, suppressions=None, incident_store=None,
                 realtime=None, history=None, decoys=None, responder=None, provenance=None, webshell=None,
-                ialog=None, aisurf=None):
+                ialog=None, aisurf=None, ai_audit=None):
     t0 = time.time()
     procs = collect_processes()
     net = collect_network()
@@ -16273,6 +16498,8 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         "webshell": webshell.summary() if webshell else {"enabled": False},
         "ialog": ialog.summary() if ialog else {"enabled": False},
         "ai_surface": aisurf.summary() if aisurf else {"enabled": False},
+        # Phase 5: COUNTS ONLY reach the Mesh (opt-in, local-only); excerpts stay on the host.
+        "ai_audit": ai_audit.summary() if ai_audit else {"enabled": False},
         "realtime": realtime.summary() if realtime else {"enabled": False},
         "rules": {"enabled": bool(rules), "builtin": len(BUILTIN_RULES),
                   "node_rules": len(rules.snapshot_node_rules()) if rules else 0,
@@ -16724,7 +16951,7 @@ class SnapshotCache:
                  posture=None, shellhist=None, rules=None, sqldet=None, vr=None, responder=None,
                  lifecycle=None, ai=None, suppressions=None, incidents=None, attack=None, exporter=None,
                  realtime=None, ntfy=None, decoys=None, provenance=None, webshell=None,
-                 ialog=None, aisurf=None, accepted=None):
+                 ialog=None, aisurf=None, ai_audit=None, accepted=None):
         self.interval = interval
         self.no_sig = no_sig
         self.sig = SignatureChecker(enabled=not no_sig)
@@ -16756,6 +16983,7 @@ class SnapshotCache:
         self.webshell = webshell
         self.ialog = ialog
         self.aisurf = aisurf
+        self.ai_audit = ai_audit
         self.accepted = accepted             # analyst-accepted "known noise" dets (fidelity view)
         self.ntfy = ntfy
         self.lock = threading.Lock()
@@ -16802,7 +17030,7 @@ class SnapshotCache:
                                incident_store=self.incidents, realtime=self.realtime,
                                history=self.history, decoys=self.decoys, responder=self.responder,
                                provenance=self.provenance, webshell=self.webshell, ialog=self.ialog,
-                               aisurf=self.aisurf)
+                               aisurf=self.aisurf, ai_audit=self.ai_audit)
             if self.history:
                 data["meta"]["history"] = self.history.stats()
             if self.decoys:
@@ -19381,6 +19609,17 @@ def make_handler(cache):
                 if vs and "rescan=1" in self.path:
                     threading.Thread(target=vs.scan, daemon=True).start()
                 self._send_json(vs.status() if vs else {"enabled": False})
+            elif path == "/api/ai-audit":
+                # Phase 5: sanitised AI audit-log findings. LOCAL CONSOLE ONLY — deliberately NOT in
+                # VIEW_WHITELIST, so the Mesh relay cannot fetch the excerpts; the fleet sees only the
+                # category counts via /api/ai-audit-summary (and meta.ai_audit).
+                aa = getattr(cache, "ai_audit", None)
+                self._send_json(aa.detail() if aa else {"enabled": False})
+            elif path == "/api/ai-audit-summary":
+                # Phase 5: COUNTS ONLY (category / technique tallies, no excerpts, no paths). This is the
+                # one audit endpoint in VIEW_WHITELIST, so the Mesh fleet view can tally it across hosts.
+                aa = getattr(cache, "ai_audit", None)
+                self._send_json(aa.summary() if aa else {"enabled": False})
             elif path == "/api/ai-surface":
                 # Full AI-surface inventory (agents / runtimes / MCP servers / instruction files /
                 # LLM-egress baseline). Whitelisted read-only so the mesh can fan it across the fleet.
@@ -21849,7 +22088,7 @@ class MeshReporter:
                       "/api/alert-history", "/api/ai-analysis", "/api/health", "/api/sensors",
                       "/api/export", "/api/ioc-feeds", "/api/geoip", "/api/respond", "/api/ai",
                       "/api/auth-map", "/api/vulns",
-                      "/api/ai-surface"}   # fleet CONFIG read (Phase B) + Mesh auth map + vuln scan + AI surface
+                      "/api/ai-surface", "/api/ai-audit-summary"}   # + AI surface & AI-audit COUNTS (never /api/ai-audit, which carries excerpts)
     VIEW_MAX_BYTES = 6 * 1024 * 1024          # cap a relayed view body (stays under the mesh ingest cap)
     # POST endpoints the mesh may drive on demand for REMOTE MANAGEMENT — only when the operator opted
     # this host into remote commands (--mesh-commands), gated by the mesh admin token.
@@ -23685,6 +23924,14 @@ def main():
                     help="seconds between AI-surface inventory scans (default 600)")
     ap.add_argument("--ai-context-dir", action="append", default=[], metavar="DIR",
                     help="extra project root to scan for agent instruction files (CLAUDE.md etc.; repeatable)")
+    ap.add_argument("--ai-audit", action="store_true",
+                    help="OPT-IN: parse local AI-agent transcripts (~/.claude/projects, Aider history, "
+                         "…) for executed dangerous commands. Off by default; sanitised excerpts stay on "
+                         "this host, the Mesh receives category counts only")
+    ap.add_argument("--ai-audit-interval", type=int, default=900,
+                    help="seconds between AI audit-log scans (default 900)")
+    ap.add_argument("--ai-audit-all-users", action="store_true",
+                    help="with --ai-audit and root, scan every user's transcripts (default: this user only)")
     ap.add_argument("--no-llm-endpoint-feed", action="store_true",
                     help="use only the built-in LLM-endpoint set (don't refresh it from a feed URL)")
     ap.add_argument("--llm-endpoint-feed-url", default=None, metavar="URL",
@@ -23915,6 +24162,11 @@ def main():
                                 interval=args.ai_surface_interval, endpoints=llm_endpoints,
                                 context_roots=tuple(args.ai_context_dir or ()))
     aisurf.start()
+    # Phase 5: AI-agent audit-log intelligence — OPT-IN (off by default). Parses local agent transcripts
+    # for executed dangerous commands; sanitised excerpts stay on this host, only counts reach the Mesh.
+    ai_audit = AIAuditCollector(enabled=args.ai_audit, interval=args.ai_audit_interval,
+                                home_only=not args.ai_audit_all_users)
+    ai_audit.start()
     realtime = RealtimeEvents(history=history, enabled=not args.no_realtime,
                               ephemeral_lifetime=args.realtime_ephemeral_secs)
     realtime.start()
@@ -23962,8 +24214,9 @@ def main():
                           lifecycle=lifecycle, ai=ai, suppressions=suppressions, incidents=incidents,
                           attack=attack, exporter=exporter, realtime=realtime, ntfy=ntfy,
                           provenance=provenance, webshell=webshell, ialog=ialog,
-                          aisurf=aisurf, accepted=accepted)
+                          aisurf=aisurf, ai_audit=ai_audit, accepted=accepted)
     cache.ai_surface = aisurf            # full AI-surface inventory, served by /api/ai-surface
+    cache.ai_audit = ai_audit            # local-only sanitised findings, served by /api/ai-audit
     cache.llm_endpoints = llm_endpoints
     cache.analyses = analyses            # exposed to the ai-analyze writer + the /api/ai-analysis reader
     cache.updater = updater              # served by /api/health + /api/update
@@ -24105,6 +24358,11 @@ def main():
               f"{(' + %d feed' % _eps['feed']) if _eps['feed'] else ''} endpoint(s)")
     else:
         print("│  AI surface: off")
+    if ai_audit.enabled:
+        print(f"│  AI audit: parsing local agent transcripts for dangerous commands, every "
+              f"{args.ai_audit_interval}s (local-only; Mesh gets counts)")
+    else:
+        print("│  AI audit: off (opt-in with --ai-audit; local-only)")
     if tcc.enabled:
         ts = tcc.summary()
         access = ("reading TCC.db" if ts["accessible"]

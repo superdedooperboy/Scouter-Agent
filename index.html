@@ -3155,10 +3155,39 @@ function aiSurfDraw(){
   h+='<div class="hint" style="margin-top:12px">LLM-egress endpoint set: <b>'+(ep.static||0)+'</b> built-in'+
      (ep.feed?(' + <b>'+ep.feed+'</b> from feed'):'')+' endpoint host(s)'+
      (ep.updated?(' · refreshed '+esc(ep.updated)):'')+'.</div>';
+  // --- Phase 5: AI audit-log intelligence (local-only; filled asynchronously) ---
+  h+='<div id="aiAuditSection" style="margin-top:18px"></div>';
   box.innerHTML=h;
+  renderAiAudit();
   // badge on the tab
   const b=document.getElementById('aiSurfBadge');
   if(b){ if(finds){ b.textContent=finds; b.style.display=''; } else b.style.display='none'; }
+}
+function renderAiAudit(){
+  const sec=document.getElementById('aiAuditSection'); if(!sec) return;
+  fetch('/api/ai-audit').then(r=>r.json()).then(d=>{
+    let h='<div style="font-size:14px;font-weight:700;margin-bottom:4px">AI audit-log intelligence '+
+      '<span class="hint" style="font-weight:400">· local-only</span></div>';
+    if(d.enabled===false){
+      h+='<div class="hint" style="max-width:640px">'+esc(d.note||'Off. Enable with --ai-audit.')+
+         ' This parses local agent transcripts (Claude Code, Aider, …) for executed dangerous commands; '+
+         'sanitized excerpts stay on this host and the Mesh receives category counts only.</div>';
+      sec.innerHTML=h; return;
+    }
+    const fs=d.findings||[];
+    h+='<div class="hint" style="max-width:660px;margin-bottom:6px">Dangerous commands an AI agent executed, recovered from its own transcripts and scrubbed of secrets. Scanned '+
+       (d.transcripts_scanned||0)+' transcript(s) · '+esc(d.generated||'—')+'.</div>';
+    if(!fs.length){ h+='<div class="hint">No dangerous commands found in the scanned transcripts.</div>'; sec.innerHTML=h; return; }
+    h+='<div style="overflow-x:auto"><table class="aisurf-tbl"><thead><tr>'+
+       ['Severity','Category','Agent','Command (sanitized)','Transcript'].map(x=>'<th>'+esc(x)+'</th>').join('')+'</tr></thead><tbody>'+
+       fs.map(f=>{ const col=aiSevColor(f.severity);
+         return '<tr><td>'+aiChip(f.severity,col)+(f.mitre?(' '+aiChip(f.mitre,'var(--muted)')):'')+'</td>'+
+           '<td>'+esc(f.category||'')+'</td><td>'+esc(f.source||'')+'</td>'+
+           '<td><code style="word-break:break-all">'+esc(f.excerpt||'')+'</code></td>'+
+           '<td class="hint" style="word-break:break-all">'+esc(f.transcript||'')+'</td></tr>'; }).join('')+
+       '</tbody></table></div>';
+    sec.innerHTML=h;
+  }).catch(e=>{ sec.innerHTML='<div class="hint">AI audit: '+esc(''+e)+'</div>'; });
 }
 function aiSurfFindingsHTML(){
   // the scored exposures are the ai-* nodes in the live snapshot we already keep in RAW

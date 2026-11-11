@@ -133,8 +133,37 @@ a local **AI audit-log** panel; the Mesh fleet view gains a counts-only AI-audit
 0.7.62). `tests/test_ai_surface.py` covers the sanitiser, the structure-agnostic command extraction,
 the counts-only-vs-excerpts split, the disabled-leaks-nothing contract, and the whitelist boundary.
 
-Still **held** for release: Phases 1–5 land in the same 1.14.0; the version is not published until the
-remaining planned phase (response & fleet) is implemented.
+**Response & fleet — Phase 6 of AI-agent-abuse detection (both agents + Mesh).** The final phase makes
+the AI-surface findings *actionable*, extending the existing Responder ladder rather than inventing a
+new one — so everything stays posture-gated, reversible-first, audited, and undoable from the same
+places as every other containment.
+
+- **Reversible MCP config-quarantine.** A new `quarantine_mcp` / `restore_mcp` action pair surgically
+  removes **one** untrusted MCP-server entry from its shared config file — top-level `mcpServers`/
+  `servers` and `~/.claude.json`'s per-project maps — leaving every other server and all unrelated
+  state intact. The removed definition is kept in the reversibility ledger, so `restore_mcp` puts it
+  back exactly (and a bare restore recovers it from the ledger when the caller doesn't carry it). It
+  only ever edits a file the AI-surface collector itself enumerated, and refuses anything else.
+- **Instruction-file quarantine.** The mature file `quarantine` now also applies to flagged agent
+  instruction files (`ai-context`), so a tampered or hidden-instruction `CLAUDE.md`/`AGENTS.md` can be
+  moved to a locked quarantine, reversibly, instead of only being alerted on.
+- **Recommendations.** A remote or launch-fetched MCP server now recommends `quarantine_mcp`, and a
+  flagged instruction file recommends `quarantine`, through the same per-alert plan path on both agents
+  (offered, never auto-fired below an armed Counter posture).
+- **Fleet MCP allow/deny push (Mesh 0.7.63).** The fleet AI-surface MCP map gains per-server **Deny**
+  (quarantine the entry on every host that carries it) and **Allow** (restore) controls — one command
+  per host, each targeting that host's own config path, over the existing reversible remote-containment
+  channel. Irreversible eradication (`kill`/`delete_file`) remains a local, at-the-console action and
+  is never fleet-pushable.
+- **Posture-gated host isolation and reversible agent containment** continue to use the shipped ladder:
+  an AI-agent-driven dangerous action (elevated in Phase 3) is a process node that offers reversible
+  `suspend` before `kill`, and `isolate_host` remains the posture-gated, mesh-pushable big hammer.
+
+`tests/test_ai_surface.py` (both agents, +7 each) covers the surgical quarantine + byte-exact restore,
+project-scoped entries, the bare-restore ledger self-heal, the config-file guard, the recommendation
+wiring, and the reversible-only fleet-push boundary.
+
+With Phase 6 in, all six planned phases are implemented; 1.14.0 is ready to tag.
 
 ## [1.13.0] — 2026-11-03
 

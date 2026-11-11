@@ -1028,6 +1028,10 @@ def rule_confidence(r):
 ACTION_MIN_CONFIDENCE = {
     "vr_forensics": 2,
     "suspend": 3, "disable_job": 3, "quarantine": 3, "block_ip": 3,
+    # Reversible, low-blast-radius (one entry out of a config file), and the finding itself — a
+    # remote or unpinned-fetched MCP server — is the actionable thing, so it is offered at the
+    # finding's own confidence rather than gated to a corroborated hit.
+    "quarantine_mcp": 2,
     "kill": 4, "delete_file": 4,
 }
 DEFAULT_ACTION_MIN_CONFIDENCE = 3
@@ -15091,9 +15095,16 @@ def recommend_response(n):
     if t == "remote" and d.get("public") and d.get("raddr"):
         return rec("block_ip", {"ip": d["raddr"]},
                    "Cut communication to this address with a reversible blackhole route.")
-    if t in ("file", "download") and d.get("path"):
+    if t in ("file", "download", "ai-context") and d.get("path"):
         return rec("quarantine", {"path": d["path"]},
                    "Move the file to a locked quarantine folder (reversible) rather than deleting it.")
+    # An untrusted MCP server (reached over the network, or fetched-and-run on each launch): pull its
+    # one entry out of the config — reversibly — so the agent stops launching it, pending review.
+    if t == "ai-mcp" and d.get("finding") in ("remote-mcp", "npx-fetched-mcp") \
+            and d.get("path") and d.get("server"):
+        return rec("quarantine_mcp",
+                   {"path": d["path"], "server": d["server"], "client": d.get("client")},
+                   "Remove this MCP server from its config (reversible) so the agent can't launch it until you vet it.")
     if t == "job" and (d.get("path") or "").endswith(".plist"):
         return rec("disable_job", {"path": d["path"]},
                    "Disable the launchd job (reversible) so it stops running and re-launching.")
@@ -15113,8 +15124,10 @@ def derive_action_target(action_id, node, registry):
         return {"pid": d["pid"]}
     if t == "remote" and d.get("public") and d.get("raddr"):
         return {"ip": d["raddr"]}
-    if t in ("file", "download") and d.get("path"):
+    if t in ("file", "download", "ai-context") and d.get("path"):
         return {"path": d["path"]}
+    if t == "ai-mcp" and d.get("path") and d.get("server"):
+        return {"path": d["path"], "server": d["server"], "client": d.get("client")}
     if t == "job" and (d.get("path") or "").endswith(".plist"):
         return {"path": d["path"]}
     return None
@@ -21011,11 +21024,21 @@ class Responder:
                             applies=["job"], backend="native", reversible=False,
                             destructive=False, verb="Re-enabled", hidden=True),
             "quarantine": d(label="Quarantine", icon="📦", mode="defensive", kind="file",
-                            applies=["file", "download"], backend="native", reversible=True,
-                            destructive=False, undo="restore", verb="Quarantined"),
+                            applies=["file", "download", "ai-context"], backend="native",
+                            reversible=True, destructive=False, undo="restore", verb="Quarantined"),
             "restore": d(label="Restore", icon="♻", mode="defensive", kind="file",
-                         applies=["file", "download"], backend="native", reversible=False,
-                         destructive=False, verb="Restored", hidden=True),
+                         applies=["file", "download", "ai-context"], backend="native",
+                         reversible=False, destructive=False, verb="Restored", hidden=True),
+            # ---- Defensive: reversible AI config-quarantine (surgical, not whole-file) ----
+            # Pull ONE malicious/untrusted MCP-server entry out of its shared config file (the file
+            # holds other servers + unrelated state, so we never quarantine the whole file). The
+            # removed definition is kept in the ledger so "restore_mcp" puts it back exactly.
+            "quarantine_mcp": d(label="Quarantine MCP", icon="📦", mode="defensive", kind="ai-mcp",
+                                applies=["ai-mcp"], backend="native", reversible=True,
+                                destructive=False, undo="restore_mcp", verb="Quarantined MCP server"),
+            "restore_mcp": d(label="Restore MCP", icon="♻", mode="defensive", kind="ai-mcp",
+                             applies=["ai-mcp"], backend="native", reversible=False,
+                             destructive=False, verb="Restored MCP server", hidden=True),
             "vr_forensics": d(label="Forensics (VR)", icon="🦖", mode="defensive", kind="vr",
                               applies=["process"], backend="velociraptor", reversible=False,
                               destructive=False, verb="Collected forensics for",
@@ -21026,8 +21049,8 @@ class Responder:
                       applies=["process"], backend="native", reversible=False,
                       destructive=True, verb="Killed"),
             "delete_file": d(label="Delete", icon="🗑", mode="counter", kind="file",
-                             applies=["file", "download"], backend="native", reversible=False,
-                             destructive=True, verb="Deleted"),
+                             applies=["file", "download", "ai-context"], backend="native",
+                             reversible=False, destructive=True, verb="Deleted"),
         }
         # Deterministic response playbook: per-ATT&CK-tactic workflows + per-detection overrides.
         self.playbook = ResponsePlaybook(
@@ -21555,7 +21578,8 @@ class Responder:
     def _dispatch(self, action_id, spec, target):
         handler = {"process": self._act_process, "network": self._act_network,
                    "launchd": self._act_launchd, "file": self._act_file,
-                   "hosts": self._act_hosts, "vr": self._act_vr}.get(spec["kind"])
+                   "hosts": self._act_hosts, "vr": self._act_vr,
+                   "ai-mcp": self._act_mcp}.get(spec["kind"])
         if not handler:
             return {"ok": False, "error": "no handler for this action"}
         return handler(action_id, spec, target)
@@ -22007,6 +22031,122 @@ class Responder:
             self._audit(action_id, {"path": path, "sha256": sha}, "ok")
             return {"ok": True, "result": f"Deleted {os.path.basename(path)}", "status": self.status()}
         return {"ok": False, "error": "unsupported file action"}
+
+    # ---- AI config-quarantine (surgically disable / restore ONE MCP server entry) ----
+    def _quarantine_mcp_target(self, path, server):
+        """The saved undo target of an active quarantine_mcp for this (config, server), if any — so a
+        bare restore (e.g. a fleet 'allow') can recover exactly what was removed and where."""
+        with self.lock:
+            for e in self.ledger.values():
+                if e.get("kind") == "ai-mcp" and e.get("action") == "quarantine_mcp" \
+                        and e.get("match") == f"{path}::{server}":
+                    return dict(e.get("target") or {})
+        return None
+
+    @staticmethod
+    def _mcp_config_file_set():
+        """The config files the AI-surface collector enumerates. We only ever edit one of these, so
+        a crafted target path can't make us rewrite an arbitrary JSON file on disk."""
+        try:
+            return {os.path.realpath(p) for p, _c, _s in _mcp_config_paths()}
+        except Exception:  # noqa: BLE001
+            return set()
+
+    @staticmethod
+    def _mcp_blocks(data):
+        """Yield (container_dict, key) for every MCP-server map in a parsed config: the top-level
+        mcpServers/servers, plus ~/.claude.json's per-project maps. The container is the dict that
+        holds the server definitions, so popping/reinserting a name is surgical."""
+        for key in ("mcpServers", "servers"):
+            if isinstance(data.get(key), dict):
+                yield data[key], None
+        projs = data.get("projects")
+        if isinstance(projs, dict):
+            for proj, pdata in projs.items():
+                if isinstance(pdata, dict) and isinstance(pdata.get("mcpServers"), dict):
+                    yield pdata["mcpServers"], proj
+
+    def _act_mcp(self, action_id, spec, target):
+        path = os.path.realpath((target.get("path") or "").strip())
+        server = (target.get("server") or "").strip()
+        if not path or not server:
+            return {"ok": False, "error": "need the config file path and the MCP server name"}
+        if path not in self._mcp_config_file_set():
+            self._audit(action_id, {"path": path, "server": server}, "blocked:not-an-mcp-config")
+            return {"ok": False, "error": "refused — not a known MCP configuration file"}
+        if path.startswith(self.PROTECTED_PATH_PREFIXES):
+            return {"ok": False, "error": "refused — protected system path"}
+        try:
+            with open(path) as fh:
+                data = json.load(fh)                   # strict parse: we must round-trip it faithfully
+        except (OSError, ValueError) as e:
+            return {"ok": False, "error": f"cannot read MCP config as JSON: {str(e)[:120]}"}
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "MCP config is not a JSON object"}
+
+        if action_id == "restore_mcp":
+            removed = target.get("removed")
+            block_key = target.get("block_key") or "mcpServers"
+            project = target.get("project")
+            if not isinstance(removed, dict):
+                # A fleet "allow" (or any caller) may issue a bare restore with just path+server;
+                # recover the exact removed definition and its location from our own ledger.
+                saved = self._quarantine_mcp_target(path, server)
+                if saved:
+                    removed = saved.get("removed")
+                    block_key = saved.get("block_key") or block_key
+                    project = saved.get("project")
+            if not isinstance(removed, dict):
+                return {"ok": False, "error": "no saved MCP definition to restore"}
+            if project:
+                proj = ((data.setdefault("projects", {})).setdefault(project, {}))
+                container = proj.setdefault("mcpServers", {})
+            else:
+                container = data.setdefault(block_key, {})
+            if not isinstance(container, dict):
+                return {"ok": False, "error": "restore target is not a server map"}
+            container[server] = removed
+            if not self._write_json(path, data):
+                return {"ok": False, "error": "could not write the MCP config back"}
+            self._ledger_remove_match("ai-mcp", f"{path}::{server}")
+            self._audit(action_id, {"path": path, "server": server}, "ok")
+            return {"ok": True, "result": f"Restored MCP server {server}", "status": self.status()}
+
+        # quarantine_mcp: pop the first matching server entry, remember exactly where it lived.
+        for container, project in self._mcp_blocks(data):
+            if server in container:
+                removed = container.pop(server)
+                block_key = "servers" if (data.get("servers") is container) else "mcpServers"
+                if not self._write_json(path, data):
+                    container[server] = removed          # put it back on write failure
+                    return {"ok": False, "error": "could not write the MCP config"}
+                undo_target = {"path": path, "server": server, "client": target.get("client"),
+                               "block_key": block_key, "project": project, "removed": removed}
+                token = self._ledger_add(action_id, spec, undo_target, server, f"{path}::{server}")
+                self._audit(action_id, {"path": path, "server": server, "project": project}, "ok")
+                return {"ok": True, "undo_token": token,
+                        "result": f"Quarantined MCP server {server} (removed from "
+                                  f"{os.path.basename(path)}, reversible)", "status": self.status()}
+        return {"ok": False, "error": f"MCP server '{server}' not found in {os.path.basename(path)}"}
+
+    @staticmethod
+    def _write_json(path, data):
+        """Atomically rewrite a config file, preserving mode. Pretty-printed (2-space) because the
+        AI tools that own these files write them that way, so the diff stays minimal and readable."""
+        try:
+            try:
+                mode = os.stat(path).st_mode & 0o777
+            except OSError:
+                mode = 0o600
+            tmp = path + ".scouter.tmp"
+            with open(tmp, "w") as fh:
+                json.dump(data, fh, indent=2)
+                fh.write("\n")
+            os.chmod(tmp, mode)
+            os.replace(tmp, path)
+            return True
+        except OSError:
+            return False
 
     # ---- Velociraptor-backed actions (headless `velociraptor query`) ----
     def _act_vr(self, action_id, spec, target):

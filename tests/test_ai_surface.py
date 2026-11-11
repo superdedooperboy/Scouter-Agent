@@ -544,5 +544,105 @@ class Phase5Audit(unittest.TestCase):
         self.assertIn("/api/ai-surface", wl)             # sanity: surface IS shared
 
 
+class Phase6Response(unittest.TestCase):
+    """Phase 6 — the AI response ladder. Reversible MCP config-quarantine (surgical, not whole-file),
+    its ledgered undo + bare-restore self-heal, the config-file guard, the recommendation wiring, and
+    the fleet-pushable (reversible-only) remote-action boundary."""
+
+    def _responder(self, cfg):
+        r = agent.Responder(locked=False)
+        # keep the test hermetic: redirect every file Responder would write next to the agent.
+        self.tmp = tempfile.mkdtemp()
+        r.state_file = os.path.join(self.tmp, "state.json")
+        r.audit_file = os.path.join(self.tmp, "audit.log")
+        r.settings_file = os.path.join(self.tmp, "settings.json")
+        r.quarantine_dir = os.path.join(self.tmp, "q")
+        r.ledger = {}
+        r.mode = "defensive"
+        # the real collector decides which files are MCP configs; pin it to our fixture.
+        r._mcp_config_file_set = staticmethod(lambda: {os.path.realpath(cfg)})
+        return r
+
+    def _cfg(self):
+        tmp = tempfile.mkdtemp()
+        cfg = os.path.join(tmp, ".claude.json")
+        data = {"mcpServers": {"good": {"command": "node"},
+                               "evil": {"url": "https://attacker.example/sse", "type": "sse"}},
+                "projects": {"/w": {"mcpServers": {"proj-evil": {"command": "npx"}}}},
+                "otherState": {"keep": 1}}
+        with open(cfg, "w") as fh:
+            json.dump(data, fh, indent=2)
+        return cfg, data
+
+    def test_quarantine_is_surgical_and_reversible(self):
+        cfg, orig = self._cfg()
+        r = self._responder(cfg)
+        res = r._act_mcp("quarantine_mcp", r.registry["quarantine_mcp"],
+                         {"path": cfg, "server": "evil", "client": "Claude Code"})
+        self.assertTrue(res["ok"])
+        after = json.load(open(cfg))
+        self.assertNotIn("evil", after["mcpServers"])         # the one bad server is gone
+        self.assertIn("good", after["mcpServers"])            # siblings untouched
+        self.assertEqual(after["otherState"], {"keep": 1})    # unrelated state preserved
+        # undo via the ledger restores it byte-for-byte
+        undo = r.undo(res["undo_token"])
+        self.assertTrue(undo["ok"])
+        self.assertEqual(json.load(open(cfg))["mcpServers"]["evil"], orig["mcpServers"]["evil"])
+
+    def test_quarantine_project_scoped_entry(self):
+        cfg, _ = self._cfg()
+        r = self._responder(cfg)
+        res = r._act_mcp("quarantine_mcp", r.registry["quarantine_mcp"],
+                         {"path": cfg, "server": "proj-evil"})
+        self.assertTrue(res["ok"])
+        self.assertEqual(json.load(open(cfg))["projects"]["/w"]["mcpServers"], {})
+
+    def test_bare_restore_self_heals_from_ledger(self):
+        # a fleet "allow" issues restore_mcp with only path+server; the agent recovers the removed
+        # definition (and its location) from its own ledger.
+        cfg, orig = self._cfg()
+        r = self._responder(cfg)
+        r._act_mcp("quarantine_mcp", r.registry["quarantine_mcp"], {"path": cfg, "server": "evil"})
+        res = r._act_mcp("restore_mcp", r.registry["restore_mcp"], {"path": cfg, "server": "evil"})
+        self.assertTrue(res["ok"])
+        self.assertEqual(json.load(open(cfg))["mcpServers"]["evil"], orig["mcpServers"]["evil"])
+
+    def test_refuses_a_path_that_is_not_an_mcp_config(self):
+        cfg, _ = self._cfg()
+        r = self._responder(cfg)
+        bad = os.path.join(os.path.dirname(cfg), "random.json")
+        with open(bad, "w") as fh:
+            json.dump({"mcpServers": {"x": {}}}, fh)
+        res = r._act_mcp("quarantine_mcp", r.registry["quarantine_mcp"], {"path": bad, "server": "x"})
+        self.assertFalse(res["ok"])
+        self.assertIn("not a known MCP", res["error"])
+
+    def test_missing_server_is_a_clean_miss(self):
+        cfg, _ = self._cfg()
+        r = self._responder(cfg)
+        res = r._act_mcp("quarantine_mcp", r.registry["quarantine_mcp"],
+                         {"path": cfg, "server": "nope"})
+        self.assertFalse(res["ok"])
+        self.assertEqual(json.load(open(cfg)), json.load(open(cfg)))  # file untouched
+
+    def test_recommendation_wiring(self):
+        reg = agent.Responder(locked=False).registry
+        mcp = {"type": "ai-mcp", "severity": "medium", "reasons": [{"mitre": "T1567"}],
+               "detail": {"finding": "remote-mcp", "server": "evil", "client": "Claude Code",
+                          "path": "/h/.claude.json"}}
+        self.assertEqual(agent.recommend_response(mcp)["action"], "quarantine_mcp")
+        self.assertEqual(agent.derive_action_target("quarantine_mcp", mcp, reg)["server"], "evil")
+        ctx = {"type": "ai-context", "severity": "high", "detail": {"path": "/h/CLAUDE.md"}}
+        self.assertEqual(agent.recommend_response(ctx)["action"], "quarantine")
+        self.assertEqual(agent.derive_action_target("quarantine", ctx, reg), {"path": "/h/CLAUDE.md"})
+
+    def test_fleet_pushable_only_reversible(self):
+        remote = agent.Responder(locked=False).remote_actions()
+        self.assertIn("quarantine_mcp", remote)      # reversible config-quarantine is fleet-pushable
+        self.assertIn("restore_mcp", remote)         # and its reversal
+        self.assertNotIn("kill", remote)             # irreversible eradication never is
+        self.assertNotIn("delete_file", remote)
+
+
 if __name__ == "__main__":
     unittest.main()

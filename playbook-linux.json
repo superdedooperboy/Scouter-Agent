@@ -208,13 +208,28 @@
    "mode": "defensive",
    "applies": [
     "file",
-    "download"
+    "download",
+    "ai-context"
    ],
    "backend": "native",
    "reversible": true,
    "destructive": false,
    "min_confidence": 3,
    "min_confidence_label": "strong"
+  },
+  {
+   "id": "quarantine_mcp",
+   "label": "Quarantine MCP",
+   "icon": "\ud83d\udce6",
+   "mode": "defensive",
+   "applies": [
+    "ai-mcp"
+   ],
+   "backend": "native",
+   "reversible": true,
+   "destructive": false,
+   "min_confidence": 2,
+   "min_confidence_label": "probable"
   },
   {
    "id": "vr_forensics",
@@ -251,7 +266,8 @@
    "mode": "counter",
    "applies": [
     "file",
-    "download"
+    "download",
+    "ai-context"
    ],
    "backend": "native",
    "reversible": false,

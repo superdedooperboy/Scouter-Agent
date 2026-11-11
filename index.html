@@ -7243,7 +7243,9 @@ function respTarget(type,det){
   if(!det) return null;
   if(type==='process') return det.pid!=null?{pid:det.pid}:null;
   if(type==='remote')  return det.raddr?{ip:det.raddr}:null;
-  if(type==='file'||type==='download') return det.path?{path:det.path}:null;
+  if(type==='file'||type==='download'||type==='ai-context') return det.path?{path:det.path}:null;
+  // an untrusted MCP server entry — reversibly removable from its config (Phase 6 config-quarantine)
+  if(type==='ai-mcp')  return (det.path&&det.server)?{path:det.path,server:det.server,client:det.client}:null;
   if(type==='job')     return (det.path&&/\.plist$/.test(det.path))?{path:det.path}:null;
   return null;
 }
@@ -7255,13 +7257,14 @@ function respCurrentTarget(){          // resolve the selected node into {type,t
   return {type, target:respTarget(type,det)};
 }
 const RESP_UNDO={resume:{i:'▶',l:'Resume'},unblock_ip:{i:'✅',l:'Unblock'},
-  enable_job:{i:'🔌',l:'Re-enable'},restore:{i:'♻',l:'Restore'}};
+  enable_job:{i:'🔌',l:'Re-enable'},restore:{i:'♻',l:'Restore'},restore_mcp:{i:'♻',l:'Restore MCP'}};
 function respActiveFor(type,target){     // is this artifact currently contained by Mac Scouter?
   if(!target) return null;
   return ((respState&&respState.active)||[]).find(e=>{
     if(e.kind==='process') return type==='process' && String(e.match)===String(target.pid);
     if(e.kind==='network') return type==='remote' && String(e.match)===String(target.ip);
-    if(e.kind==='file')    return (type==='file'||type==='download') && e.match===target.path;
+    if(e.kind==='file')    return (type==='file'||type==='download'||type==='ai-context') && e.match===target.path;
+    if(e.kind==='ai-mcp')  return type==='ai-mcp' && e.match===(target.path+'::'+target.server);
     if(e.kind==='launchd') return type==='job' && e.match===target.path;
     return false;
   })||null;

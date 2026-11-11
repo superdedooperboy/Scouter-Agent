@@ -306,5 +306,91 @@ class CollectorContract(unittest.TestCase):
         self.assertEqual(d["enabled"], True)
 
 
+class AiAgentLineage(unittest.TestCase):
+    """Phase 3 — behavioral correlation. An already-flagged dangerous action whose process ancestry
+    includes a catalogued AI agent/runtime is elevated to high with a 'Driven by an AI agent' reason;
+    anything else is left untouched (strong gate: flagged AND agent-ancestor AND a danger technique)."""
+
+    @staticmethod
+    def _node(sev, techs, ancestry):
+        score = {"high": 70, "medium": 40, "low": 20, "info": 0}[sev]
+        return {"type": "process", "severity": sev, "score": score,
+                "reasons": [agent.reason("flagged", t, 50) for t in techs],
+                "detail": {"pid": 1, "ancestry": ancestry}}
+
+    def _elevated(self, n):
+        return any("Driven by an AI agent" in r["text"] for r in n["reasons"])
+
+    def test_cred_read_under_agent_elevates(self):
+        n = self._node("medium", ["T1552.001"], "launchd > claude > bash")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 1)
+        self.assertTrue(self._elevated(n))
+        self.assertEqual(n["severity"], "high")
+        self.assertEqual(n["detail"]["ai_lineage"]["agent"], "claude")
+
+    def test_runtime_ancestor_dropper_elevates(self):
+        # a local LLM runtime (ollama) spawning an ingress-tool-transfer action = AI-orchestrated shape
+        n = self._node("medium", ["T1105"], "launchd > ollama > curl")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 1)
+        self.assertEqual(n["severity"], "high")
+
+    def test_no_agent_ancestry_untouched(self):
+        n = self._node("high", ["T1059"], "launchd > sshd > bash")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 0)
+        self.assertFalse(self._elevated(n))
+
+    def test_agent_ancestry_but_benign_technique_untouched(self):
+        # process discovery (T1057) under an agent is ordinary agent work — not a danger technique
+        n = self._node("low", ["T1057"], "launchd > claude > ps")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 0)
+        self.assertFalse(self._elevated(n))
+
+    def test_info_node_not_elevated(self):
+        # only an ALREADY-FLAGGED node is elevated; an info node is never pulled up
+        n = self._node("info", ["T1552"], "launchd > claude > bash")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 0)
+        self.assertEqual(n["severity"], "info")
+
+    def test_never_escalates_to_critical(self):
+        n = self._node("high", ["T1486"], "launchd > cursor > sh")
+        n["severity"] = "critical"
+        n["score"] = 90
+        agent.correlate_ai_agent_lineage([n])
+        # a critical stays critical (elevation floors to high, never above)
+        self.assertEqual(n["severity"], "critical")
+
+    def test_idempotent_no_duplicate_reason(self):
+        n = self._node("medium", ["T1552"], "launchd > aider > bash")
+        agent.correlate_ai_agent_lineage([n])
+        agent.correlate_ai_agent_lineage([n])
+        hits = [r for r in n["reasons"] if "Driven by an AI agent" in r["text"]]
+        self.assertEqual(len(hits), 1)
+
+
+class LolaiAdvisory(unittest.TestCase):
+    """The living-off-AI advisory hunt (lolai-agent-lineage-2026-11) is present and its history SQL is
+    valid against the real `processes` schema, matching an agent-parented sensitive action."""
+
+    DDL = ("CREATE TABLE processes(key TEXT PRIMARY KEY, pid INTEGER, ppid INTEGER, ppid_name TEXT,"
+           " user TEXT, name TEXT, exe TEXT, cmdline TEXT, severity TEXT, max_score INTEGER,"
+           " first_seen INTEGER, last_seen INTEGER, times_seen INTEGER);")
+
+    def test_hunt_present_and_sql_valid(self):
+        import sqlite3
+        hunt = next((h for h in agent.ADVISORY_HUNTS
+                     if h["id"] == "lolai-agent-lineage-2026-11"), None)
+        self.assertIsNotNone(hunt)
+        self.assertEqual(hunt["severity"], "high")
+        con = sqlite3.connect(":memory:")
+        con.executescript(self.DDL)
+        # a bash child of claude reading an ssh key (positive) + a benign child of launchd (negative)
+        con.execute("INSERT INTO processes VALUES('k1',101,100,'claude','dev','bash','/bin/bash',"
+                    "'bash -c \"cat ~/.ssh/id_rsa\"','high',70,1,2,1)")
+        con.execute("INSERT INTO processes VALUES('k2',102,1,'launchd','dev','bash','/bin/bash',"
+                    "'bash -lc ls','info',0,1,2,1)")
+        rows = con.execute(hunt["hunts"][0]["sql"]).fetchall()
+        self.assertEqual(len(rows), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

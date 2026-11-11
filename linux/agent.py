@@ -5199,6 +5199,72 @@ class InitialAccessFeed:
 # don't need — the dismissal persists per host, and dismissed advisories can be restored.
 ADVISORY_HUNTS = [
     {
+        "id": "lolai-agent-lineage-2026-11", "severity": "high", "published": "2026-11-11",
+        "title": "Living off AI — an attacker steering a trusted AI coding agent",
+        "summary": "An installed, trusted AI coding agent (Claude Code, Cursor, Aider, Codex, Gemini CLI, "
+            "Copilot, Cline, Windsurf, Goose, Amazon Q, …) is an allow-listed program that can read files, run "
+            "shell commands and reach the network — exactly the capabilities an attacker wants, already present "
+            "and trusted. In the s1ngularity / nx supply-chain compromise (Aug 2025) the malicious package drove "
+            "whichever agent CLI was installed (claude / gemini / q) to enumerate the developer's secrets and SSH "
+            "keys, so the harmful actions ran under a legitimate agent's lineage rather than from an obvious "
+            "dropper. The host-visible shadow is a sensitive action — a shell or interpreter, a credential read "
+            "of ~/.ssh / ~/.aws / /etc/shadow, a persistence change (systemd / cron / shell rc), a reverse shell "
+            "— whose PARENT process is an AI agent. A developer genuinely using an agent will trip these, so "
+            "treat a hit as a lead to confirm against intent, not a verdict; the real-time view already elevates "
+            "the live case (see the 'Driven by an AI agent' reason on a flagged process).",
+        "references": ["https://attack.mitre.org/techniques/T1059/",
+                       "https://attack.mitre.org/techniques/T1552/"],
+        "hunts": [
+            {"name": "A sensitive action whose parent is an AI coding agent",
+             "why": "The living-off-AI shape — a child process of a trusted agent that reads credentials, "
+                    "writes persistence, or opens a reverse shell. The parent being the agent is what turns a "
+                    "generic risky command into an agent-driven one; confirm whether the developer asked for it.",
+             "sql": "SELECT datetime(last_seen,'unixepoch','localtime') AS t, name, ppid_name, user, cmdline,\n"
+                    "       severity, times_seen\n"
+                    "FROM processes\n"
+                    "WHERE lower(ppid_name) IN ('claude','claude-code','codex','cursor','aider','windsurf',\n"
+                    "                           'cline','copilot','opencode','goose','gemini','gemini-cli',\n"
+                    "                           'amazon-q','ollama')\n"
+                    "  AND ( lower(cmdline) LIKE '%/.ssh/%' OR lower(cmdline) LIKE '%/.aws/%'\n"
+                    "        OR lower(cmdline) LIKE '%/etc/shadow%' OR lower(cmdline) LIKE '%/etc/sudoers%'\n"
+                    "        OR lower(cmdline) LIKE '%base64 -d%' OR lower(cmdline) LIKE '%/dev/tcp/%'\n"
+                    "        OR lower(cmdline) LIKE '%systemctl %' OR lower(cmdline) LIKE '%crontab %'\n"
+                    "        OR lower(cmdline) LIKE '%/.bashrc%' OR lower(cmdline) LIKE '%/.profile%'\n"
+                    "        OR lower(cmdline) LIKE '%authorized_keys%'\n"
+                    "        OR lower(cmdline) LIKE '%nc -%' OR lower(cmdline) LIKE '%ncat %' )\n"
+                    "ORDER BY t DESC",
+             "vql": "LET agents = SELECT Pid FROM pslist()\n"
+                    "  WHERE Name =~ '(?i)^(claude|claude-code|codex|cursor|aider|windsurf|cline|copilot|"
+                    "opencode|goose|gemini(-cli)?|amazon-q|ollama)$'\n"
+                    "SELECT Pid, Ppid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                    "WHERE Ppid IN agents.Pid\n"
+                    "  AND (CommandLine =~ '(?i)(/\\.ssh/|/\\.aws/|/etc/shadow|/etc/sudoers|base64 -d|/dev/tcp/|"
+                    "systemctl |crontab |/\\.bashrc|/\\.profile|authorized_keys|nc -|ncat )')\n"
+                    "LIMIT 200"},
+            {"name": "A shell or network tool spawned by an AI coding agent",
+             "why": "Broader lead — any interpreter or raw network tool whose parent is an agent. Most will be "
+                    "legitimate agent activity, so rank by what the child then did; it is the catch-all for an "
+                    "agent being driven to run commands the pattern list above doesn't name.",
+             "sql": "SELECT datetime(last_seen,'unixepoch','localtime') AS t, name, ppid_name, user, cmdline,\n"
+                    "       severity, times_seen\n"
+                    "FROM processes\n"
+                    "WHERE lower(ppid_name) IN ('claude','claude-code','codex','cursor','aider','windsurf',\n"
+                    "                           'cline','copilot','opencode','goose','gemini','gemini-cli',\n"
+                    "                           'amazon-q','ollama')\n"
+                    "  AND lower(name) IN ('sh','bash','zsh','dash','ksh','curl','wget','nc','ncat','netcat',\n"
+                    "                      'socat','perl','ruby','php','python','python3')\n"
+                    "ORDER BY t DESC",
+             "vql": "LET agents = SELECT Pid FROM pslist()\n"
+                    "  WHERE Name =~ '(?i)^(claude|claude-code|codex|cursor|aider|windsurf|cline|copilot|"
+                    "opencode|goose|gemini(-cli)?|amazon-q|ollama)$'\n"
+                    "SELECT Pid, Ppid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                    "WHERE Ppid IN agents.Pid\n"
+                    "  AND Name =~ '(?i)^(sh|bash|zsh|dash|ksh|curl|wget|nc|ncat|netcat|socat|perl|ruby|php|"
+                    "python[0-9]?)$'\n"
+                    "LIMIT 200"},
+        ],
+    },
+    {
         "id": "llm-egress-lamehug-2026-11", "severity": "high", "published": "2026-11-11",
         "title": "AI-orchestrated malware — a script or dropped binary calling an LLM API at runtime",
         "summary": "A class of malware now calls a large-language-model API at runtime to GENERATE its "
@@ -14956,6 +15022,78 @@ def enrich_process_lineage(nodes, procs=None, max_depth=8):
             d["ancestry"] = " > ".join(reversed(chain))
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 — AI-agent behavioral correlation
+# ---------------------------------------------------------------------------
+# Process-name fragments for catalogued AI coding agents and local LLM runtimes, used to recognise an
+# AI-agent LINEAGE behind an already-flagged action. Curated to avoid false positives: no bare "q"
+# (Amazon Q is matched as "amazon-q"), and each fragment is a distinctive program name. Mirrors the
+# b-ai-agent-risky precedent and the Phase-1 AI_AGENT_CLIS / AI_RUNTIMES inventory.
+AI_LINEAGE_AGENT_RE = re.compile(
+    r"\b(claude-code|claude|codex|cursor|aider|windsurf|cline|copilot|opencode|goose|"
+    r"gemini-cli|gemini|amazon-q|ollama|lm-?studio|llama-server|localai)\b", re.I)
+
+# Major ATT&CK techniques that mark a *dangerous hands-on action* — the kind a driven agent (or an
+# AI-orchestrated dropper) would be made to perform. Compared on the major id (sub-technique stripped).
+# The gate is strong (an already-flagged node AND an AI-agent ancestor), so breadth here is safe.
+AI_LINEAGE_DANGER_TECH = {
+    # execution / reverse shell / C2 / tooling transfer
+    "T1059", "T1071", "T1572", "T1105", "T1219", "T1102", "T1095", "T1571",
+    # credential access (~/.ssh, ~/.aws, browser/cloud creds, /etc/shadow)
+    "T1552", "T1555", "T1003", "T1528",
+    # persistence
+    "T1543", "T1547", "T1053", "T1098", "T1136", "T1546", "T1037", "T1505",
+    # impact (mass delete / encrypt / inhibit recovery / service stop)
+    "T1485", "T1486", "T1490", "T1489", "T1491",
+    # defense evasion / security-tool tamper
+    "T1562", "T1070", "T1222", "T1548",
+    # exfiltration
+    "T1041", "T1567", "T1048",
+}
+
+
+def correlate_ai_agent_lineage(nodes):
+    """Phase 3 — behavioral correlation. Elevate an ALREADY-FLAGGED dangerous action when its process
+    ancestry traces back to a catalogued AI coding agent or local LLM runtime.
+
+    This is the observable shadow of two of the three AI-abuse threats: *living off AI* (an attacker
+    steering a trusted agent CLI, as in the s1ngularity/nx supply-chain compromise, Aug 2025, which
+    drove claude/gemini/q to enumerate secrets) and *AI-orchestrated malware* (a runtime or agent
+    spawning the action). First-order detections are left intact; this adds a lineage reason and floors
+    severity to **high**, so the agent-driven case outranks the identical action done by hand — and the
+    reason text carries that context to the Mesh with no extra wiring.
+
+    Runs after the detection rules (it needs scored nodes) and before suppressions (so an operator can
+    still silence a specific alert). Never escalates to 'critical' (reserved for explicit assignment).
+    Mutates `nodes`; returns the number elevated."""
+    n_elev = 0
+    for n in nodes:
+        if n.get("type") != "process" or n.get("severity") == "info":
+            continue
+        d = n.get("detail") or {}
+        anc = d.get("ancestry") or ""
+        if not anc:
+            continue
+        m = AI_LINEAGE_AGENT_RE.search(anc)
+        if not m:
+            continue
+        majors = {t.split(".")[0] for t in techniques_of(n.get("reasons"))}
+        if not (majors & AI_LINEAGE_DANGER_TECH):
+            continue
+        agent = m.group(1)
+        txt = ("Driven by an AI agent: this flagged action runs under '%s' in its process ancestry "
+               "(%s) — consistent with an attacker steering a trusted agent (living-off-AI, cf. "
+               "s1ngularity/nx 2025) or AI-orchestrated malware, not a hand-typed command." % (agent, anc))
+        reasons = n.setdefault("reasons", [])
+        if txt not in {r.get("text") for r in reasons}:
+            reasons.append(reason(txt, "T1059", 70))
+        n["score"] = max(n.get("score", 0), 70)
+        n["severity"] = max_severity(n.get("severity", "info"), "high")
+        d["ai_lineage"] = {"agent": agent, "ancestry": anc}
+        n_elev += 1
+    return n_elev
+
+
 class RarityIndex:
     """"Have we ever seen this here before?" — the one signal an adversary can't fake away.
 
@@ -15856,6 +15994,12 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         # and the rules get a second look at it once it's decoded.
         decoded_hits += apply_decoded_detections(n, node_rules)
 
+    # --- Phase 3: AI-agent behavioral correlation. Elevate an already-flagged dangerous action whose
+    #     process ancestry traces to a catalogued AI agent/runtime (living-off-AI / AI-orchestrated
+    #     malware). Runs after detections (needs scored nodes), before suppressions (operator can still
+    #     silence one). The lineage reason carries the context to the Mesh with no extra wiring.
+    ai_lineage_hits = correlate_ai_agent_lineage(nodes)
+
     # --- operator suppressions: drop matching alerts to 'info' (applied AFTER detection
     #     flooring, so a suppression is the final word, even over a high floor). Ported from Mac.
     if suppressions:
@@ -15985,6 +16129,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
                   "node_rules": len(rules.snapshot_node_rules()) if rules else 0,
                   "sql_rules": len(rules.effective_sql_rules()) if rules else 0,
                   "node_hits": rule_hits,
+                  "ai_lineage_elevated": ai_lineage_hits,
                   "sql": sqldet.status() if sqldet else {"enabled": False}},
         "counts": {"nodes": len(nodes), "edges": len(edges),
                    "by_type": by_type, "by_severity": by_sev, "by_status": by_status},

@@ -72,9 +72,29 @@ matrix (allow-listed clients/browsers vs. dropper / one-liner / raw-tool shapes)
 advisory-hunt SQL. The Mesh fleet **AI Surface** tab surfaces egress anomalies alongside the inventory
 exposures (console 0.7.60).
 
-Still **held** for release: Phase 2 lands in the same 1.14.0 as Phase 1; the version is not published
-until the remaining planned phases (agent behavioral correlation, context/MCP integrity, audit-log
-intelligence, response/fleet) are implemented.
+**Agent behavioral correlation — Phase 3 of AI-agent-abuse detection (both agents).** A new
+correlation pass (`correlate_ai_agent_lineage`) runs after the detection rules and elevates an
+**already-flagged dangerous action** when its process ancestry traces back to a catalogued AI coding
+agent or local LLM runtime. This is the observable shadow of two of the three AI-abuse threats:
+*living off AI* — an attacker steering a trusted agent CLI, as in the **s1ngularity / nx** supply-chain
+compromise (Aug 2025) that drove claude/gemini/q to enumerate secrets — and *AI-orchestrated malware*
+(a runtime or agent spawning the action). The elevation is gated hard (the node is already flagged
+**and** has an AI-agent ancestor **and** carries a dangerous ATT&CK technique — credential access,
+reverse shell / C2, persistence, destructive impact, or security-tool tamper), so ordinary agent use
+stays quiet. It never escalates to `critical` (reserved for explicit assignment); it floors severity to
+**high** and appends a *"Driven by an AI agent"* reason — which, with no extra wiring, carries the
+context into the response plan, incident correlation, and the Mesh alert feed.
+
+A companion **advisory hunt** (`lolai-agent-lineage-2026-11`, high) ships on both agents with
+history-backed queries for the same shape: a sensitive action (`~/.ssh`/`~/.aws`/keychain or
+`/etc/shadow`, persistence, reverse shell) whose **parent** is an AI agent, and the broader catch-all
+of any shell/network tool spawned by an agent — each with a Velociraptor VQL twin. Meta gains
+`rules.ai_lineage_elevated`; `tests/test_ai_surface.py` adds the correlation matrix (elevate /
+leave-alone / never-critical / idempotent) and the advisory SQL.
+
+Still **held** for release: Phases 1–3 land in the same 1.14.0; the version is not published until the
+remaining planned phases (context/MCP integrity, audit-log intelligence, response/fleet) are
+implemented.
 
 ## [1.13.0] — 2026-11-03
 

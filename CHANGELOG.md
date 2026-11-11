@@ -45,9 +45,36 @@ values; remote MCP urls keep the **host only**, never a token; instruction files
 
 On by default (opt out with `--no-ai-surface`); `--ai-surface-interval` (default 600s),
 `--ai-context-dir` adds project roots, `--no-llm-endpoint-feed` pins to the built-in set.
-`tests/test_ai_surface.py` (8 tests each side) covers the four findings, the two privacy walls, the
+`tests/test_ai_surface.py` covers the four findings, the two privacy walls, the
 system-port false-positive guard, and the collector contract. The companion Mesh console gains a fleet
 **AI Surface** rollup (console 0.7.59).
+
+**LLM-egress detection — Phase 2 of AI-agent-abuse detection (both agents).** The AI Surface collector
+now watches *who* is talking to an LLM API. Each live connection to a known LLM endpoint is classified
+against the AI inventory: a catalogued agent or runtime (and ordinary browsers) are the expected
+baseline and stay quiet, but a **non-AI process reaching an LLM API** is surfaced as a new finding —
+
+- **F5 — Non-AI process reaching an LLM API** (T1071.001). This is the **LAMEHUG / PROMPTSTEAL**
+  shape (APT28, 2025): malware that calls an LLM at runtime to *generate* its shell commands. Scoring
+  is by process shape, not mere identity, to keep developer false positives near zero: a binary run
+  from a temporary, removable or hidden location scores high; an inline shell one-liner (`sh -c …`) or
+  an inline-script interpreter (`python -c …`) scores medium-high; a raw HTTP tool (`curl`/`wget`/`nc`)
+  scores medium; a normal-path interpreter or an unknown-but-installed binary is recorded without a
+  score. Endpoints are matched by resolved IP (cached ~1h), so detection needs a live connection at
+  scan time (best-effort by nature).
+
+A new **advisory hunt** (`llm-egress-lamehug-2026-11`, high) ships on both agents with history-backed
+queries for the same shape in stored connection/process history: an interpreter or raw tool with an
+outbound connection to an LLM provider, and a dropped/temp-dir binary doing the same. Egress rows are
+exposed in `meta.ai_surface` and `/api/ai-surface` with their classification and score, and the AI
+Surface tab gains an **egress classification** column. `tests/test_ai_surface.py` adds a classification
+matrix (allow-listed clients/browsers vs. dropper / one-liner / raw-tool shapes), F5 emission, and the
+advisory-hunt SQL. The Mesh fleet **AI Surface** tab surfaces egress anomalies alongside the inventory
+exposures (console 0.7.60).
+
+Still **held** for release: Phase 2 lands in the same 1.14.0 as Phase 1; the version is not published
+until the remaining planned phases (agent behavioral correlation, context/MCP integrity, audit-log
+intelligence, response/fleet) are implemented.
 
 ## [1.13.0] — 2026-11-03
 

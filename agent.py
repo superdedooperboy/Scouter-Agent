@@ -516,6 +516,7 @@ RULE_FIELD_HINTS = {
     "ai-runtime": ["runtime", "port", "bind", "finding"],
     "ai-mcp": ["server", "client", "finding", "url_host", "command", "package", "scope"],
     "ai-context": ["path", "client", "finding", "sha256"],
+    "ai-egress": ["proc", "provider", "kind", "finding", "raddr", "rport"],
 }
 # Starter rules seeded into rules.json on first run so the Detections tab isn't empty.
 # High-precision ones ship ENABLED; broader / parameterised ones ship DISABLED as
@@ -5081,6 +5082,54 @@ class InitialAccessFeed:
 # don't need — the dismissal persists per host, and dismissed advisories can be restored.
 ADVISORY_HUNTS = [
     {
+        "id": "llm-egress-lamehug-2026-11", "severity": "high", "published": "2026-11-11",
+        "title": "AI-orchestrated malware — a script or dropped binary calling an LLM API at runtime",
+        "summary": "A class of malware now calls a large-language-model API at runtime to GENERATE its "
+            "commands instead of hard-coding them — the operator ships a thin loader and lets the model write "
+            "the recon, collection and exfat steps on the fly. The reference case is LAMEHUG / PROMPTSTEAL "
+            "(APT28, 2025), a Python stealer that queried an LLM (Qwen via a Hugging Face API token) to produce "
+            "the shell commands it then ran. The host-visible shadow is a process that has no business talking "
+            "to an LLM — an interpreter one-liner, a raw HTTP tool like curl/wget, or a binary dropped in a "
+            "temporary / download / hidden directory — making outbound web connections. A catalogued AI agent "
+            "(see the AI Surface view) or a browser doing the same is expected; these hunts surface the rest so "
+            "you can confirm the destination is an LLM API. Pairs with the real-time AI-surface egress finding.",
+        "references": ["https://attack.mitre.org/techniques/T1071/001/",
+                       "https://github.com/vulncheck-oss/initial-access-community"],
+        "hunts": [
+            {"name": "An interpreter or raw HTTP tool making outbound web connections",
+             "why": "The LAMEHUG shape — a bare interpreter (python/perl/ruby/node) or a raw network tool "
+                    "(curl/wget/nc) reaching the internet over HTTP(S). SDKs don't shell out to curl and a "
+                    "stealer's thin loader is exactly one of these; confirm the destination against LLM APIs.",
+             "sql": "SELECT datetime(last_seen,'unixepoch','localtime') AS t, proc_name, exe,\n"
+                    "       raddr, rport, asorg, times_seen\n"
+                    "FROM connections\n"
+                    "WHERE public = 1 AND (rport = '443' OR rport = '80')\n"
+                    "  AND lower(proc_name) IN ('python','python2','python3','perl','ruby','node','deno','bun',\n"
+                    "                           'php','osascript','pwsh','powershell','curl','wget','nc','ncat',\n"
+                    "                           'netcat','socat','openssl','nscurl')\n"
+                    "ORDER BY t DESC",
+             "vql": "SELECT Pid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                    "WHERE Name =~ '(?i)^(python[0-9]?|perl|ruby|node|deno|bun|php|osascript|pwsh|powershell|"
+                    "curl|wget|nc|ncat|netcat|socat|openssl|nscurl)$'\n"
+                    "LIMIT 200"},
+            {"name": "A binary in a temporary, download or hidden location talking to the internet",
+             "why": "Highest fidelity — a program that lives where a dropped tool would (/tmp, /var/tmp, "
+                    "~/Downloads, a dot-directory) has no reason to hold an outbound internet connection. "
+                    "A runtime-LLM-calling stealer stages itself exactly here.",
+             "sql": "SELECT datetime(last_seen,'unixepoch','localtime') AS t, proc_name, exe,\n"
+                    "       raddr, rport, asorg, times_seen\n"
+                    "FROM connections\n"
+                    "WHERE public = 1\n"
+                    "  AND ( lower(exe) LIKE '/tmp/%' OR lower(exe) LIKE '/private/tmp/%'\n"
+                    "        OR lower(exe) LIKE '/var/tmp/%' OR lower(exe) LIKE '%/downloads/%'\n"
+                    "        OR lower(exe) LIKE '%/.%/%' )\n"
+                    "ORDER BY t DESC",
+             "vql": "SELECT Pid, Name, Username, Exe, CommandLine FROM pslist()\n"
+                    "WHERE Exe =~ '(?i)(^/tmp/|^/private/tmp/|^/var/tmp/|/downloads/|/\\.[^/]+/)'\n"
+                    "LIMIT 200"},
+        ],
+    },
+    {
         "id": "exiftool-shell-2026-11", "severity": "critical", "published": "2026-11-06",
         "title": "ExifTool metadata-parser RCE — a shell spawned under ExifTool",
         "summary": "ExifTool reads and strips metadata from untrusted media, so it sits in upload, thumbnailing "
@@ -8602,6 +8651,19 @@ LLM_ENDPOINT_SUFFIXES = {
     ".amazonaws.com": "AWS Bedrock",   # narrowed to bedrock-runtime.* at match time
 }
 
+# Phase 2 — LLM-egress anomaly. A connection to an LLM API is EXPECTED from a catalogued AI client
+# (the Phase-1 inventory is the allow-list) or a browser (a person using a web chatbot). It is the
+# LAMEHUG / PROMPTSTEAL shape — malware calling an LLM API at runtime to generate its commands — when
+# the process reaching the endpoint is a dropped binary, a shell/interpreter one-liner, or a raw HTTP
+# tool. Substring-matched against the process basename so macOS helper processes still resolve.
+EGRESS_BROWSER_KEYS = ("chrome", "chromium", "safari", "firefox", "webkit", "arc", "brave",
+                       "edge", "msedge", "opera", "vivaldi", "orion", "librewolf", "ddg",
+                       "duckduckgo", "zen", "thorium", "min", "electron")
+EGRESS_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"}
+EGRESS_SCRIPT_TOOLS = {"python", "python2", "python3", "perl", "ruby", "node", "deno", "bun",
+                       "php", "osascript", "pwsh", "powershell", "rscript"}
+EGRESS_RAW_TOOLS = {"curl", "wget", "nc", "ncat", "netcat", "socat", "openssl", "nscurl"}
+
 
 def _ai_home():
     return os.path.expanduser("~")
@@ -9039,22 +9101,61 @@ class AISurfaceCollector:
         return out
 
     # -- C5: LLM-egress baseline (best-effort; the scoring rule is Phase 2) ----
-    def _gather_egress(self, procs, net):
+    @staticmethod
+    def _egress_homes(procs):
+        return sorted({f"/Users/{p['user']}" for p in procs.values()
+                       if p.get("user") not in ("root", "_", None)} | {os.path.expanduser("~")})
+
+    def _classify_egress(self, p, pid, ai_pids, ai_bases, homes):
+        """(category, score, why) for one process reaching an LLM endpoint. score 0 = expected /
+        catalogued (no finding). A score fires the F5 egress-anomaly finding."""
+        exe = p.get("exe", "") or ""
+        base = os.path.basename(exe).lower()
+        base = base[:-4] if base.endswith(".exe") else base
+        cmd = (p.get("cmdline") or "").lower()
+        if pid in ai_pids or base in ai_bases:
+            return ("ai-client", 0, None)
+        if any(b in base for b in EGRESS_BROWSER_KEYS):
+            return ("browser", 0, None)
+        # strongest signal: the binary lives somewhere a dropped tool would (tmp / download / hidden)
+        if exe.startswith("/") and _in_suspicious_dir(exe, homes):
+            return ("anomalous", 72, "runs from a temporary, removable or hidden location")
+        # an inline one-liner reaching an LLM API — a dropper / loader shape
+        if base in EGRESS_SHELLS and " -c" in cmd:
+            return ("anomalous", 66, "a shell one-liner, not an installed program")
+        if base in EGRESS_SCRIPT_TOOLS and (" -c" in cmd or " -e " in cmd):
+            return ("anomalous", 66, "an inline interpreter script, not a saved program")
+        # a raw HTTP / network tool talking to an LLM API — SDKs don't shell out to curl
+        if base in EGRESS_RAW_TOOLS:
+            return ("raw-tool", 50, "a raw HTTP/network tool rather than an SDK")
+        # a normal-path interpreter or any other program: catalogued, never alarmed (too common)
+        if base in EGRESS_SCRIPT_TOOLS:
+            return ("script", 0, None)
+        return ("other", 0, None)
+
+    def _gather_egress(self, procs, net, ai_pids, ai_bases):
+        """Current connections to known LLM-API endpoints, each classified. Expected traffic (a
+        catalogued AI client or a browser) is recorded quietly; the LAMEHUG shape is scored by
+        _collect into an F5 finding. Best-effort — depends on a live connection at scan time."""
         if not self.endpoints:
             return []
         ipmap = self._endpoint_ip_map()
         if not ipmap:
             return []
+        homes = self._egress_homes(procs)
         out = []
         for pid, conns in net.items():
             p = procs.get(pid, {})
             for c in conns:
                 ra = c.get("raddr") or ""
                 prov = ipmap.get(ra)
-                if prov:
-                    out.append({"pid": pid,
-                                "proc": os.path.basename(p.get("exe", "")) or str(pid),
-                                "raddr": ra, "rport": c.get("rport", ""), "provider": prov})
+                if not prov:
+                    continue
+                cat, score, why = self._classify_egress(p, pid, ai_pids, ai_bases, homes)
+                out.append({"pid": pid,
+                            "proc": os.path.basename(p.get("exe", "")) or str(pid),
+                            "exe": p.get("exe", ""), "raddr": ra, "rport": c.get("rport", ""),
+                            "provider": prov, "category": cat, "score": score, "why": why})
         return out
 
     _IPCACHE = {"ts": 0.0, "map": {}}
@@ -9087,7 +9188,12 @@ class AISurfaceCollector:
         runtimes = self._gather_runtimes(procs, net)
         mcp = self._gather_mcp()
         context = self._gather_context()
-        egress = self._gather_egress(procs, net)
+        # the AI inventory is the allow-list for the egress baseline: a catalogued agent/runtime
+        # reaching an LLM endpoint is expected, so it never scores.
+        ai_pids = {pid for r in agents for pid in r.get("pids", [])} \
+            | {pid for r in runtimes for pid in r.get("pids", [])}
+        ai_bases = set(AI_AGENT_CLIS) | set(AI_RUNTIMES)
+        egress = self._gather_egress(procs, net, ai_pids, ai_bases)
 
         items = {}
         # F4(config): one finding per world-writable MCP config FILE (the file is the exposure,
@@ -9152,6 +9258,29 @@ class AISurfaceCollector:
                     {"category": "ai-context", "finding": "world-writable-context",
                      "path": cfile["path"], "client": cfile["client"], "sha256": cfile["sha256"]})
                 items[n["id"]] = n
+        # F5 (Phase 2): a NON-AI, non-browser process reaching an LLM API at runtime — the
+        # LAMEHUG / PROMPTSTEAL shape. Deduped per (process, provider, category); the AI inventory
+        # and browsers are the allow-list (score 0), so only the dropper/one-liner/raw-tool shape fires.
+        seen_eg = set()
+        for e in egress:
+            if not e.get("score"):
+                continue
+            key = (e["proc"], e["provider"], e["category"])
+            if key in seen_eg:
+                continue
+            seen_eg.add(key)
+            n = self._finding(
+                "ai-egress", f"egress:{e['proc']}:{e['provider']}:{e['category']}".replace(" ", "_"),
+                f"Non-AI process reaching an LLM API: {e['proc']} → {e['provider']}",
+                e["score"], "T1071.001",
+                f"{e['proc']} is {e['why']}, yet it is talking to {e['provider']}'s API "
+                f"({e['raddr']}:{e['rport']}). Malware that calls an LLM at runtime to generate its "
+                "commands (LAMEHUG / PROMPTSTEAL) looks exactly like this; a catalogued AI tool or a "
+                "browser would not.",
+                {"category": "ai-egress", "finding": "llm-egress-anomaly", "proc": e["proc"],
+                 "exe": e.get("exe", ""), "provider": e["provider"], "raddr": e["raddr"],
+                 "rport": e["rport"], "kind": e["category"]})
+            items[n["id"]] = n
 
         inv = {"generated": time.strftime("%Y-%m-%d %H:%M:%S"),
                "agents": agents, "runtimes": runtimes, "mcp": mcp,
@@ -9160,7 +9289,9 @@ class AISurfaceCollector:
                              else {"enabled": False, "static": len(LLM_ENDPOINTS)}),
                "counts": {"agents": len(agents), "runtimes": len(runtimes),
                           "mcp": len(mcp), "context": len(context),
-                          "egress": len(egress), "findings": len(items)}}
+                          "egress": len(egress),
+                          "egress_anomalies": sum(1 for e in egress if e.get("score")),
+                          "findings": len(items)}}
         with self.lock:
             self.items, self.inv = items, inv
 

@@ -202,6 +202,96 @@ class LlmEndpointFeed(unittest.TestCase):
         self.assertGreaterEqual(feed.status()["static"], 15)
 
 
+class EgressAnomaly(unittest.TestCase):
+    """Phase 2 — a non-AI, non-browser process reaching an LLM API scores; the AI inventory and
+    browsers are the allow-list; normal-path interpreters and other apps stay quiet."""
+
+    def _classify(self, exe, cmdline, pid=1, ai_pids=frozenset(), homes=("/Users/alice",)):
+        c = agent.AISurfaceCollector(enabled=True, endpoints=None)
+        ai_bases = set(agent.AI_AGENT_CLIS) | set(agent.AI_RUNTIMES)
+        return c._classify_egress({"exe": exe, "cmdline": cmdline}, pid, set(ai_pids), ai_bases, list(homes))
+
+    def test_classification_matrix(self):
+        # expected (score 0): catalogued AI client (by name and by pid), browser, normal-path script
+        self.assertEqual(self._classify("/opt/homebrew/bin/claude", "claude")[0], "ai-client")
+        self.assertEqual(self._classify("/x/weird", "weird", pid=42, ai_pids={42})[0], "ai-client")
+        self.assertEqual(self._classify("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper", "x")[0], "browser")
+        self.assertEqual(self._classify("/usr/bin/python3", "python3 /Users/alice/proj/app.py")[0], "script")
+        self.assertEqual(self._classify("/Applications/Weather.app/Contents/MacOS/Weather", "Weather")[0], "other")
+        # scored (the LAMEHUG shape)
+        cat, score, _ = self._classify("/tmp/.x/payload", "/tmp/.x/payload")
+        self.assertEqual(cat, "anomalous")
+        self.assertGreaterEqual(score, 70)
+        self.assertEqual(self._classify("/usr/bin/python3", "python3 -c import urllib")[0], "anomalous")
+        self.assertEqual(self._classify("/bin/bash", "bash -c curl ...")[0], "anomalous")
+        cat, score, _ = self._classify("/usr/bin/curl", "curl https://api.openai.com/v1")
+        self.assertEqual(cat, "raw-tool")
+        self.assertEqual(agent.severity_for(score), "medium")
+
+    def test_f5_finding_emission_and_allowlist(self):
+        c = agent.AISurfaceCollector(
+            enabled=True, endpoints=agent.LLMEndpointFeed(enabled=True, feed_url=None, cache_file=None))
+        c._endpoint_ip_map = lambda: {"5.6.7.8": "OpenAI", "1.2.3.4": "Anthropic", "9.9.9.9": "Anthropic"}
+        procs = {
+            501: {"exe": "/tmp/.x/payload", "cmdline": "/tmp/.x/payload", "user": "alice"},
+            502: {"exe": "/usr/bin/python3", "cmdline": "python3 -c import urllib", "user": "alice"},
+            503: {"exe": "/opt/homebrew/bin/claude", "cmdline": "claude", "user": "alice"},
+            504: {"exe": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper",
+                  "cmdline": "x", "user": "alice"},
+        }
+        net = {501: [{"state": "ESTABLISHED", "raddr": "5.6.7.8", "rport": "443"}],
+               502: [{"state": "ESTABLISHED", "raddr": "1.2.3.4", "rport": "443"}],
+               503: [{"state": "ESTABLISHED", "raddr": "9.9.9.9", "rport": "443"}],
+               504: [{"state": "ESTABLISHED", "raddr": "9.9.9.9", "rport": "443"}]}
+        orig_p, orig_n = agent.collect_processes, agent.collect_network
+        agent.collect_processes = lambda: procs
+        agent.collect_network = lambda: net
+        c._gather_mcp = lambda: []
+        c._gather_context = lambda: []
+        try:
+            c._collect()
+        finally:
+            agent.collect_processes, agent.collect_network = orig_p, orig_n
+        egress = [n for n in c.snapshot() if n["type"] == "ai-egress"]
+        labels = " ".join(n["label"] for n in egress)
+        self.assertEqual(len(egress), 2)                      # payload + python3 only
+        self.assertIn("payload", labels)
+        self.assertIn("python3", labels)
+        self.assertNotIn("claude", labels)                   # AI client allow-listed
+        self.assertNotIn("Chrome", labels)                   # browser allow-listed
+        self.assertEqual(c.detail()["counts"]["egress_anomalies"], 2)
+        for n in egress:
+            self.assertEqual(n["reasons"][0]["mitre"], "T1071.001")
+
+
+class LamehugAdvisory(unittest.TestCase):
+    def test_hunt_sql_catches_the_shape(self):
+        import sqlite3
+        import time as _t
+        con = sqlite3.connect(":memory:")
+        con.executescript(agent.HISTORY_SCHEMA)
+        now = int(_t.time())
+        rows = [
+            ("k1", 501, "python3", "/usr/bin/python3", "outbound", "tcp", "", "", "104.18.1.1", "443",
+             "ESTABLISHED", 1, "info", "US", "13335", "Cloudflare", now, now, 3),
+            ("k2", 503, "payload", "/tmp/.x/payload", "outbound", "tcp", "", "", "5.6.7.8", "443",
+             "ESTABLISHED", 1, "info", "US", "16509", "Amazon", now, now, 2),
+            ("k3", 504, "Google Chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+             "outbound", "tcp", "", "", "9.9.9.9", "443", "ESTABLISHED", 1, "info", "US", "13335",
+             "Cloudflare", now, now, 99),
+            ("k4", 505, "myserver", "/opt/app/bin/myserver", "outbound", "tcp", "", "", "8.8.8.8", "443",
+             "ESTABLISHED", 1, "info", "US", "15169", "Google", now, now, 5),
+        ]
+        con.executemany("INSERT INTO connections VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        hunt = [h for h in agent.ADVISORY_HUNTS if h["id"] == "llm-egress-lamehug-2026-11"][0]
+        tool = [r[1] for r in con.execute(hunt["hunts"][0]["sql"]).fetchall()]
+        self.assertIn("python3", tool)
+        self.assertNotIn("Google Chrome", tool)          # browser not matched
+        self.assertNotIn("myserver", tool)               # normal binary not matched
+        dropped = [r[1] for r in con.execute(hunt["hunts"][1]["sql"]).fetchall()]
+        self.assertEqual(dropped, ["payload"])
+
+
 class CollectorContract(unittest.TestCase):
     def test_summary_and_detail_shape(self):
         # the live collector must produce a meta summary and a /api/ai-surface detail without raising

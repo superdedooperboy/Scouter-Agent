@@ -3135,9 +3135,15 @@ function aiSurfDraw(){
      }, ['Path','Client','SHA-256','Modified','']);
   // --- LLM egress ---
   if((d.egress||[]).length){
-    h+=aiSurfSection('LLM API egress (baseline)','Current connections to known LLM-API endpoints. Informational now — the Phase-2 rule flags a non-AI process reaching these.',
-       (d.egress||[]), g=>'<td><code>'+esc(g.proc||'')+'</code></td><td>'+esc(g.provider||'')+'</td><td class="hint" style="font-variant-numeric:tabular-nums">'+esc((g.raddr||'')+':'+(g.rport||''))+'</td>',
-       ['Process','Provider','Remote']);
+    const egCat={'ai-client':['AI client','var(--good)'],'browser':['browser','var(--muted)'],
+                 'script':['script','var(--muted)'],'other':['other','var(--muted)'],
+                 'raw-tool':['raw tool','var(--sev-medium)'],'anomalous':['anomalous','var(--sev-high)']};
+    const egRows=(d.egress||[]).slice().sort((a,b)=>(b.score||0)-(a.score||0));
+    h+=aiSurfSection('LLM API egress','Live connections to known LLM-API endpoints. A catalogued AI client or a browser is expected; a non-AI process reaching an LLM API (a dropped binary, an interpreter one-liner, a raw HTTP tool) is the LAMEHUG shape and is flagged above.',
+       egRows, g=>{ const m=egCat[g.category]||['—','var(--muted)'];
+         const chip=aiChip(m[0],m[1]);
+         return '<td><code>'+esc(g.proc||'')+'</code></td><td>'+esc(g.provider||'')+'</td><td>'+chip+(g.why?(' <span class="hint">'+esc(g.why)+'</span>'):'')+'</td><td class="hint" style="font-variant-numeric:tabular-nums">'+esc((g.raddr||'')+':'+(g.rport||''))+'</td>'; },
+       ['Process','Provider','Classification','Remote']);
   }
   // --- endpoint set status ---
   const ep=d.endpoints||{};

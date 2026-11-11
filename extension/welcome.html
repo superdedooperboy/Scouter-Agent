@@ -98,7 +98,7 @@
         It stays fully standalone if you don't.</p>
       <div class="row">
         <button id="opts">Open settings to pair</button>
-        <a class="btn sec" href="https://github.com/superdedooperboy/scouter" target="_blank" rel="noreferrer">Get the Scouter agent</a>
+        <a class="btn sec" href="https://github.com/superdedooperboy/scouter-agent" target="_blank" rel="noreferrer">Get the Scouter agent</a>
       </div>
     </div>
 
@@ -107,13 +107,6 @@
       You can revisit these notes any time, and unpair from the agent, in the extension's Options.
     </div>
   </div>
-  <script>
-    document.getElementById("opts").addEventListener("click", function () {
-      try {
-        if (chrome.runtime.openOptionsPage) { chrome.runtime.openOptionsPage(); }
-        else { window.open(chrome.runtime.getURL("options.html")); }
-      } catch (e) { /* ignore */ }
-    });
-  </script>
+  <script src="welcome.js"></script>
 </body>
 </html>

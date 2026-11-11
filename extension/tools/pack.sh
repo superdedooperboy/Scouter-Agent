@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VER=$(python3 -c "import json;print(json.load(open('manifest.json'))['version'])")
-RUNTIME=(inject.js content.js background.js popup.html popup.js options.html options.js welcome.html icons)
+RUNTIME=(inject.js content.js background.js popup.html popup.js options.html options.js welcome.html welcome.js icons)
 OUT=dist
 rm -rf "$OUT"
 mkdir -p "$OUT/chrome" "$OUT/firefox"

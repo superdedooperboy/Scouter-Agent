@@ -294,8 +294,9 @@ class LamehugAdvisory(unittest.TestCase):
 
 class CollectorContract(unittest.TestCase):
     def test_summary_and_detail_shape(self):
-        # the live collector must produce a meta summary and a /api/ai-surface detail without raising
-        c = agent.AISurfaceCollector(enabled=True, endpoints=None)
+        # the live collector must produce a meta summary and a /api/ai-surface detail without raising.
+        # baseline_file=None keeps the test hermetic (no state written next to the agent).
+        c = agent.AISurfaceCollector(enabled=True, endpoints=None, baseline_file=None)
         c._collect()
         s = c.summary()
         for k in ("enabled", "agents", "runtimes", "mcp", "context", "egress", "flagged"):
@@ -365,6 +366,91 @@ class AiAgentLineage(unittest.TestCase):
         agent.correlate_ai_agent_lineage([n])
         hits = [r for r in n["reasons"] if "Driven by an AI agent" in r["text"]]
         self.assertEqual(len(hits), 1)
+
+
+class HiddenInstructionScan(unittest.TestCase):
+    """Phase 4 — the invisible/bidi instruction-smuggling scanner: fires on hidden control characters,
+    stays silent on ordinary text, and never returns file content (the Phase-1 privacy wall holds)."""
+
+    def test_clean_file_is_silent(self):
+        self.assertIsNone(agent._scan_hidden_instructions(b"# CLAUDE.md\nJust normal rules.\n"))
+        self.assertIsNone(agent._scan_hidden_instructions("Accented but visible: café.".encode("utf-8")))
+
+    def test_bidi_and_zero_width_detected(self):
+        data = "Visible‮HIDDEN‬ and a​joiner".encode("utf-8")
+        r = agent._scan_hidden_instructions(data)
+        self.assertIsNotNone(r)
+        self.assertGreaterEqual(r["count"], 2)
+        self.assertIn("bidi-control", r["categories"])
+        self.assertIn("zero-width", r["categories"])
+        self.assertTrue(all(cp.startswith("U+") for cp in r["codepoints"]))
+
+    def test_privacy_no_content_returned(self):
+        data = "SECRETWORD​more".encode("utf-8")
+        r = agent._scan_hidden_instructions(data)
+        self.assertNotIn("SECRETWORD", json.dumps(r))
+
+    def test_tag_block_smuggling_detected(self):
+        data = ("ok" + chr(0xE0041) + chr(0xE0042)).encode("utf-8")  # TAG LATIN A, B
+        r = agent._scan_hidden_instructions(data)
+        self.assertIn("tag-smuggling", r["categories"])
+
+
+class Phase4Integrity(unittest.TestCase):
+    """Phase 4 — change-watch + hidden-instruction finding over the AI surface baseline. First run is
+    learn-only; a later edit is annotated (not alarmed); a changed file that now carries hidden
+    characters is the scored tamper finding."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bf = os.path.join(self.tmp, "ai-surface-baseline.json")
+        self.cf = os.path.join(self.tmp, "CLAUDE.md")
+        self._home, self._roots = agent._ai_home, agent._ai_project_roots
+        agent._ai_home = lambda: self.tmp
+        agent._ai_project_roots = lambda: [self.tmp]
+
+    def tearDown(self):
+        agent._ai_home, agent._ai_project_roots = self._home, self._roots
+
+    def _collector(self):
+        return agent.AISurfaceCollector(enabled=True, endpoints=None, baseline_file=self.bf)
+
+    def _ctx(self, c):
+        return next(x for x in c.inv["context"] if x["path"] == self.cf)
+
+    def test_first_run_learn_only(self):
+        _write(self.cf, "v1 rules")
+        c = self._collector()
+        c._collect()
+        rec = self._ctx(c)
+        self.assertFalse(rec.get("changed"))
+        self.assertFalse(rec.get("new"))
+
+    def test_edit_is_marked_changed_but_not_scored(self):
+        _write(self.cf, "v1 rules")
+        c = self._collector()
+        c._collect()                       # learn
+        _write(self.cf, "v2 rules, edited plainly")
+        c._collect()
+        self.assertTrue(self._ctx(c)["changed"])
+        # a plain edit raises no hidden-instruction finding
+        f6 = [i for i in c.snapshot() if i["detail"].get("finding") == "hidden-instructions"]
+        self.assertEqual(f6, [])
+
+    def test_changed_plus_hidden_scores_high(self):
+        _write(self.cf, "v1 rules")
+        c = self._collector()
+        c._collect()                       # learn
+        with open(self.cf, "w", encoding="utf-8") as fh:
+            fh.write("v2‮evil‬ rules")
+        c._collect()
+        f6 = [i for i in c.snapshot() if i["detail"].get("finding") == "hidden-instructions"]
+        self.assertEqual(len(f6), 1)
+        self.assertEqual(f6[0]["score"], 70)          # changed + hidden
+        self.assertEqual(f6[0]["severity"], "high")
+        self.assertTrue(f6[0]["detail"]["changed"])
+        self.assertEqual(c.summary()["hidden_instructions"], 1)
+        self.assertEqual(c.summary()["changed_context"], 1)
 
 
 class LolaiAdvisory(unittest.TestCase):

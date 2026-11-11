@@ -92,9 +92,30 @@ of any shell/network tool spawned by an agent — each with a Velociraptor VQL t
 `rules.ai_lineage_elevated`; `tests/test_ai_surface.py` adds the correlation matrix (elevate /
 leave-alone / never-critical / idempotent) and the advisory SQL.
 
-Still **held** for release: Phases 1–3 land in the same 1.14.0; the version is not published until the
-remaining planned phases (context/MCP integrity, audit-log intelligence, response/fleet) are
-implemented.
+**Context & MCP integrity — Phase 4 of AI-agent-abuse detection (both agents).** The AI Surface
+collector now keeps an integrity **baseline** (`ai-surface-baseline.json`) of each instruction file's
+SHA-256 and each MCP server's identity, so a steering file that **changes** or an MCP server that is
+**newly added** is distinguishable from what was already there (the first run is learn-only — it records
+the state and raises nothing). Because instruction files are edited constantly in normal work, a bare
+change is treated as *temporal context* — annotated on the inventory, not alarmed.
+
+The scored finding is a **hidden-instruction scan** (F6, T1027): while it reads each file's bytes for
+the hash, it also scans for invisible and bidirectional control characters — zero-width spaces/joiners,
+bidi overrides and isolates, the word-joiner, a mid-file BOM, and the Unicode TAG block used for ASCII
+smuggling — the exact primitive for hiding instructions a human reviewer can't see but the agent reads.
+These essentially never occur in a real `CLAUDE.md` / `.cursorrules`, so the scan is high-fidelity. A
+file that merely contains them scores 60; one that **changed and now contains them** (tamper) scores 70.
+The privacy wall holds: the scan returns only counts, the offending codepoints (`U+202E` …), and
+category labels — never the surrounding content. Remote and `npx`-fetched MCP findings (F1/F2) are
+annotated `new_since_baseline`, and the inventory/`/api/ai-surface` gain `hidden_instructions`,
+`changed_context` and `new_mcp` counts. `tests/test_ai_surface.py` adds the scanner (clean / bidi /
+zero-width / tag-smuggling / privacy) and the integrity flow (learn-only → annotated edit → changed +
+hidden scores high). The Mesh fleet view surfaces the hidden-instruction exposures and gains a fleet
+**MCP map** (console 0.7.61). *(The agent-local AI Surface tab is macOS-only for now; the Linux agent
+serves the same data at `/api/ai-surface`, visible fleet-wide through the Mesh.)*
+
+Still **held** for release: Phases 1–4 land in the same 1.14.0; the version is not published until the
+remaining planned phases (audit-log intelligence, response/fleet) are implemented.
 
 ## [1.13.0] — 2026-11-03
 

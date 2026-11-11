@@ -432,6 +432,10 @@ NOLOGIN_SHELLS = {"", "/usr/bin/false", "/usr/bin/nologin", "/sbin/nologin",
 # Shell history — flag suspicious one-liners recorded in zsh/bash history files.
 SHELL_NODE_TTL = 24 * 3600
 SHELL_BASELINE_FILE = os.path.join(HERE, "shell-baseline.json")
+# Phase 4 (AI context & MCP integrity): remembers each instruction file's sha256 and each MCP server's
+# identity between runs, so a CHANGE to a steering file or a NEWLY-ADDED MCP server is distinguishable
+# from what was already there. Stores hashes/identities only — never file content.
+AI_SURFACE_BASELINE_FILE = os.path.join(HERE, "ai-surface-baseline.json")
 SHELL_HISTORY_NAMES = (".zsh_history", ".bash_history")
 SHELL_SESSION_DIRS = (".zsh_sessions", ".bash_sessions")
 # (regex, label, ATT&CK, score) — first match wins, ordered highest-signal first.
@@ -8849,6 +8853,51 @@ AI_CONTEXT_FILES = [
     (".aider.conf.yml", "Aider"),
 ]
 
+# Phase 4 — invisible / control characters that have no legitimate place in a human-written agent
+# instruction file but are the exact primitive for SMUGGLING hidden instructions into an LLM's context:
+# bidirectional overrides, zero-width spaces/joiners, the word-joiner, a mid-file BOM, and the Unicode
+# TAG block used for "ASCII smuggling". A reader sees nothing; the model reads the hidden text. These
+# essentially never occur in CLAUDE.md / .cursorrules, so the scan is high-fidelity.
+HIDDEN_INSTR_RANGES = (
+    (0x200B, 0x200F),    # zero-width space / joiner / non-joiner, LRM / RLM
+    (0x202A, 0x202E),    # bidi embeddings & overrides (LRE RLE PDF LRO RLO)
+    (0x2060, 0x2064),    # word joiner, invisible times / separator / plus
+    (0x2066, 0x2069),    # bidi isolates (LRI RLI FSI PDI)
+    (0xFEFF, 0xFEFF),    # BOM / zero-width no-break space appearing mid-file
+    (0xE0000, 0xE007F),  # Unicode TAG block — ASCII smuggling
+)
+
+
+def _scan_hidden_instructions(data, cap=5_000_000):
+    """Scan already-read file bytes for invisible/bidi instruction-smuggling characters. Returns a
+    PRIVACY-SAFE summary — counts, the distinct offending codepoints (as U+XXXX), and category labels —
+    or None when the file is clean. Never returns file content: the surrounding text is deliberately not
+    captured, so the detection honors the Phase-1 wall (path + hash + mtime only, never content)."""
+    if not data or len(data) > cap:
+        return None
+    try:
+        text = data.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return None
+    hits, cats = {}, set()
+    for ch in text:
+        cp = ord(ch)
+        for lo, hi in HIDDEN_INSTR_RANGES:
+            if lo <= cp <= hi:
+                hits[cp] = hits.get(cp, 0) + 1
+                if cp in (0x202A, 0x202B, 0x202C, 0x202D, 0x202E) or 0x2066 <= cp <= 0x2069:
+                    cats.add("bidi-control")
+                elif 0xE0000 <= cp <= 0xE007F:
+                    cats.add("tag-smuggling")
+                else:
+                    cats.add("zero-width")
+                break
+    if not hits:
+        return None
+    return {"count": sum(hits.values()),
+            "codepoints": ["U+%04X" % cp for cp in sorted(hits)],
+            "categories": sorted(cats)}
+
 
 class LLMEndpointFeed:
     """The LLM-API endpoint intelligence the AI-surface egress baseline (and the Phase-2
@@ -8953,7 +9002,8 @@ class AISurfaceCollector:
 
     NPX_FETCHERS = ("npx", "npx.cmd", "uvx", "bunx", "pnpm", "pnpx", "dlx", "deno")
 
-    def __init__(self, enabled=True, interval=600, endpoints=None, context_roots=None):
+    def __init__(self, enabled=True, interval=600, endpoints=None, context_roots=None,
+                 baseline_file=AI_SURFACE_BASELINE_FILE):
         self.enabled = enabled
         self.interval = max(60, interval)
         self.endpoints = endpoints        # LLMEndpointFeed (optional)
@@ -8962,6 +9012,48 @@ class AISurfaceCollector:
         self.items = {}                   # scored finding nodes only
         self.inv = {}                     # full inventory (for meta + /api/ai-surface)
         self.started = False
+        # Phase 4 integrity baseline: {"context": {path: sha256}, "mcp": [identity, ...]}. First run is
+        # learn-only (records what's there, raises nothing), so a change/new flags only against a
+        # previously-seen state — never on the very first scan.
+        self.baseline_file = baseline_file
+        self.baseline = {"context": {}, "mcp": []}
+        self.learn_only = True
+        self._load_baseline()
+
+    def _load_baseline(self):
+        if not self.baseline_file:
+            return
+        try:
+            with open(self.baseline_file) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                self.baseline = {"context": dict(d.get("context") or {}),
+                                 "mcp": list(d.get("mcp") or [])}
+                self.learn_only = not (self.baseline["context"] or self.baseline["mcp"])
+        except (OSError, ValueError):
+            self.baseline = {"context": {}, "mcp": []}
+
+    def _save_baseline(self, context, mcp):
+        self.baseline = {"context": {c["path"]: c["sha256"] for c in context if c.get("sha256")},
+                         "mcp": sorted({self._mcp_identity(s) for s in mcp})}
+        self.learn_only = False
+        if not self.baseline_file:
+            return
+        try:
+            tmp = self.baseline_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({**self.baseline, "updated": int(time.time())}, f)
+            os.replace(tmp, self.baseline_file)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _mcp_identity(s):
+        """A stable identity for an MCP server across runs: client + name + transport + where it points
+        (remote host or launch command). A change here is a different server, not an edit of the same."""
+        return "|".join(str(x) for x in (s.get("client", ""), s.get("name", ""),
+                                          s.get("transport", ""),
+                                          s.get("url_host", "") or s.get("command", "")))
 
     def start(self):
         if not self.enabled or self.started:
@@ -8990,6 +9082,9 @@ class AISurfaceCollector:
                     "mcp": len(inv.get("mcp", [])),
                     "context": len(inv.get("context", [])),
                     "egress": len(inv.get("egress", [])),
+                    "hidden_instructions": sum(1 for c in inv.get("context", []) if c.get("hidden")),
+                    "changed_context": sum(1 for c in inv.get("context", []) if c.get("changed")),
+                    "new_mcp": sum(1 for s in inv.get("mcp", []) if s.get("new_since_baseline")),
                     "endpoints": inv.get("endpoints", {}),
                     "flagged": len(self.items)}
 
@@ -9154,15 +9249,22 @@ class AISurfaceCollector:
                 try:
                     st = os.stat(path)
                     if st.st_size > 5_000_000:
-                        digest, note = "", "oversize"
+                        digest, note, hidden = "", "oversize", None
                     else:
                         with open(path, "rb") as fh:
-                            digest, note = hashlib.sha256(fh.read()).hexdigest(), ""
+                            data = fh.read()
+                        # One read serves both the hash and the Phase-4 hidden-instruction scan; the
+                        # scan returns only counts/codepoints, so no content is retained or exposed.
+                        digest, note = hashlib.sha256(data).hexdigest(), ""
+                        hidden = _scan_hidden_instructions(data)
                 except OSError:
                     continue
-                out.append({"path": path, "client": product, "sha256": digest,
-                            "mtime": int(st.st_mtime), "size": st.st_size,
-                            "writable": _world_writable(path), "note": note})
+                rec = {"path": path, "client": product, "sha256": digest,
+                       "mtime": int(st.st_mtime), "size": st.st_size,
+                       "writable": _world_writable(path), "note": note}
+                if hidden:
+                    rec["hidden"] = hidden
+                out.append(rec)
         return out
 
     # -- C5: LLM-egress baseline (best-effort; the scoring rule is Phase 2) ----
@@ -9260,6 +9362,20 @@ class AISurfaceCollector:
         ai_bases = set(AI_AGENT_CLIS) | set(AI_RUNTIMES)
         egress = self._gather_egress(procs, net, ai_pids, ai_bases)
 
+        # -- Phase 4: integrity diff against the baseline. Change-watch and new-MCP are TEMPORAL context
+        # (instruction files are edited constantly in normal work, so a bare change is not an alarm); the
+        # scored finding is the hidden-instruction scan, which is near-zero-FP. On the first (learn-only)
+        # run nothing is marked changed/new.
+        base_ctx = self.baseline.get("context", {})
+        base_mcp = set(self.baseline.get("mcp", []))
+        for c in context:
+            prev = base_ctx.get(c["path"])
+            c["changed"] = bool(prev and c.get("sha256") and prev != c["sha256"])
+            c["new"] = bool(prev is None and not self.learn_only)
+        for s in mcp:
+            s["new_since_baseline"] = bool(not self.learn_only
+                                           and self._mcp_identity(s) not in base_mcp)
+
         items = {}
         # F4(config): one finding per world-writable MCP config FILE (the file is the exposure,
         # not each server in it), keyed by path so a multi-server file flags once.
@@ -9286,7 +9402,8 @@ class AISurfaceCollector:
                     "endpoint is one you control",
                     {"category": "ai-mcp", "finding": "remote-mcp", "server": s["name"],
                      "client": s["client"], "url_host": s["url_host"], "env_keys": s["env_keys"],
-                     "scope": s["scope"], "path": s["source"]})
+                     "scope": s["scope"], "path": s["source"],
+                     "new_since_baseline": s.get("new_since_baseline", False)})
                 items[n["id"]] = n
             elif s["fetched"]:
                 n = self._finding(
@@ -9297,7 +9414,8 @@ class AISurfaceCollector:
                     "so a compromised or typosquatted package becomes agent-run code",
                     {"category": "ai-mcp", "finding": "npx-fetched-mcp", "server": s["name"],
                      "client": s["client"], "command": s["command"], "package": s["package"],
-                     "env_keys": s["env_keys"], "scope": s["scope"], "path": s["source"]})
+                     "env_keys": s["env_keys"], "scope": s["scope"], "path": s["source"],
+                     "new_since_baseline": s.get("new_since_baseline", False)})
                 items[n["id"]] = n
         # F3: local runtime reachable off-loopback
         for r in runtimes:
@@ -9323,6 +9441,30 @@ class AISurfaceCollector:
                     {"category": "ai-context", "finding": "world-writable-context",
                      "path": cfile["path"], "client": cfile["client"], "sha256": cfile["sha256"]})
                 items[n["id"]] = n
+        # F6 (Phase 4): HIDDEN instructions smuggled into an instruction file — invisible / bidi /
+        # tag characters that a human reviewer never sees but the agent reads as instructions. This is
+        # the high-fidelity integrity finding; a plain edit is not alarmed (it only annotates the
+        # inventory), but a file that CHANGED and now carries hidden characters is tamper, scored higher.
+        for cfile in context:
+            h = cfile.get("hidden")
+            if not h:
+                continue
+            changed = cfile.get("changed")
+            score = 70 if changed else 60
+            cats = ", ".join(h["categories"])
+            n = self._finding(
+                "ai-context", f"ctxhidden:{cfile['path']}".replace(" ", "_"),
+                f"Hidden instructions in an agent file: {os.path.basename(cfile['path'])}",
+                score, "T1027",
+                f"{cfile['path']} ({cfile['client']}) contains {h['count']} invisible / bidirectional "
+                f"character(s) [{cats}] that a reader cannot see but the agent reads as instructions — "
+                "the signature of smuggled prompt injection" + (
+                    " (and the file changed since the last scan)" if changed else "") + ". "
+                "Review it with a tool that reveals control characters.",
+                {"category": "ai-context", "finding": "hidden-instructions",
+                 "path": cfile["path"], "client": cfile["client"], "sha256": cfile["sha256"],
+                 "changed": bool(changed), "hidden": h})
+            items[n["id"]] = n
         # F5 (Phase 2): a NON-AI, non-browser process reaching an LLM API at runtime — the
         # LAMEHUG / PROMPTSTEAL shape. Deduped per (process, provider, category); the AI inventory
         # and browsers are the allow-list (score 0), so only the dropper/one-liner/raw-tool shape fires.
@@ -9356,7 +9498,14 @@ class AISurfaceCollector:
                           "mcp": len(mcp), "context": len(context),
                           "egress": len(egress),
                           "egress_anomalies": sum(1 for e in egress if e.get("score")),
+                          "hidden_instructions": sum(1 for c in context if c.get("hidden")),
+                          "changed_context": sum(1 for c in context if c.get("changed")),
+                          "new_mcp": sum(1 for s in mcp if s.get("new_since_baseline")),
                           "findings": len(items)}}
+        # Phase 4: fold the current state into the baseline for the next run (and turn off learn-only
+        # after the first pass). Done after findings are computed, so this run is diffed against the
+        # PREVIOUS state, not against itself.
+        self._save_baseline(context, mcp)
         with self.lock:
             self.items, self.inv = items, inv
 
@@ -23560,7 +23709,7 @@ SERVICE_STATE_FILES = (
     "ai-settings.json", "alert-lifecycle.json", "alerts.jsonl", "export-settings.json",
     "geoip-db.csv.gz", "geoip-settings.json", "incidents.json", "ioc-cache.json",
     "ioc-custom-feeds.json", "ioc-feeds.json", "mesh-settings.json", "ntfy-settings.json",
-    "persist-baseline.json", "response-audit.log", "response-playbook.json",
+    "persist-baseline.json", "ai-surface-baseline.json", "response-audit.log", "response-playbook.json",
     "response-settings.json", "response-state.json", "rules.json", "shell-baseline.json",
     "suppressions.json", "tcc-baseline.json", "triage.json", "update-check.json", "vt-cache.json",
     "decoys.json",

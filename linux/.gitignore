@@ -18,6 +18,7 @@ persist-baseline.json
 access-baseline.json
 account-baseline.json
 shell-baseline.json
+ai-surface-baseline.json
 rules.json
 suppressions.json
 incidents.json

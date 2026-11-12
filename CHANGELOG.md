@@ -165,6 +165,16 @@ wiring, and the reversible-only fleet-push boundary.
 
 With Phase 6 in, all six planned phases are implemented; 1.14.0 is ready to tag.
 
+**On-demand exploitation-feed refresh (both agents).** The KEV / exploitation data no longer has to
+wait for its scheduled daily pull. The vulnerability view gains a **↻ refresh now** control next to the
+KEV line that forces an immediate re-fetch, and the backend was wired to match: `/api/kev?refresh=1`
+now also kicks the companion Initial-Access (exploitation) feed in the background, and `/api/vulns?
+rescan=1` force-refreshes **both** KEV and Initial-Access before re-scanning the software inventory. So
+when a freshly weaponized CVE lands on CISA/VulnCheck KEV, an analyst can pull the newest advisory
+hunts and on-host prioritization in seconds instead of waiting up to 24 hours for the next cycle —
+without restarting the agent. A feed hiccup during a rescan is swallowed so it can never abort the
+scan itself.
+
 ## [1.13.0] — 2026-11-03
 
 ### Added

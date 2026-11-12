@@ -22792,7 +22792,19 @@ def make_handler(cache):
                 # all computed locally. Whitelisted read-only so the mesh can fan it across the fleet.
                 vs = getattr(cache, "vulns", None)
                 if vs and "rescan=1" in self.path:
-                    threading.Thread(target=vs.scan, daemon=True).start()
+                    # A rescan re-pulls the exploitation feeds (KEV + VulnCheck initial-access) FIRST,
+                    # then re-inventories and re-matches — so a CVE added to KEV minutes ago is reflected
+                    # without waiting for the daily refresh. All off the request thread.
+                    def _rescan(c=cache, scanner=vs):
+                        for attr in ("kev", "ia"):
+                            feed = getattr(c, attr, None)
+                            if feed is not None and getattr(feed, "enabled", False):
+                                try:
+                                    feed.refresh(force=True)
+                                except Exception:  # noqa: BLE001 — a feed hiccup must not abort the rescan
+                                    pass
+                        scanner.scan()
+                    threading.Thread(target=_rescan, daemon=True).start()
                 self._send_json(vs.status() if vs else {"enabled": False})
             elif path == "/api/ai-surface":
                 # Full AI-surface inventory (agents / runtimes / MCP servers / instruction files /
@@ -22966,7 +22978,10 @@ def make_handler(cache):
                     self._send_json({"enabled": False, "available": False})
                 else:
                     if "refresh=1" in self.path:
-                        kv.refresh(force=True)
+                        kv.refresh(force=True)                 # synchronous: one download, fast
+                        ia = getattr(cache, "ia", None)        # companion exploitation feed — refresh too,
+                        if ia is not None and getattr(ia, "enabled", False):   # in the background (heavier pull)
+                            threading.Thread(target=lambda: ia.refresh(force=True), daemon=True).start()
                     self._send_json(kv.status())
             elif path == "/api/kev-hunts":
                 # Pre-built threat-hunt queries for recently-exploited (KEV) CVEs, prioritized to the

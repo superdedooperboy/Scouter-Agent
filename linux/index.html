@@ -4166,8 +4166,18 @@ function loadKev(cb){ fetch('/api/kev').then(r=>r.json()).then(d=>{ KEVSTAT=d; i
 function kevLineHTML(){ var k=KEVSTAT; if(!k||k.available===false) return '';
   var src=k.source==='vulncheck'?'VulnCheck KEV':(k.source==='cisa'?'CISA KEV (free)':'\u2014');
   return '<div class="hint" style="margin-top:6px">Exploitation data (KEV): '+(k.count?('<b>'+k.count+'</b> known-exploited CVEs via '+esc(src)):'loading\u2026')+
+    ' \u00b7 <span id="kevRefreshLnk" class="clr" style="color:var(--accent);cursor:pointer;text-decoration:underline" title="Re-fetch KEV + VulnCheck initial-access now (no agent update needed) \u2014 picks up CVEs added since the last daily check" onclick="kevRefresh()">\u21bb refresh now</span>'+
     (k.has_token?' \u00b7 <span style="color:var(--good)">VulnCheck token set</span>':' \u00b7 <span class="clr" style="color:var(--accent);cursor:pointer;text-decoration:underline" onclick="kevSetToken()">add a VulnCheck community token</span> for the fuller, exploitation-enriched set')+
     (k.error?(' \u00b7 <span style="color:var(--sev-high)">'+esc(k.error)+'</span>'):'')+'. A CVE flagged \ud83d\uded1 KEV is known-exploited in the wild and is prioritized above higher-CVSS-but-unexploited findings.</div>'; }
+// Force an immediate re-fetch of the exploitation feeds (KEV synchronously + VulnCheck initial-access in
+// the background), then reload the status line and the recent-KEV hunt suggestions. Re-fetches data only;
+// it never updates the agent itself.
+function kevRefresh(){
+  var el=document.getElementById('kevRefreshLnk'); if(el){ el.textContent='\u21bb refreshing\u2026'; el.style.pointerEvents='none'; el.style.opacity='.6'; }
+  fetch('/api/kev?refresh=1').then(r=>r.json()).then(function(d){ KEVSTAT=d;
+    if(VHOST) vulnDrawHost(); renderShodanExposure();
+    kevHuntLoad(function(){ if(VHOST) vulnDrawHost(); });
+  }).catch(function(){ loadKev(function(){ if(VHOST) vulnDrawHost(); }); }); }
 function kevSetToken(){ var t=prompt('VulnCheck community API token (free at vulncheck.com/settings/tokens). Leave blank to clear and use the free CISA KEV:',''); if(t===null) return;
   fetch('/api/kev',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t.trim()})}).then(r=>r.json()).then(d=>{ if(d&&d.ok===false){ alert(d.error||'failed'); return; } loadKev(function(){ if(VHOST) vulnDrawHost(); renderShodanExposure(); }); }).catch(()=>{}); }
 function renderVulns(){

@@ -427,6 +427,97 @@ class OffensiveAiFrameworkLineage(unittest.TestCase):
         self.assertEqual(len(hits), 1)
 
 
+class OffensiveAiFrameworkInventory(unittest.TestCase):
+    """1.15 Phase 2 — the AI-Surface collector inventories AND scores autonomous offensive frameworks
+    (unlike benign agents/runtimes, which are catalogued only). A pentest-box allowlist downgrades the
+    score to advisory without hiding the entry."""
+
+    def _collect(self, procs, net, which=None, pentest=False, markers_present=()):
+        c = agent.AISurfaceCollector(enabled=True, endpoints=None)
+        orig = {"cp": agent.collect_processes, "cn": agent.collect_network,
+                "which": agent.shutil.which, "paths": agent._mcp_config_paths,
+                "roots": agent._ai_project_roots, "home": agent._ai_home,
+                "exists": agent.os.path.exists}
+        agent.collect_processes = lambda: procs
+        agent.collect_network = lambda: net
+        agent.shutil.which = (lambda n: None) if which is None else which
+        agent._mcp_config_paths = lambda: []
+        agent._ai_project_roots = lambda limit=60: []
+        agent._ai_home = lambda: "/nonexistent-home-xyz"
+        if markers_present:
+            agent.os.path.exists = lambda p: any(p.endswith(m) for m in markers_present) \
+                or orig["exists"](p)
+        if pentest:
+            os.environ[agent.AI_OFFENSIVE_ALLOWLIST_ENV] = "1"
+        try:
+            c._collect()
+            return c.snapshot(), c.inv
+        finally:
+            agent.collect_processes, agent.collect_network = orig["cp"], orig["cn"]
+            agent.shutil.which, agent._mcp_config_paths = orig["which"], orig["paths"]
+            agent._ai_project_roots, agent._ai_home = orig["roots"], orig["home"]
+            agent.os.path.exists = orig["exists"]
+            os.environ.pop(agent.AI_OFFENSIVE_ALLOWLIST_ENV, None)
+
+    def _offensive(self, nodes):
+        return [n for n in nodes if n["type"] == "ai-offensive"]
+
+    def test_running_python_script_framework_detected(self):
+        # launched as an interpreter + script: matched on the cmdline token, not the exe (python3)
+        procs = {42: {"exe": "/usr/bin/python3", "cmdline": "python3 hexstrike-server.py --port 8888"}}
+        nodes, inv = self._collect(procs, {})
+        off = self._offensive(nodes)
+        self.assertEqual(len(off), 1)
+        self.assertEqual(off[0]["detail"]["framework"], "HexStrike AI")
+        self.assertTrue(off[0]["detail"]["running"])
+        self.assertEqual(off[0]["severity"], "high")
+        self.assertEqual(inv["counts"]["offensive"], 1)
+
+    def test_hexstrike_8888_listener_is_a_signal(self):
+        procs = {7: {"exe": "/usr/bin/python3", "cmdline": "python3 server.py"}}
+        net = {7: [{"state": "LISTEN", "laddr": "127.0.0.1", "lport": "8888"}]}
+        nodes, _ = self._collect(procs, net)
+        off = self._offensive(nodes)
+        self.assertEqual(len(off), 1)
+        self.assertTrue(off[0]["detail"]["listening"])
+
+    def test_installed_console_script_is_medium(self):
+        which = lambda n: "/usr/local/bin/cai" if n == "cai" else None
+        nodes, _ = self._collect({}, {}, which=which)
+        off = self._offensive(nodes)
+        self.assertEqual(len(off), 1)
+        self.assertEqual(off[0]["detail"]["framework"], "CAI (Cybersecurity AI)")
+        self.assertFalse(off[0]["detail"]["running"])
+        self.assertEqual(off[0]["severity"], agent.severity_for(55))
+
+    def test_pentest_host_allowlist_lists_but_does_not_score(self):
+        procs = {42: {"exe": "/usr/bin/python3", "cmdline": "python3 hexstrike-server.py"}}
+        nodes, inv = self._collect(procs, {}, pentest=True)
+        off = self._offensive(nodes)
+        self.assertEqual(len(off), 1)
+        self.assertEqual(off[0]["score"], 0)
+        self.assertTrue(off[0]["detail"]["allowlisted"])
+        self.assertTrue(inv["pentest_host"])
+        self.assertEqual(inv["counts"]["offensive"], 1)   # still inventoried
+
+    def test_clean_host_has_no_offensive_findings(self):
+        procs = {1: {"exe": "/bin/zsh", "cmdline": "zsh"},
+                 2: {"exe": "/usr/bin/python3", "cmdline": "python3 app.py"}}
+        nodes, inv = self._collect(procs, {})
+        self.assertEqual(self._offensive(nodes), [])
+        self.assertEqual(inv["counts"]["offensive"], 0)
+
+    def test_builtin_rules_present_and_exact_match(self):
+        ids = {r["id"] for r in agent.BUILTIN_RULES}
+        self.assertIn("b-ai-offensive-hexstrike", ids)
+        self.assertIn("b-ai-offensive-fw", ids)
+        fw = next(r for r in agent.BUILTIN_RULES if r["id"] == "b-ai-offensive-fw")
+        # exact label matches (op 'eq') keep false positives near zero
+        labels = [c["value"] for c in fw["conditions"] if c["field"] == "label" and c["op"] == "eq"]
+        self.assertIn("cai", labels)
+        self.assertIn("strix", labels)
+
+
 class HiddenInstructionScan(unittest.TestCase):
     """Phase 4 — the invisible/bidi instruction-smuggling scanner: fires on hidden control characters,
     stays silent on ordinary text, and never returns file content (the Phase-1 privacy wall holds)."""

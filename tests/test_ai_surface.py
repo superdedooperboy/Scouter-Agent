@@ -518,6 +518,80 @@ class OffensiveAiFrameworkInventory(unittest.TestCase):
         self.assertIn("strix", labels)
 
 
+class OffensiveToolchainCorrelation(unittest.TestCase):
+    """1.15 Phase 4 — several distinct offensive tools under one lineage = an AI-orchestrated pentest.
+    Fires on (AI/offensive ancestor + >=2 tools) or (>=3 tools spanning >=2 phases); elevates every tool
+    node in the group to high, including individually-unflagged tools (sqlmap/nuclei)."""
+
+    @staticmethod
+    def _node(label, ancestry, sev="info", cmdline=None):
+        score = {"high": 70, "medium": 40, "low": 20, "info": 0}[sev]
+        return {"type": "process", "severity": sev, "score": score, "label": label, "reasons": [],
+                "detail": {"pid": 1, "ancestry": ancestry, "cmdline": cmdline or label}}
+
+    def _reasoned(self, n):
+        return any("AI-orchestrated offensive toolchain" in r["text"] for r in n["reasons"])
+
+    def test_two_tools_under_offensive_framework_fire(self):
+        anc = "launchd > hexstrike-server"
+        ns = [self._node("nmap", anc), self._node("sqlmap", anc)]
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 2)
+        for n in ns:
+            self.assertTrue(self._reasoned(n))
+            self.assertEqual(n["severity"], "high")
+        self.assertTrue(ns[0]["detail"]["offensive_toolchain"]["offensive_framework"])
+
+    def test_two_tools_under_benign_coding_agent_fire(self):
+        # an AI coding agent steered into offensive work also counts (>=2 tools under an AI ancestor)
+        anc = "launchd > claude > bash"
+        ns = [self._node("nmap", anc), self._node("nuclei", anc)]
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 2)
+
+    def test_three_tools_two_phases_no_ai_ancestor_fire(self):
+        anc = "launchd > bash"
+        ns = [self._node("nmap", anc), self._node("nuclei", anc), self._node("sqlmap", anc)]
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 3)
+        self.assertEqual(ns[0]["detail"]["offensive_toolchain"]["phases"], ["recon", "scan", "exploit"])
+
+    def test_two_tools_one_phase_no_ai_not_fired(self):
+        anc = "launchd > bash"
+        ns = [self._node("nmap", anc), self._node("gobuster", anc)]   # both recon, no AI ancestor
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 0)
+        self.assertFalse(self._reasoned(ns[0]))
+
+    def test_single_tool_under_framework_not_a_toolchain(self):
+        # one tool is Phase-1 territory, not a toolchain; Phase 4 needs >= 2
+        ns = [self._node("nmap", "launchd > hexstrike-server")]
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 0)
+
+    def test_tool_matched_by_cmdline_leaf(self):
+        anc = "launchd > cai"
+        ns = [self._node("python3", anc, cmdline="python3 nuclei"),
+              self._node("python3", anc, cmdline="python3 sqlmap -u http://x")]
+        # leaf basenames nuclei/sqlmap are recognised even though the exe label is python3
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 2)
+
+    def test_elevates_an_unflagged_info_tool(self):
+        anc = "launchd > strix"
+        n_sqlmap = self._node("sqlmap", anc, sev="info")   # no standalone rule -> starts info
+        n_nmap = self._node("nmap", anc, sev="info")
+        agent.correlate_offensive_toolchain([n_sqlmap, n_nmap])
+        self.assertEqual(n_sqlmap["severity"], "high")
+
+    def test_idempotent(self):
+        anc = "launchd > hexstrike-server"
+        ns = [self._node("nmap", anc), self._node("sqlmap", anc)]
+        agent.correlate_offensive_toolchain(ns)
+        agent.correlate_offensive_toolchain(ns)
+        hits = [r for r in ns[0]["reasons"] if "AI-orchestrated offensive toolchain" in r["text"]]
+        self.assertEqual(len(hits), 1)
+
+    def test_separate_lineages_do_not_merge(self):
+        # two different parents, one tool each -> neither fires
+        ns = [self._node("nmap", "launchd > bash"), self._node("sqlmap", "launchd > zsh")]
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 0)
+
+
 class OffensiveCapabilityMcp(unittest.TestCase):
     """1.15 Phase 3 — an MCP server that wraps offensive tooling (HexStrike bridge, or a server
     exposing nmap/metasploit/sqlmap/nuclei) is a distinct high exposure, independent of transport."""

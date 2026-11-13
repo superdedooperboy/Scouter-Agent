@@ -16134,6 +16134,108 @@ def correlate_ai_agent_lineage(nodes):
     return n_elev
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 (1.15) — AI-orchestrated offensive-toolchain correlation
+# ---------------------------------------------------------------------------
+# Offensive tool basename -> kill-chain phase. A single process lineage running several of these, across
+# more than one phase, is the signature of an autonomous pentest (an AI driving recon -> scan -> exploit
+# at machine speed) rather than a human running one tool. Names are distinctive program basenames so an
+# exact label / cmdline-leaf match is near-zero-FP; nmap already has a standalone rule (b-nmap) but the
+# others (sqlmap/nuclei/hydra/…) are otherwise unflagged — the CORRELATION is what makes them matter.
+OFFENSIVE_TOOLCHAIN = {
+    # reconnaissance / enumeration
+    "nmap": "recon", "masscan": "recon", "gobuster": "recon", "ffuf": "recon", "dirb": "recon",
+    "feroxbuster": "recon", "amass": "recon", "subfinder": "recon", "httpx": "recon", "whatweb": "recon",
+    "enum4linux": "recon",
+    # vulnerability scanning
+    "nuclei": "scan", "nikto": "scan", "wpscan": "scan", "sslscan": "scan", "testssl.sh": "scan",
+    # exploitation
+    "sqlmap": "exploit", "msfconsole": "exploit", "msfvenom": "exploit", "commix": "exploit",
+    "xsser": "exploit",
+    # credential attacks
+    "hydra": "cred", "medusa": "cred", "patator": "cred", "crackmapexec": "cred", "netexec": "cred",
+    "hashcat": "cred", "responder": "cred",
+}
+_TOOLCHAIN_PHASE_ORDER = ("recon", "scan", "exploit", "cred")
+# interpreters whose FIRST real argument is the actual program (python3 sqlmap.py / python -m sqlmap)
+_TOOLCHAIN_INTERP = {"python", "python3", "python2", "ruby", "perl", "node", "pwsh"}
+
+
+def _toolchain_norm(tok):
+    return re.sub(r"\.(py|sh|pl|rb)$", "", os.path.basename(tok).lower())
+
+
+def _toolchain_tool(node):
+    """Return the offensive tool this process node IS, else None. Matches an exact label, the cmdline's
+    program basename (so `./sqlmap.py` or `sqlmap` is caught), and — when the program is an interpreter —
+    the first real argument (so `python3 sqlmap.py` / `python -m nuclei` is caught). Only the program and
+    its first non-flag argument are inspected, never later args, so a tool name appearing as data does
+    not cause a false hit."""
+    lab = (node.get("label") or "").lower()
+    if lab in OFFENSIVE_TOOLCHAIN:
+        return lab
+    toks = [t for t in (((node.get("detail") or {}).get("cmdline")) or "").split() if t]
+    if not toks:
+        return None
+    first = _toolchain_norm(toks[0])
+    if first in OFFENSIVE_TOOLCHAIN:
+        return first
+    if first in _TOOLCHAIN_INTERP:
+        for t in toks[1:]:
+            if t == "-m" or (t.startswith("-") and t != "-m"):
+                continue                       # skip interpreter flags (e.g. -m) until the first real arg
+            cand = _toolchain_norm(t)
+            return cand if cand in OFFENSIVE_TOOLCHAIN else None
+    return None
+
+
+def correlate_offensive_toolchain(nodes):
+    """Phase 4 — recognise an AI-orchestrated offensive toolchain: several DISTINCT offensive tools run
+    under ONE shared process lineage. Fires when that lineage contains an AI agent / local runtime /
+    offensive framework and >= 2 distinct tools (the clearest AI-driven case), OR when >= 3 distinct
+    tools span >= 2 kill-chain phases under one parent even with no recognised AI ancestor (the multi-tool
+    fan-out under a single orchestrator is itself the autonomous shape). Every tool node in a firing group
+    is floored to high with a shared toolchain reason — so sqlmap/nuclei, individually unflagged, become
+    significant through the correlation, and the group lands as one incident. Mutates `nodes`; returns the
+    number of nodes elevated. (A tighter sub-second cadence from exec history is a future refinement.)"""
+    groups = {}   # ancestry string -> {tool: [nodes]}
+    for n in nodes:
+        if n.get("type") != "process" or (n.get("detail") or {}).get("ancestry") is None:
+            continue
+        tool = _toolchain_tool(n)
+        if not tool:
+            continue
+        anc = (n.get("detail") or {}).get("ancestry") or ""
+        groups.setdefault(anc, {}).setdefault(tool, []).append(n)
+    n_elev = 0
+    for anc, tools in groups.items():
+        phases = {OFFENSIVE_TOOLCHAIN[t] for t in tools}
+        fw = _offensive_lineage(anc)
+        m = AI_LINEAGE_AGENT_RE.search(anc)
+        ai = fw or (m.group(1) if m else None)
+        distinct = len(tools)
+        if not ((ai and distinct >= 2) or (distinct >= 3 and len(phases) >= 2)):
+            continue
+        toollist = ", ".join(sorted(tools))
+        phaselist = " -> ".join(p for p in _TOOLCHAIN_PHASE_ORDER if p in phases)
+        driver = ("driven by '%s' in its ancestry" % ai) if ai else "all sharing one parent process"
+        txt = ("AI-orchestrated offensive toolchain: %d distinct offensive tools (%s) spanning %s, %s — "
+               "the autonomous-pentest pattern (an AI chaining recon/scan/exploit at machine speed), not "
+               "a human running one tool." % (distinct, toollist, phaselist, driver))
+        meta = {"tools": sorted(tools), "phases": [p for p in _TOOLCHAIN_PHASE_ORDER if p in phases],
+                "ai": ai or "", "offensive_framework": bool(fw), "ancestry": anc}
+        for tool_nodes in tools.values():
+            for n in tool_nodes:
+                reasons = n.setdefault("reasons", [])
+                if txt not in {r.get("text") for r in reasons}:
+                    reasons.append(reason(txt, "T1595", 75))
+                n["score"] = max(n.get("score", 0), 75)
+                n["severity"] = max_severity(n.get("severity", "info"), "high")
+                (n.setdefault("detail", {}))["offensive_toolchain"] = meta
+                n_elev += 1
+    return n_elev
+
+
 class RarityIndex:
     """"Have we ever seen this here before?" — the one signal an adversary can't fake away.
 
@@ -17049,6 +17151,10 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
     #     malware). Runs after detections (needs scored nodes), before suppressions (operator can still
     #     silence one). The lineage reason carries the context to the Mesh with no extra wiring.
     ai_lineage_hits = correlate_ai_agent_lineage(nodes)
+    # --- Phase 4 (1.15): AI-orchestrated offensive-toolchain correlation. Several distinct offensive
+    #     tools under one lineage = autonomous pentest; elevates the whole toolchain as one incident and
+    #     makes individually-unflagged tools (sqlmap/nuclei/hydra) significant through the correlation.
+    ai_lineage_hits += correlate_offensive_toolchain(nodes)
 
     # --- operator suppressions: drop matching alerts to 'info' so they stop firing (applied
     #     AFTER detection flooring, so a suppression is the final word — even over a high floor).

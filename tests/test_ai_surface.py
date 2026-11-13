@@ -518,6 +518,79 @@ class OffensiveAiFrameworkInventory(unittest.TestCase):
         self.assertIn("strix", labels)
 
 
+class OffensiveCapabilityMcp(unittest.TestCase):
+    """1.15 Phase 3 — an MCP server that wraps offensive tooling (HexStrike bridge, or a server
+    exposing nmap/metasploit/sqlmap/nuclei) is a distinct high exposure, independent of transport."""
+
+    def _mcp_findings(self, servers_def, pentest=False):
+        tmp = tempfile.mkdtemp()
+        cfg = os.path.join(tmp, "mcp.json")
+        _dump(cfg, {"mcpServers": servers_def})
+        orig = {"paths": agent._mcp_config_paths, "roots": agent._ai_project_roots,
+                "home": agent._ai_home, "cp": agent.collect_processes, "cn": agent.collect_network}
+        agent._mcp_config_paths = lambda: [(cfg, "Cursor", "project")]
+        agent._ai_project_roots = lambda limit=60: []
+        agent._ai_home = lambda: "/nonexistent-home-xyz"
+        agent.collect_processes = lambda: {}
+        agent.collect_network = lambda: {}
+        if pentest:
+            os.environ[agent.AI_OFFENSIVE_ALLOWLIST_ENV] = "1"
+        try:
+            c = agent.AISurfaceCollector(enabled=True, endpoints=None)
+            c._collect()
+            nodes = c.snapshot()
+        finally:
+            agent._mcp_config_paths, agent._ai_project_roots = orig["paths"], orig["roots"]
+            agent._ai_home = orig["home"]
+            agent.collect_processes, agent.collect_network = orig["cp"], orig["cn"]
+            os.environ.pop(agent.AI_OFFENSIVE_ALLOWLIST_ENV, None)
+        return [n for n in nodes if n["detail"].get("finding") == "offensive-mcp"]
+
+    def test_hexstrike_mcp_bridge_flagged(self):
+        off = self._mcp_findings({"hexstrike": {"command": "python3", "args": ["hexstrike_mcp.py"]}})
+        self.assertEqual(len(off), 1)
+        self.assertEqual(off[0]["severity"], "high")
+        self.assertIn("hexstrike", off[0]["detail"]["offensive_tokens"])
+
+    def test_generic_server_wrapping_attack_tools_flagged(self):
+        off = self._mcp_findings({"recon": {"command": "npx", "args": ["-y", "@acme/nmap-nuclei-mcp"]}})
+        self.assertEqual(len(off), 1)
+        self.assertTrue({"nmap", "nuclei"} <= set(off[0]["detail"]["offensive_tokens"]))
+
+    def test_remote_offensive_mcp_gets_both_findings(self):
+        # an offensive server reached remotely gets BOTH the remote finding and the offensive finding
+        tmp = tempfile.mkdtemp()
+        cfg = os.path.join(tmp, "mcp.json")
+        _dump(cfg, {"mcpServers": {"x": {"url": "https://hexstrike.example.com/sse", "type": "sse"}}})
+        orig = (agent._mcp_config_paths, agent._ai_project_roots, agent._ai_home,
+                agent.collect_processes, agent.collect_network)
+        agent._mcp_config_paths = lambda: [(cfg, "Cursor", "project")]
+        agent._ai_project_roots = lambda limit=60: []
+        agent._ai_home = lambda: "/nonexistent-home-xyz"
+        agent.collect_processes = lambda: {}
+        agent.collect_network = lambda: {}
+        try:
+            c = agent.AISurfaceCollector(enabled=True, endpoints=None)
+            c._collect()
+            nodes = c.snapshot()
+        finally:
+            (agent._mcp_config_paths, agent._ai_project_roots, agent._ai_home,
+             agent.collect_processes, agent.collect_network) = orig
+        findings = {n["detail"].get("finding") for n in nodes}
+        self.assertIn("remote-mcp", findings)
+        self.assertIn("offensive-mcp", findings)
+
+    def test_benign_mcp_not_flagged(self):
+        off = self._mcp_findings({"fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"]}})
+        self.assertEqual(off, [])
+
+    def test_pentest_host_downgrades_offensive_mcp(self):
+        off = self._mcp_findings({"hs": {"command": "hexstrike_mcp"}}, pentest=True)
+        self.assertEqual(len(off), 1)
+        self.assertEqual(off[0]["score"], 0)
+        self.assertTrue(off[0]["detail"]["allowlisted"])
+
+
 class HiddenInstructionScan(unittest.TestCase):
     """Phase 4 — the invisible/bidi instruction-smuggling scanner: fires on hidden control characters,
     stays silent on ordinary text, and never returns file content (the Phase-1 privacy wall holds)."""

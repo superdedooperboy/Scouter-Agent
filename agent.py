@@ -8762,6 +8762,17 @@ AI_OFFENSIVE_FRAMEWORKS = {
 # truthy the Phase-2 inventory still LISTS a framework but does not SCORE it. Read at finding time.
 AI_OFFENSIVE_ALLOWLIST_ENV = "SCOUTER_PENTEST_HOST"
 
+# Distinctive tokens marking an MCP server that hands an AI agent OFFENSIVE tooling — either a known
+# offensive framework's MCP bridge (hexstrike) or a server wrapping concrete attack tools. An MCP that
+# gives a model a port scanner and Metasploit is a categorically bigger exposure than a filesystem MCP,
+# so it gets its own high finding. Curated to be substring-safe: no bare "msf"/"exploit" (too generic);
+# only concrete tool/framework names (matched case-insensitively against name+command+package+args).
+OFFENSIVE_MCP_TOKENS = (
+    "hexstrike", "metasploit", "msfconsole", "msfrpc", "sqlmap", "nuclei", "masscan", "nmap",
+    "hydra", "gobuster", "ffuf", "nikto", "pentest", "beef-xss", "empire", "cobaltstrike",
+    "sliver", "mimikatz", "crackmapexec", "netexec", "impacket",
+)
+
 # Static LLM-API endpoint set (Q2: shipped built-in + refreshable feed). Exact hosts
 # plus suffix matches for the cloud providers whose host carries a region/resource.
 LLM_ENDPOINTS = {
@@ -9359,6 +9370,13 @@ class AISurfaceCollector:
                     if isinstance(a, str) and a and not a.startswith("-") and a not in ("dlx", "run", "x"):
                         rec["package"] = a
                         break
+        # (1.15) Offensive-capability classification: does this server hand the agent attack tooling?
+        # Matched against name + command + package + the url host + every string arg.
+        hay = " ".join([sname, command, rec["package"], rec["url_host"]]
+                       + [a for a in args if isinstance(a, str)]).lower()
+        hits = [t for t in OFFENSIVE_MCP_TOKENS if t in hay]
+        rec["offensive"] = bool(hits)
+        rec["offensive_tokens"] = hits
         return rec
 
     # -- C4: agent instruction / rules files (path + sha256 + mtime only) -----
@@ -9491,6 +9509,10 @@ class AISurfaceCollector:
         ai_bases = set(AI_AGENT_CLIS) | set(AI_RUNTIMES) \
             | {p for meta in AI_OFFENSIVE_FRAMEWORKS.values() for p in meta["procs"]}
         egress = self._gather_egress(procs, net, ai_pids, ai_bases)
+        # A host explicitly marked a pentest box downgrades the 1.15 offensive findings (framework +
+        # offensive-MCP) to advisory (score 0) — listed, not alarmed. Computed once, used below.
+        pentest_host = (os.environ.get(AI_OFFENSIVE_ALLOWLIST_ENV) or "").strip().lower() \
+            not in ("", "0", "false", "no", "off")
 
         # -- Phase 4: integrity diff against the baseline. Change-watch and new-MCP are TEMPORAL context
         # (instruction files are edited constantly in normal work, so a bare change is not an alarm); the
@@ -9545,6 +9567,26 @@ class AISurfaceCollector:
                     {"category": "ai-mcp", "finding": "npx-fetched-mcp", "server": s["name"],
                      "client": s["client"], "command": s["command"], "package": s["package"],
                      "env_keys": s["env_keys"], "scope": s["scope"], "path": s["source"],
+                     "new_since_baseline": s.get("new_since_baseline", False)})
+                items[n["id"]] = n
+            # (1.15) F-offensive-MCP: independent of remote/npx — a server that wraps attack tooling is
+            # its own high exposure, whatever its transport. A pentest-box is advisory (score 0).
+            if s.get("offensive"):
+                toks = ", ".join(s.get("offensive_tokens") or [])
+                score = 0 if pentest_host else 70
+                n = self._finding(
+                    "ai-mcp", f"{tag}:offensive",
+                    f"MCP server exposes offensive security tooling: {s['name']} ({s['client']})",
+                    score, "T1588.002",
+                    f"This MCP server hands the AI agent offensive tooling ({toks}) — the HexStrike / "
+                    "autonomous-pentest pattern, where a model drives real attack tools at machine "
+                    "speed. Confirm it is an authorized pentest setup." + (
+                        " [host marked SCOUTER_PENTEST_HOST — advisory only]" if pentest_host else ""),
+                    {"category": "ai-mcp", "finding": "offensive-mcp", "server": s["name"],
+                     "client": s["client"], "command": s["command"], "package": s["package"],
+                     "transport": s["transport"], "url_host": s["url_host"],
+                     "offensive_tokens": s.get("offensive_tokens") or [], "scope": s["scope"],
+                     "path": s["source"], "allowlisted": pentest_host,
                      "new_since_baseline": s.get("new_since_baseline", False)})
                 items[n["id"]] = n
         # F3: local runtime reachable off-loopback
@@ -9621,8 +9663,6 @@ class AISurfaceCollector:
         # C2b (1.15): autonomous offensive AI framework present on the host — the exposure IS the tool.
         # Running > listening ranks high; installed-only is medium. A host explicitly marked a pentest
         # box (SCOUTER_PENTEST_HOST) still LISTS the framework but is not scored (advisory, posture-gated).
-        pentest_host = (os.environ.get(AI_OFFENSIVE_ALLOWLIST_ENV) or "").strip().lower() \
-            not in ("", "0", "false", "no", "off")
         for o in offensive:
             if pentest_host:
                 score = 0

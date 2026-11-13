@@ -8697,6 +8697,49 @@ AI_RUNTIMES = {
 # Apple service as an LLM runtime (vLLM/Jan/LocalAI are still caught by process name).
 AI_RUNTIME_PORTS = {11434: "Ollama", 1234: "LM Studio", 4891: "GPT4All"}
 
+# Autonomous AI OFFENSIVE / pentest frameworks (the 1.15 gap-fill). UNLIKE AI_AGENT_CLIS — benign
+# coding agents we only catalogue — these are LLM loops built to drive real offensive tooling
+# (nmap / sqlmap / nuclei / metasploit / hydra) at machine speed, so the presence of one on a monitored
+# host is itself a finding. Catalogued here once and used three ways: AI-Surface inventory (Phase 2),
+# offensive-capability MCP classification (Phase 3), and the AI-lineage escalation below (Phase 1).
+# Dual-use: authorised pentesters run these, so every finding is advisory / posture-gated and a host
+# can be marked a pentest box to silence them (see AI_OFFENSIVE_ALLOWLIST_ENV). Per-record fields:
+#   name     : product label shown to the operator
+#   procs    : executable basenames (exact, lowercased) that identify the framework process
+#   modules  : importable Python package/module names (pip-installed form)
+#   markers  : marker file / directory basenames the framework writes or ships
+#   port     : signature listening port (HexStrike's Flask bridge), when it has a fixed one
+#   mcp      : True when the framework exposes its toolbox over MCP (feeds Phase 3)
+#   lineage  : DISTINCTIVE name fragments safe to match (\b-anchored) in a process-ancestry string;
+#              collision-prone bare names are deliberately omitted (see nebula) to avoid false hits
+AI_OFFENSIVE_FRAMEWORKS = {
+    "hexstrike":    {"name": "HexStrike AI", "procs": ["hexstrike-server", "hexstrike_mcp", "hexstrike-mcp"],
+                     "modules": ["hexstrike_server", "hexstrike_mcp"], "markers": ["hexstrike-server.py"],
+                     "port": 8888, "mcp": True, "lineage": [r"hexstrike"]},
+    "cai":          {"name": "CAI (Cybersecurity AI)", "procs": ["cai"], "modules": ["cai", "caiextensions"],
+                     "markers": [], "mcp": False, "lineage": [r"cai"]},
+    "strix":        {"name": "Strix", "procs": ["strix"], "modules": ["strix"], "markers": ["agent_runs"],
+                     "mcp": False, "lineage": [r"strix"]},
+    "pentagi":      {"name": "PentAGI", "procs": ["pentagi"], "modules": [], "markers": [],
+                     "mcp": False, "lineage": [r"pentagi"]},
+    "hackingbuddy": {"name": "hackingBuddyGPT", "procs": ["wintermute", "wintermute.py"],
+                     "modules": ["hackingBuddyGPT"], "markers": [], "mcp": False,
+                     "lineage": [r"wintermute", r"hackingbuddy"]},
+    "nebula":       {"name": "Nebula (offensive AI)", "procs": ["nebula-ai"], "modules": ["nebula_ai"],
+                     "markers": [], "mcp": False, "lineage": [r"nebula-ai"]},  # bare 'nebula' omitted: Nebula VPN
+    "pentestgpt":   {"name": "PentestGPT", "procs": ["pentestgpt"], "modules": ["pentestgpt"], "markers": [],
+                     "mcp": False, "lineage": [r"pentestgpt"]},
+    "vulnbot":      {"name": "VulnBot", "procs": ["vulnbot"], "modules": ["vulnbot"], "markers": [],
+                     "mcp": False, "lineage": [r"vulnbot"]},
+    "artex":        {"name": "ARTEX", "procs": ["artex"], "modules": [], "markers": [], "mcp": False,
+                     "lineage": [r"artex"]},
+    "cairn":        {"name": "Cairn", "procs": ["cairn"], "modules": ["cairn"], "markers": [], "mcp": False,
+                     "lineage": [r"cairn"]},
+}
+# Env var naming hosts that are authorised to run offensive frameworks (a pentester's own box); when set
+# truthy the Phase-2 inventory still LISTS a framework but does not SCORE it. Read at finding time.
+AI_OFFENSIVE_ALLOWLIST_ENV = "SCOUTER_PENTEST_HOST"
+
 # Static LLM-API endpoint set (Q2: shipped built-in + refreshable feed). Exact hosts
 # plus suffix matches for the cloud providers whose host carries a region/resource.
 LLM_ENDPOINTS = {
@@ -15847,6 +15890,34 @@ AI_LINEAGE_DANGER_TECH = {
     "T1041", "T1567", "T1048",
 }
 
+# Offensive AI frameworks get a BROADER danger set: for an autonomous pentest framework, active
+# recon / scanning / exploitation IS the expected malicious behaviour (not ordinary tool noise), so a
+# flagged discovery or exploit action under one of these is signal, not background. Precompiled from the
+# AI_OFFENSIVE_FRAMEWORKS catalog so the two stay in lock-step.
+AI_OFFENSIVE_DANGER_TECH = AI_LINEAGE_DANGER_TECH | {
+    "T1046",   # network service scanning (nmap/masscan)
+    "T1595",   # active scanning
+    "T1190",   # exploit public-facing application
+    "T1210",   # exploitation of remote services
+    "T1018",   # remote system discovery
+    "T1110",   # brute force (hydra / password spraying)
+}
+AI_OFFENSIVE_LINEAGE = [
+    (meta["name"], re.compile(r"\b(?:" + "|".join(meta["lineage"]) + r")\b", re.I))
+    for meta in AI_OFFENSIVE_FRAMEWORKS.values() if meta.get("lineage")
+]
+
+
+def _offensive_lineage(anc):
+    """Return the product name of a catalogued autonomous offensive AI framework found in a process
+    ancestry string, else None. Each framework's fragments are \\b-anchored and curated to be
+    collision-safe (e.g. 'cai' never matches inside 'cairn'; bare 'nebula' is omitted so the Nebula
+    overlay-network daemon is not mistaken for the offensive tool)."""
+    for name, rx in AI_OFFENSIVE_LINEAGE:
+        if rx.search(anc):
+            return name
+    return None
+
 
 def correlate_ai_agent_lineage(nodes):
     """Phase 3 — behavioral correlation. Elevate an ALREADY-FLAGGED dangerous action when its process
@@ -15859,6 +15930,11 @@ def correlate_ai_agent_lineage(nodes):
     severity to **high**, so the agent-driven case outranks the identical action done by hand — and the
     reason text carries that context to the Mesh with no extra wiring.
 
+    1.15 adds a THIRD shape ahead of the two above: an *autonomous offensive AI framework* (HexStrike /
+    CAI / Strix / ARTEX …) in the ancestry. That case is higher-confidence (these tools exist only to
+    attack), uses the broader AI_OFFENSIVE_DANGER_TECH set (recon/scan/exploit count), gets a distinct
+    reason, and floors a notch above the benign-agent case so it ranks first within 'high'.
+
     Runs after the detection rules (it needs scored nodes) and before suppressions (so an operator can
     still silence a specific alert). Never escalates to 'critical' (reserved for explicit assignment).
     Mutates `nodes`; returns the number elevated."""
@@ -15870,10 +15946,25 @@ def correlate_ai_agent_lineage(nodes):
         anc = d.get("ancestry") or ""
         if not anc:
             continue
+        majors = {t.split(".")[0] for t in techniques_of(n.get("reasons"))}
+        # (1.15) Offensive framework in the ancestry — checked first, broader danger set, distinct reason.
+        fw = _offensive_lineage(anc)
+        if fw and (majors & AI_OFFENSIVE_DANGER_TECH):
+            txt = ("Driven by an autonomous offensive AI framework: this flagged action runs under '%s' "
+                   "in its process ancestry (%s) — an LLM-steered pentest framework executing an "
+                   "offensive action at machine speed (cf. ARTEX / HexStrike abuse, 2025-2026), not a "
+                   "hand-run tool." % (fw, anc))
+            reasons = n.setdefault("reasons", [])
+            if txt not in {r.get("text") for r in reasons}:
+                reasons.append(reason(txt, "T1059", 75))
+            n["score"] = max(n.get("score", 0), 75)
+            n["severity"] = max_severity(n.get("severity", "info"), "high")
+            d["ai_lineage"] = {"framework": fw, "ancestry": anc, "offensive": True}
+            n_elev += 1
+            continue
         m = AI_LINEAGE_AGENT_RE.search(anc)
         if not m:
             continue
-        majors = {t.split(".")[0] for t in techniques_of(n.get("reasons"))}
         if not (majors & AI_LINEAGE_DANGER_TECH):
             continue
         agent = m.group(1)

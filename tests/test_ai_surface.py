@@ -368,6 +368,65 @@ class AiAgentLineage(unittest.TestCase):
         self.assertEqual(len(hits), 1)
 
 
+class OffensiveAiFrameworkLineage(unittest.TestCase):
+    """1.15 — an already-flagged action whose ancestry traces to an autonomous OFFENSIVE AI framework is
+    elevated with a distinct, higher-confidence reason, a broader danger set (recon/scan/exploit count),
+    and a floor a notch above the benign-agent case."""
+
+    @staticmethod
+    def _node(sev, techs, ancestry):
+        score = {"high": 70, "medium": 40, "low": 20, "info": 0}[sev]
+        return {"type": "process", "severity": sev, "score": score,
+                "reasons": [agent.reason("flagged", t, 50) for t in techs],
+                "detail": {"pid": 1, "ancestry": ancestry}}
+
+    def _offensive(self, n):
+        return any("autonomous offensive AI framework" in r["text"] for r in n["reasons"])
+
+    def test_revshell_under_hexstrike_elevates_offensive(self):
+        n = self._node("medium", ["T1059"], "launchd > hexstrike-server > bash")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 1)
+        self.assertTrue(self._offensive(n))
+        self.assertEqual(n["severity"], "high")
+        self.assertTrue(n["detail"]["ai_lineage"]["offensive"])
+        self.assertEqual(n["detail"]["ai_lineage"]["framework"], "HexStrike AI")
+        # floors a notch above the benign-agent case (70)
+        self.assertGreaterEqual(n["score"], 75)
+
+    def test_recon_under_offensive_framework_counts(self):
+        # active scanning (T1046) is NOT in the benign danger set but IS in the offensive one
+        n = self._node("medium", ["T1046"], "launchd > cai > nmap")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 1)
+        self.assertTrue(self._offensive(n))
+
+    def test_recon_under_benign_agent_not_elevated(self):
+        # the same scan under a benign coding agent is NOT elevated (T1046 off the benign set)
+        n = self._node("medium", ["T1046"], "launchd > claude > nmap")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 0)
+
+    def test_cai_does_not_match_inside_cairn_token(self):
+        # 'cai' is \\b-anchored: a cairn ancestry resolves to Cairn, never a spurious CAI hit
+        self.assertEqual(agent._offensive_lineage("launchd > cairn > sh"), "Cairn")
+        self.assertIsNone(agent._offensive_lineage("launchd > scaffold > sh"))
+
+    def test_bare_nebula_vpn_not_flagged(self):
+        # the Nebula overlay-network daemon must not read as the offensive Nebula tool
+        self.assertIsNone(agent._offensive_lineage("launchd > nebula > sh"))
+        self.assertEqual(agent._offensive_lineage("launchd > nebula-ai > sh"), "Nebula (offensive AI)")
+
+    def test_info_node_not_pulled_up(self):
+        n = self._node("info", ["T1059"], "launchd > strix > bash")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 0)
+        self.assertEqual(n["severity"], "info")
+
+    def test_idempotent_no_duplicate_reason(self):
+        n = self._node("medium", ["T1190"], "launchd > pentagi > sh")
+        agent.correlate_ai_agent_lineage([n])
+        agent.correlate_ai_agent_lineage([n])
+        hits = [r for r in n["reasons"] if "autonomous offensive AI framework" in r["text"]]
+        self.assertEqual(len(hits), 1)
+
+
 class HiddenInstructionScan(unittest.TestCase):
     """Phase 4 — the invisible/bidi instruction-smuggling scanner: fires on hidden control characters,
     stays silent on ordinary text, and never returns file content (the Phase-1 privacy wall holds)."""

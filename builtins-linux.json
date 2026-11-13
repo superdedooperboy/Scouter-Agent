@@ -1,6 +1,6 @@
 {
  "platform": "Linux",
- "count": 103,
+ "count": 105,
  "rules": [
   {
    "id": "b-revshell",
@@ -709,6 +709,101 @@
     }
    ],
    "description": "A process listening on a port strongly associated with backdoors / C2 frameworks (4444 = Metasploit default, 1337/31337, 12345, \u2026) suggests an implant awaiting inbound connections.",
+   "confidence": 2,
+   "confidence_label": "probable"
+  },
+  {
+   "id": "b-ai-offensive-hexstrike",
+   "name": "HexStrike AI offensive framework",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1588.002",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "hexstrike-server"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "hexstrike_mcp"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "hexstrike-mcp"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\bhexstrike[-_](?:server|mcp)\\b"
+    }
+   ],
+   "description": "HexStrike AI is an autonomous offensive framework that bridges an LLM to 150+ attack tools over MCP, exposing a Flask control server (hexstrike-server) and an MCP bridge (hexstrike_mcp). Its process on a monitored host means AI-driven offensive tooling is staged here; Mandiant/GTIG and Check Point reported real-world abuse in 2025-2026. Keyed on the exact server/bridge process names \u2014 near-zero false positive.",
+   "confidence": 3,
+   "confidence_label": "strong"
+  },
+  {
+   "id": "b-ai-offensive-fw",
+   "name": "Autonomous offensive AI framework process",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "medium",
+   "mitre": "T1588.002",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "cai"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "strix"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "pentagi"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "wintermute"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "pentestgpt"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "vulnbot"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "nebula-ai"
+    },
+    {
+     "field": "label",
+     "op": "eq",
+     "value": "cairn"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "\\b(?:wintermute\\.py|pentestgpt|hackingbuddygpt)\\b"
+    }
+   ],
+   "description": "An autonomous, LLM-driven offensive/pentest framework process (CAI, Strix, PentAGI, hackingBuddyGPT/wintermute, PentestGPT, VulnBot, Nebula-AI, Cairn). These drive real attack tooling (nmap/sqlmap/nuclei/metasploit) under AI control at machine speed. Dual-use \u2014 authorized pentesters run them \u2014 so this is medium and the richer, allowlist-aware signal is the AI-Surface 'offensive AI framework present' finding; matched on exact program names to keep false positives near zero.",
    "confidence": 2,
    "confidence_label": "probable"
   },

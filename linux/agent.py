@@ -94,7 +94,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -624,6 +624,15 @@ BUILTIN_RULES = [
        [_c("label", "eq", "mitmproxy"), _c("label", "eq", "mitmdump"), _c("label", "eq", "mitmweb")]),
     _b("b-badport", "Listener on a known-backdoor port", "medium", "T1571",
        [_c("lport", "in", "4444,5555,6666,1337,31337,12345")], nt="listen"),
+    # ---- Offensive AI / autonomous pentest frameworks (1.15) ----
+    _b("b-ai-offensive-hexstrike", "HexStrike AI offensive framework", "high", "T1588.002",
+       [_c("label", "eq", "hexstrike-server"), _c("label", "eq", "hexstrike_mcp"),
+        _c("label", "eq", "hexstrike-mcp"), _c("cmdline", "regex", r"\bhexstrike[-_](?:server|mcp)\b")]),
+    _b("b-ai-offensive-fw", "Autonomous offensive AI framework process", "medium", "T1588.002",
+       [_c("label", "eq", "cai"), _c("label", "eq", "strix"), _c("label", "eq", "pentagi"),
+        _c("label", "eq", "wintermute"), _c("label", "eq", "pentestgpt"), _c("label", "eq", "vulnbot"),
+        _c("label", "eq", "nebula-ai"), _c("label", "eq", "cairn"),
+        _c("cmdline", "regex", r"\b(?:wintermute\.py|pentestgpt|hackingbuddygpt)\b")]),
     # ---- Discovery ----
     _b("b-nmap", "Network port scanner (nmap)", "medium", "T1046",
        [_c("label", "eq", "nmap"), _c("cmdline", "regex", r"\bnmap\b")]),
@@ -1210,6 +1219,16 @@ _BUILTIN_DESC = {
     "b-sshd-inject": "Replacing sshd or a library it links (libkeyutils is the classic) backdoors authentication "
         "itself, capturing every credential used to log in. ELF/Sshdinjector is the family that made this "
         "routine; nothing legitimate overwrites sshd outside a package upgrade.",
+    "b-ai-offensive-hexstrike": "HexStrike AI is an autonomous offensive framework that bridges an LLM to 150+ "
+        "attack tools over MCP, exposing a Flask control server (hexstrike-server) and an MCP bridge "
+        "(hexstrike_mcp). Its process on a monitored host means AI-driven offensive tooling is staged here; "
+        "Mandiant/GTIG and Check Point reported real-world abuse in 2025-2026. Keyed on the exact server/bridge "
+        "process names — near-zero false positive.",
+    "b-ai-offensive-fw": "An autonomous, LLM-driven offensive/pentest framework process (CAI, Strix, PentAGI, "
+        "hackingBuddyGPT/wintermute, PentestGPT, VulnBot, Nebula-AI, Cairn). These drive real attack tooling "
+        "(nmap/sqlmap/nuclei/metasploit) under AI control at machine speed. Dual-use — authorized pentesters run "
+        "them — so this is medium and the richer, allowlist-aware signal is the AI-Surface 'offensive AI "
+        "framework present' finding; matched on exact program names to keep false positives near zero.",
 }
 for _r in BUILTIN_RULES:
     _r["description"] = _BUILTIN_DESC.get(_r["id"], "")
@@ -8879,6 +8898,46 @@ AI_RUNTIMES = {
 # Apple service as an LLM runtime (vLLM/Jan/LocalAI are still caught by process name).
 AI_RUNTIME_PORTS = {11434: "Ollama", 1234: "LM Studio", 4891: "GPT4All"}
 
+# Autonomous AI OFFENSIVE / pentest frameworks (the 1.15 gap-fill). UNLIKE AI_AGENT_CLIS — benign
+# coding agents we only catalogue — these are LLM loops built to drive real offensive tooling
+# (nmap / sqlmap / nuclei / metasploit / hydra) at machine speed, so the presence of one on a monitored
+# host is itself a finding. Catalogued here once and used three ways: AI-Surface inventory (Phase 2),
+# offensive-capability MCP classification (Phase 3), and the AI-lineage escalation below (Phase 1).
+# Dual-use: authorised pentesters run these, so every finding is advisory / posture-gated and a host
+# can be marked a pentest box to silence them (see AI_OFFENSIVE_ALLOWLIST_ENV). Per-record fields:
+#   name/procs/modules/markers/port/mcp/lineage — see the macOS agent for the full field notes.
+AI_OFFENSIVE_FRAMEWORKS = {
+    "hexstrike":    {"name": "HexStrike AI", "procs": ["hexstrike-server", "hexstrike_mcp", "hexstrike-mcp"],
+                     "modules": ["hexstrike_server", "hexstrike_mcp"], "markers": ["hexstrike-server.py"],
+                     "port": 8888, "mcp": True, "lineage": [r"hexstrike"]},
+    "cai":          {"name": "CAI (Cybersecurity AI)", "procs": ["cai"], "modules": ["cai", "caiextensions"],
+                     "markers": [], "mcp": False, "lineage": [r"cai"]},
+    "strix":        {"name": "Strix", "procs": ["strix"], "modules": ["strix"], "markers": ["agent_runs"],
+                     "mcp": False, "lineage": [r"strix"]},
+    "pentagi":      {"name": "PentAGI", "procs": ["pentagi"], "modules": [], "markers": [],
+                     "mcp": False, "lineage": [r"pentagi"]},
+    "hackingbuddy": {"name": "hackingBuddyGPT", "procs": ["wintermute", "wintermute.py"],
+                     "modules": ["hackingBuddyGPT"], "markers": [], "mcp": False,
+                     "lineage": [r"wintermute", r"hackingbuddy"]},
+    "nebula":       {"name": "Nebula (offensive AI)", "procs": ["nebula-ai"], "modules": ["nebula_ai"],
+                     "markers": [], "mcp": False, "lineage": [r"nebula-ai"]},  # bare 'nebula' omitted: Nebula VPN
+    "pentestgpt":   {"name": "PentestGPT", "procs": ["pentestgpt"], "modules": ["pentestgpt"], "markers": [],
+                     "mcp": False, "lineage": [r"pentestgpt"]},
+    "vulnbot":      {"name": "VulnBot", "procs": ["vulnbot"], "modules": ["vulnbot"], "markers": [],
+                     "mcp": False, "lineage": [r"vulnbot"]},
+    "artex":        {"name": "ARTEX", "procs": ["artex"], "modules": [], "markers": [], "mcp": False,
+                     "lineage": [r"artex"]},
+    "cairn":        {"name": "Cairn", "procs": ["cairn"], "modules": ["cairn"], "markers": [], "mcp": False,
+                     "lineage": [r"cairn"]},
+}
+AI_OFFENSIVE_ALLOWLIST_ENV = "SCOUTER_PENTEST_HOST"
+# See the macOS agent for the token-curation notes (substring-safe; no bare msf/exploit).
+OFFENSIVE_MCP_TOKENS = (
+    "hexstrike", "metasploit", "msfconsole", "msfrpc", "sqlmap", "nuclei", "masscan", "nmap",
+    "hydra", "gobuster", "ffuf", "nikto", "pentest", "beef-xss", "empire", "cobaltstrike",
+    "sliver", "mimikatz", "crackmapexec", "netexec", "impacket",
+)
+
 # Static LLM-API endpoint set (Q2: shipped built-in + refreshable feed). Exact hosts
 # plus suffix matches for the cloud providers whose host carries a region/resource.
 LLM_ENDPOINTS = {
@@ -9365,6 +9424,58 @@ class AISurfaceCollector:
             out.append(r)
         return sorted(out, key=lambda r: r["name"].lower())
 
+    # -- C2b (1.15): autonomous OFFENSIVE AI frameworks (inventory AND flag) -----
+    def _gather_offensive(self, procs, net):
+        """Catalogue any autonomous offensive AI framework present on the host (inventory AND score).
+        Detects by console-script on PATH, running process (exe OR cmdline-token basename, so a
+        `python3 hexstrike-server.py` is caught), marker file/dir, and HexStrike's :8888 bridge.
+        Read-only. See the macOS agent for the full notes."""
+        hex_ports = {int(c.get("lport") or 0)
+                     for conns in net.values() for c in conns
+                     if (c.get("state") or "").upper() == "LISTEN"}
+        running = {}
+        for pid, p in procs.items():
+            cand = {os.path.basename((p.get("exe") or "").strip()).lower()}
+            cand |= {os.path.basename(t).lower()
+                     for t in (p.get("cmdline") or "").split() if t}
+            cand.discard("")
+            for slug, meta in AI_OFFENSIVE_FRAMEWORKS.items():
+                names = {n.lower() for n in meta["procs"]} \
+                    | {m.lower() for m in meta["markers"] if m.lower().endswith(".py")}
+                if cand & names:
+                    running.setdefault(slug, []).append(pid)
+        roots = [_ai_home()] + _ai_project_roots() + self.extra_roots
+        found = {}
+        for slug, meta in AI_OFFENSIVE_FRAMEWORKS.items():
+            evidence, path, pids = [], "", running.get(slug, [])
+            if pids:
+                evidence.append("running")
+            for proc in meta["procs"]:
+                w = shutil.which(proc)
+                if w:
+                    evidence.append("installed")
+                    path = path or w
+                    break
+            for marker in meta["markers"]:
+                for root in roots:
+                    mp = os.path.join(root, marker)
+                    if os.path.exists(mp):
+                        evidence.append("marker")
+                        path = path or mp
+                        break
+                if "marker" in evidence:
+                    break
+            listening = bool(meta.get("port") and meta["port"] in hex_ports)
+            if listening:
+                evidence.append("listening:%d" % meta["port"])
+            if not evidence:
+                continue
+            found[slug] = {"slug": slug, "name": meta["name"], "evidence": sorted(set(evidence)),
+                           "running": bool(pids), "installed": "installed" in evidence,
+                           "listening": listening, "mcp": bool(meta.get("mcp")),
+                           "port": meta.get("port"), "path": path, "pids": pids}
+        return sorted(found.values(), key=lambda r: r["name"].lower())
+
     # -- C3: MCP servers (read-only parse; env KEY NAMES only, url HOST only) --
     def _gather_mcp(self):
         servers = []
@@ -9419,6 +9530,12 @@ class AISurfaceCollector:
                     if isinstance(a, str) and a and not a.startswith("-") and a not in ("dlx", "run", "x"):
                         rec["package"] = a
                         break
+        # (1.15) Offensive-capability classification (see the macOS agent).
+        hay = " ".join([sname, command, rec["package"], rec["url_host"]]
+                       + [a for a in args if isinstance(a, str)]).lower()
+        hits = [t for t in OFFENSIVE_MCP_TOKENS if t in hay]
+        rec["offensive"] = bool(hits)
+        rec["offensive_tokens"] = hits
         return rec
 
     # -- C4: agent instruction / rules files (path + sha256 + mtime only) -----
@@ -9539,14 +9656,21 @@ class AISurfaceCollector:
         net = collect_network()
         agents = self._gather_agents(procs)
         runtimes = self._gather_runtimes(procs, net)
+        offensive = self._gather_offensive(procs, net)
         mcp = self._gather_mcp()
         context = self._gather_context()
-        # the AI inventory is the allow-list for the egress baseline: a catalogued agent/runtime
-        # reaching an LLM endpoint is expected, so it never scores.
+        # the AI inventory is the allow-list for the egress baseline: a catalogued agent/runtime/
+        # offensive-framework reaching an LLM endpoint is EXPECTED (it is an AI tool), so its own LLM
+        # calls never read as a LAMEHUG egress anomaly — the framework itself is flagged separately.
         ai_pids = {pid for r in agents for pid in r.get("pids", [])} \
-            | {pid for r in runtimes for pid in r.get("pids", [])}
-        ai_bases = set(AI_AGENT_CLIS) | set(AI_RUNTIMES)
+            | {pid for r in runtimes for pid in r.get("pids", [])} \
+            | {pid for r in offensive for pid in r.get("pids", [])}
+        ai_bases = set(AI_AGENT_CLIS) | set(AI_RUNTIMES) \
+            | {p for meta in AI_OFFENSIVE_FRAMEWORKS.values() for p in meta["procs"]}
         egress = self._gather_egress(procs, net, ai_pids, ai_bases)
+        # A host explicitly marked a pentest box downgrades the 1.15 offensive findings to advisory.
+        pentest_host = (os.environ.get(AI_OFFENSIVE_ALLOWLIST_ENV) or "").strip().lower() \
+            not in ("", "0", "false", "no", "off")
 
         # -- Phase 4: integrity diff against the baseline. Change-watch and new-MCP are TEMPORAL context
         # (instruction files are edited constantly in normal work, so a bare change is not an alarm); the
@@ -9601,6 +9725,25 @@ class AISurfaceCollector:
                     {"category": "ai-mcp", "finding": "npx-fetched-mcp", "server": s["name"],
                      "client": s["client"], "command": s["command"], "package": s["package"],
                      "env_keys": s["env_keys"], "scope": s["scope"], "path": s["source"],
+                     "new_since_baseline": s.get("new_since_baseline", False)})
+                items[n["id"]] = n
+            # (1.15) F-offensive-MCP: a server wrapping attack tooling is its own high exposure (see macOS).
+            if s.get("offensive"):
+                toks = ", ".join(s.get("offensive_tokens") or [])
+                score = 0 if pentest_host else 70
+                n = self._finding(
+                    "ai-mcp", f"{tag}:offensive",
+                    f"MCP server exposes offensive security tooling: {s['name']} ({s['client']})",
+                    score, "T1588.002",
+                    f"This MCP server hands the AI agent offensive tooling ({toks}) — the HexStrike / "
+                    "autonomous-pentest pattern, where a model drives real attack tools at machine "
+                    "speed. Confirm it is an authorized pentest setup." + (
+                        " [host marked SCOUTER_PENTEST_HOST — advisory only]" if pentest_host else ""),
+                    {"category": "ai-mcp", "finding": "offensive-mcp", "server": s["name"],
+                     "client": s["client"], "command": s["command"], "package": s["package"],
+                     "transport": s["transport"], "url_host": s["url_host"],
+                     "offensive_tokens": s.get("offensive_tokens") or [], "scope": s["scope"],
+                     "path": s["source"], "allowlisted": pentest_host,
                      "new_since_baseline": s.get("new_since_baseline", False)})
                 items[n["id"]] = n
         # F3: local runtime reachable off-loopback
@@ -9674,14 +9817,40 @@ class AISurfaceCollector:
                  "exe": e.get("exe", ""), "provider": e["provider"], "raddr": e["raddr"],
                  "rport": e["rport"], "kind": e["category"]})
             items[n["id"]] = n
+        # C2b (1.15): autonomous offensive AI framework present on the host (see the macOS agent).
+        for o in offensive:
+            if pentest_host:
+                score = 0
+            elif o["running"] or o["listening"]:
+                score = 70
+            else:
+                score = 55
+            ev = ", ".join(o["evidence"])
+            where = (" listening on :%d" % o["port"]) if o["listening"] else ""
+            txt = (f"{o['name']} — an autonomous, LLM-driven offensive/pentest framework — is present on "
+                   f"this host ({ev}){where}. These frameworks chain real attack tooling "
+                   "(nmap/sqlmap/nuclei/metasploit) under AI control at machine speed; outside an "
+                   "authorized pentest this is a strong compromise or misuse signal." + (
+                       " [host marked SCOUTER_PENTEST_HOST — advisory only]" if pentest_host else ""))
+            n = self._finding(
+                "ai-offensive", f"offensive:{o['slug']}",
+                f"Offensive AI framework present: {o['name']}", score, "T1588.002",
+                txt,
+                {"category": "ai-offensive", "finding": "offensive-ai-framework", "framework": o["name"],
+                 "slug": o["slug"], "evidence": o["evidence"], "running": o["running"],
+                 "installed": o["installed"], "listening": o["listening"], "mcp": o["mcp"],
+                 "port": o["port"], "path": o["path"], "pids": o["pids"],
+                 "allowlisted": pentest_host})
+            items[n["id"]] = n
 
         inv = {"generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-               "agents": agents, "runtimes": runtimes, "mcp": mcp,
+               "agents": agents, "runtimes": runtimes, "offensive": offensive, "mcp": mcp,
                "context": context, "egress": egress,
+               "pentest_host": pentest_host,
                "endpoints": (self.endpoints.status() if self.endpoints
                              else {"enabled": False, "static": len(LLM_ENDPOINTS)}),
                "counts": {"agents": len(agents), "runtimes": len(runtimes),
-                          "mcp": len(mcp), "context": len(context),
+                          "offensive": len(offensive), "mcp": len(mcp), "context": len(context),
                           "egress": len(egress),
                           "egress_anomalies": sum(1 for e in egress if e.get("score")),
                           "hidden_instructions": sum(1 for c in context if c.get("hidden")),
@@ -15438,6 +15607,26 @@ AI_LINEAGE_DANGER_TECH = {
     "T1041", "T1567", "T1048",
 }
 
+# Offensive AI frameworks get a BROADER danger set: for an autonomous pentest framework, active
+# recon / scanning / exploitation IS the expected malicious behaviour, so a flagged discovery or exploit
+# action under one of these is signal. Precompiled from the AI_OFFENSIVE_FRAMEWORKS catalog.
+AI_OFFENSIVE_DANGER_TECH = AI_LINEAGE_DANGER_TECH | {
+    "T1046", "T1595", "T1190", "T1210", "T1018", "T1110",
+}
+AI_OFFENSIVE_LINEAGE = [
+    (meta["name"], re.compile(r"\b(?:" + "|".join(meta["lineage"]) + r")\b", re.I))
+    for meta in AI_OFFENSIVE_FRAMEWORKS.values() if meta.get("lineage")
+]
+
+
+def _offensive_lineage(anc):
+    """Return the product name of a catalogued autonomous offensive AI framework found in a process
+    ancestry string, else None. Fragments are \\b-anchored and collision-safe (see the macOS agent)."""
+    for name, rx in AI_OFFENSIVE_LINEAGE:
+        if rx.search(anc):
+            return name
+    return None
+
 
 def correlate_ai_agent_lineage(nodes):
     """Phase 3 — behavioral correlation. Elevate an ALREADY-FLAGGED dangerous action when its process
@@ -15461,10 +15650,25 @@ def correlate_ai_agent_lineage(nodes):
         anc = d.get("ancestry") or ""
         if not anc:
             continue
+        majors = {t.split(".")[0] for t in techniques_of(n.get("reasons"))}
+        # (1.15) Offensive framework in the ancestry — checked first, broader danger set, distinct reason.
+        fw = _offensive_lineage(anc)
+        if fw and (majors & AI_OFFENSIVE_DANGER_TECH):
+            txt = ("Driven by an autonomous offensive AI framework: this flagged action runs under '%s' "
+                   "in its process ancestry (%s) — an LLM-steered pentest framework executing an "
+                   "offensive action at machine speed (cf. ARTEX / HexStrike abuse, 2025-2026), not a "
+                   "hand-run tool." % (fw, anc))
+            reasons = n.setdefault("reasons", [])
+            if txt not in {r.get("text") for r in reasons}:
+                reasons.append(reason(txt, "T1059", 75))
+            n["score"] = max(n.get("score", 0), 75)
+            n["severity"] = max_severity(n.get("severity", "info"), "high")
+            d["ai_lineage"] = {"framework": fw, "ancestry": anc, "offensive": True}
+            n_elev += 1
+            continue
         m = AI_LINEAGE_AGENT_RE.search(anc)
         if not m:
             continue
-        majors = {t.split(".")[0] for t in techniques_of(n.get("reasons"))}
         if not (majors & AI_LINEAGE_DANGER_TECH):
             continue
         agent = m.group(1)
@@ -15478,6 +15682,92 @@ def correlate_ai_agent_lineage(nodes):
         n["severity"] = max_severity(n.get("severity", "info"), "high")
         d["ai_lineage"] = {"agent": agent, "ancestry": anc}
         n_elev += 1
+    return n_elev
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 (1.15) — AI-orchestrated offensive-toolchain correlation
+# ---------------------------------------------------------------------------
+# Offensive tool basename -> kill-chain phase. See the macOS agent for the full rationale.
+OFFENSIVE_TOOLCHAIN = {
+    "nmap": "recon", "masscan": "recon", "gobuster": "recon", "ffuf": "recon", "dirb": "recon",
+    "feroxbuster": "recon", "amass": "recon", "subfinder": "recon", "httpx": "recon", "whatweb": "recon",
+    "enum4linux": "recon",
+    "nuclei": "scan", "nikto": "scan", "wpscan": "scan", "sslscan": "scan", "testssl.sh": "scan",
+    "sqlmap": "exploit", "msfconsole": "exploit", "msfvenom": "exploit", "commix": "exploit",
+    "xsser": "exploit",
+    "hydra": "cred", "medusa": "cred", "patator": "cred", "crackmapexec": "cred", "netexec": "cred",
+    "hashcat": "cred", "responder": "cred",
+}
+_TOOLCHAIN_PHASE_ORDER = ("recon", "scan", "exploit", "cred")
+_TOOLCHAIN_INTERP = {"python", "python3", "python2", "ruby", "perl", "node", "pwsh"}
+
+
+def _toolchain_norm(tok):
+    return re.sub(r"\.(py|sh|pl|rb)$", "", os.path.basename(tok).lower())
+
+
+def _toolchain_tool(node):
+    """Return the offensive tool this process node IS, else None (exact label, cmdline program basename,
+    or the first real arg when the program is an interpreter). See the macOS agent for the FP notes."""
+    lab = (node.get("label") or "").lower()
+    if lab in OFFENSIVE_TOOLCHAIN:
+        return lab
+    toks = [t for t in (((node.get("detail") or {}).get("cmdline")) or "").split() if t]
+    if not toks:
+        return None
+    first = _toolchain_norm(toks[0])
+    if first in OFFENSIVE_TOOLCHAIN:
+        return first
+    if first in _TOOLCHAIN_INTERP:
+        for t in toks[1:]:
+            if t == "-m" or (t.startswith("-") and t != "-m"):
+                continue
+            cand = _toolchain_norm(t)
+            return cand if cand in OFFENSIVE_TOOLCHAIN else None
+    return None
+
+
+def correlate_offensive_toolchain(nodes):
+    """Phase 4 — recognise an AI-orchestrated offensive toolchain: several DISTINCT offensive tools under
+    ONE shared process lineage. Fires on (AI/offensive ancestor + >=2 tools) or (>=3 tools spanning >=2
+    phases under one parent). Elevates every tool node in a firing group to high with a shared reason, so
+    individually-unflagged tools become significant through the correlation. See the macOS agent."""
+    groups = {}
+    for n in nodes:
+        if n.get("type") != "process" or (n.get("detail") or {}).get("ancestry") is None:
+            continue
+        tool = _toolchain_tool(n)
+        if not tool:
+            continue
+        anc = (n.get("detail") or {}).get("ancestry") or ""
+        groups.setdefault(anc, {}).setdefault(tool, []).append(n)
+    n_elev = 0
+    for anc, tools in groups.items():
+        phases = {OFFENSIVE_TOOLCHAIN[t] for t in tools}
+        fw = _offensive_lineage(anc)
+        m = AI_LINEAGE_AGENT_RE.search(anc)
+        ai = fw or (m.group(1) if m else None)
+        distinct = len(tools)
+        if not ((ai and distinct >= 2) or (distinct >= 3 and len(phases) >= 2)):
+            continue
+        toollist = ", ".join(sorted(tools))
+        phaselist = " -> ".join(p for p in _TOOLCHAIN_PHASE_ORDER if p in phases)
+        driver = ("driven by '%s' in its ancestry" % ai) if ai else "all sharing one parent process"
+        txt = ("AI-orchestrated offensive toolchain: %d distinct offensive tools (%s) spanning %s, %s — "
+               "the autonomous-pentest pattern (an AI chaining recon/scan/exploit at machine speed), not "
+               "a human running one tool." % (distinct, toollist, phaselist, driver))
+        meta = {"tools": sorted(tools), "phases": [p for p in _TOOLCHAIN_PHASE_ORDER if p in phases],
+                "ai": ai or "", "offensive_framework": bool(fw), "ancestry": anc}
+        for tool_nodes in tools.values():
+            for n in tool_nodes:
+                reasons = n.setdefault("reasons", [])
+                if txt not in {r.get("text") for r in reasons}:
+                    reasons.append(reason(txt, "T1595", 75))
+                n["score"] = max(n.get("score", 0), 75)
+                n["severity"] = max_severity(n.get("severity", "info"), "high")
+                (n.setdefault("detail", {}))["offensive_toolchain"] = meta
+                n_elev += 1
     return n_elev
 
 
@@ -16386,6 +16676,8 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
     #     malware). Runs after detections (needs scored nodes), before suppressions (operator can still
     #     silence one). The lineage reason carries the context to the Mesh with no extra wiring.
     ai_lineage_hits = correlate_ai_agent_lineage(nodes)
+    # --- Phase 4 (1.15): AI-orchestrated offensive-toolchain correlation (see the macOS agent).
+    ai_lineage_hits += correlate_offensive_toolchain(nodes)
 
     # --- operator suppressions: drop matching alerts to 'info' (applied AFTER detection
     #     flooring, so a suppression is the final word, even over a high floor). Ported from Mac.

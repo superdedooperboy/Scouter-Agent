@@ -368,6 +368,225 @@ class AiAgentLineage(unittest.TestCase):
         self.assertEqual(len(hits), 1)
 
 
+class OffensiveAiFrameworkLineage(unittest.TestCase):
+    """1.15 — an already-flagged action whose ancestry traces to an autonomous OFFENSIVE AI framework is
+    elevated with a distinct, higher-confidence reason, a broader danger set, and a higher floor."""
+
+    @staticmethod
+    def _node(sev, techs, ancestry):
+        score = {"high": 70, "medium": 40, "low": 20, "info": 0}[sev]
+        return {"type": "process", "severity": sev, "score": score,
+                "reasons": [agent.reason("flagged", t, 50) for t in techs],
+                "detail": {"pid": 1, "ancestry": ancestry}}
+
+    def _offensive(self, n):
+        return any("autonomous offensive AI framework" in r["text"] for r in n["reasons"])
+
+    def test_revshell_under_hexstrike_elevates_offensive(self):
+        n = self._node("medium", ["T1059"], "systemd > hexstrike-server > bash")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 1)
+        self.assertTrue(self._offensive(n))
+        self.assertEqual(n["severity"], "high")
+        self.assertTrue(n["detail"]["ai_lineage"]["offensive"])
+        self.assertEqual(n["detail"]["ai_lineage"]["framework"], "HexStrike AI")
+        self.assertGreaterEqual(n["score"], 75)
+
+    def test_recon_under_offensive_framework_counts(self):
+        n = self._node("medium", ["T1046"], "systemd > cai > nmap")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 1)
+        self.assertTrue(self._offensive(n))
+
+    def test_recon_under_benign_agent_not_elevated(self):
+        n = self._node("medium", ["T1046"], "systemd > claude > nmap")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 0)
+
+    def test_cai_does_not_match_inside_cairn_token(self):
+        self.assertEqual(agent._offensive_lineage("systemd > cairn > sh"), "Cairn")
+        self.assertIsNone(agent._offensive_lineage("systemd > scaffold > sh"))
+
+    def test_bare_nebula_vpn_not_flagged(self):
+        self.assertIsNone(agent._offensive_lineage("systemd > nebula > sh"))
+        self.assertEqual(agent._offensive_lineage("systemd > nebula-ai > sh"), "Nebula (offensive AI)")
+
+    def test_info_node_not_pulled_up(self):
+        n = self._node("info", ["T1059"], "systemd > strix > bash")
+        self.assertEqual(agent.correlate_ai_agent_lineage([n]), 0)
+        self.assertEqual(n["severity"], "info")
+
+    def test_idempotent_no_duplicate_reason(self):
+        n = self._node("medium", ["T1190"], "systemd > pentagi > sh")
+        agent.correlate_ai_agent_lineage([n])
+        agent.correlate_ai_agent_lineage([n])
+        hits = [r for r in n["reasons"] if "autonomous offensive AI framework" in r["text"]]
+        self.assertEqual(len(hits), 1)
+
+
+class OffensiveAiFrameworkInventory(unittest.TestCase):
+    """1.15 Phase 2 — the AI-Surface collector inventories AND scores autonomous offensive frameworks;
+    a pentest-box allowlist downgrades the score to advisory without hiding the entry."""
+
+    def _collect(self, procs, net, which=None, pentest=False):
+        c = agent.AISurfaceCollector(enabled=True, endpoints=None)
+        orig = {"cp": agent.collect_processes, "cn": agent.collect_network,
+                "which": agent.shutil.which, "paths": agent._mcp_config_paths,
+                "roots": agent._ai_project_roots, "home": agent._ai_home}
+        agent.collect_processes = lambda: procs
+        agent.collect_network = lambda: net
+        agent.shutil.which = (lambda n: None) if which is None else which
+        agent._mcp_config_paths = lambda: []
+        agent._ai_project_roots = lambda limit=60: []
+        agent._ai_home = lambda: "/nonexistent-home-xyz"
+        if pentest:
+            os.environ[agent.AI_OFFENSIVE_ALLOWLIST_ENV] = "1"
+        try:
+            c._collect()
+            return c.snapshot(), c.inv
+        finally:
+            agent.collect_processes, agent.collect_network = orig["cp"], orig["cn"]
+            agent.shutil.which, agent._mcp_config_paths = orig["which"], orig["paths"]
+            agent._ai_project_roots, agent._ai_home = orig["roots"], orig["home"]
+            os.environ.pop(agent.AI_OFFENSIVE_ALLOWLIST_ENV, None)
+
+    def _offensive(self, nodes):
+        return [n for n in nodes if n["type"] == "ai-offensive"]
+
+    def test_running_python_script_framework_detected(self):
+        procs = {42: {"exe": "/usr/bin/python3", "cmdline": "python3 hexstrike-server.py --port 8888"}}
+        nodes, inv = self._collect(procs, {})
+        off = self._offensive(nodes)
+        self.assertEqual(len(off), 1)
+        self.assertEqual(off[0]["detail"]["framework"], "HexStrike AI")
+        self.assertEqual(off[0]["severity"], "high")
+        self.assertEqual(inv["counts"]["offensive"], 1)
+
+    def test_hexstrike_8888_listener_is_a_signal(self):
+        procs = {7: {"exe": "/usr/bin/python3", "cmdline": "python3 server.py"}}
+        net = {7: [{"state": "LISTEN", "laddr": "127.0.0.1", "lport": "8888"}]}
+        nodes, _ = self._collect(procs, net)
+        self.assertTrue(self._offensive(nodes)[0]["detail"]["listening"])
+
+    def test_installed_console_script_is_medium(self):
+        which = lambda n: "/usr/local/bin/cai" if n == "cai" else None
+        off = self._offensive(self._collect({}, {}, which=which)[0])
+        self.assertEqual(off[0]["detail"]["framework"], "CAI (Cybersecurity AI)")
+        self.assertEqual(off[0]["severity"], agent.severity_for(55))
+
+    def test_pentest_host_allowlist_lists_but_does_not_score(self):
+        procs = {42: {"exe": "/usr/bin/python3", "cmdline": "python3 hexstrike-server.py"}}
+        nodes, inv = self._collect(procs, {}, pentest=True)
+        off = self._offensive(nodes)
+        self.assertEqual(off[0]["score"], 0)
+        self.assertTrue(inv["pentest_host"])
+        self.assertEqual(inv["counts"]["offensive"], 1)
+
+    def test_clean_host_has_no_offensive_findings(self):
+        procs = {1: {"exe": "/bin/bash", "cmdline": "bash"},
+                 2: {"exe": "/usr/bin/python3", "cmdline": "python3 app.py"}}
+        nodes, inv = self._collect(procs, {})
+        self.assertEqual(self._offensive(nodes), [])
+        self.assertEqual(inv["counts"]["offensive"], 0)
+
+    def test_builtin_rules_present(self):
+        ids = {r["id"] for r in agent.BUILTIN_RULES}
+        self.assertIn("b-ai-offensive-hexstrike", ids)
+        self.assertIn("b-ai-offensive-fw", ids)
+
+
+class OffensiveToolchainCorrelation(unittest.TestCase):
+    """1.15 Phase 4 — several distinct offensive tools under one lineage = an AI-orchestrated pentest."""
+
+    @staticmethod
+    def _node(label, ancestry, sev="info", cmdline=None):
+        score = {"high": 70, "medium": 40, "low": 20, "info": 0}[sev]
+        return {"type": "process", "severity": sev, "score": score, "label": label, "reasons": [],
+                "detail": {"pid": 1, "ancestry": ancestry, "cmdline": cmdline or label}}
+
+    def _reasoned(self, n):
+        return any("AI-orchestrated offensive toolchain" in r["text"] for r in n["reasons"])
+
+    def test_two_tools_under_offensive_framework_fire(self):
+        anc = "systemd > hexstrike-server"
+        ns = [self._node("nmap", anc), self._node("sqlmap", anc)]
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 2)
+        self.assertTrue(self._reasoned(ns[0]))
+        self.assertEqual(ns[0]["severity"], "high")
+
+    def test_three_tools_two_phases_no_ai_ancestor_fire(self):
+        anc = "systemd > bash"
+        ns = [self._node("nmap", anc), self._node("nuclei", anc), self._node("sqlmap", anc)]
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 3)
+
+    def test_two_tools_one_phase_no_ai_not_fired(self):
+        anc = "systemd > bash"
+        ns = [self._node("nmap", anc), self._node("gobuster", anc)]
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 0)
+
+    def test_single_tool_under_framework_not_a_toolchain(self):
+        self.assertEqual(agent.correlate_offensive_toolchain([self._node("nmap", "systemd > hexstrike-server")]), 0)
+
+    def test_tool_matched_by_cmdline_leaf(self):
+        anc = "systemd > cai"
+        ns = [self._node("python3", anc, cmdline="python3 nuclei"),
+              self._node("python3", anc, cmdline="python3 sqlmap -u http://x")]
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 2)
+
+    def test_elevates_an_unflagged_info_tool(self):
+        anc = "systemd > strix"
+        n_sqlmap = self._node("sqlmap", anc, sev="info")
+        agent.correlate_offensive_toolchain([n_sqlmap, self._node("nmap", anc, sev="info")])
+        self.assertEqual(n_sqlmap["severity"], "high")
+
+    def test_separate_lineages_do_not_merge(self):
+        ns = [self._node("nmap", "systemd > bash"), self._node("sqlmap", "systemd > zsh")]
+        self.assertEqual(agent.correlate_offensive_toolchain(ns), 0)
+
+
+class OffensiveCapabilityMcp(unittest.TestCase):
+    """1.15 Phase 3 — an MCP server that wraps offensive tooling is a distinct high exposure."""
+
+    def _mcp_findings(self, servers_def, pentest=False):
+        tmp = tempfile.mkdtemp()
+        cfg = os.path.join(tmp, "mcp.json")
+        _dump(cfg, {"mcpServers": servers_def})
+        orig = {"paths": agent._mcp_config_paths, "roots": agent._ai_project_roots,
+                "home": agent._ai_home, "cp": agent.collect_processes, "cn": agent.collect_network}
+        agent._mcp_config_paths = lambda: [(cfg, "Cursor", "project")]
+        agent._ai_project_roots = lambda limit=60: []
+        agent._ai_home = lambda: "/nonexistent-home-xyz"
+        agent.collect_processes = lambda: {}
+        agent.collect_network = lambda: {}
+        if pentest:
+            os.environ[agent.AI_OFFENSIVE_ALLOWLIST_ENV] = "1"
+        try:
+            c = agent.AISurfaceCollector(enabled=True, endpoints=None)
+            c._collect()
+            nodes = c.snapshot()
+        finally:
+            agent._mcp_config_paths, agent._ai_project_roots = orig["paths"], orig["roots"]
+            agent._ai_home = orig["home"]
+            agent.collect_processes, agent.collect_network = orig["cp"], orig["cn"]
+            os.environ.pop(agent.AI_OFFENSIVE_ALLOWLIST_ENV, None)
+        return [n for n in nodes if n["detail"].get("finding") == "offensive-mcp"]
+
+    def test_hexstrike_mcp_bridge_flagged(self):
+        off = self._mcp_findings({"hexstrike": {"command": "python3", "args": ["hexstrike_mcp.py"]}})
+        self.assertEqual(len(off), 1)
+        self.assertEqual(off[0]["severity"], "high")
+        self.assertIn("hexstrike", off[0]["detail"]["offensive_tokens"])
+
+    def test_generic_server_wrapping_attack_tools_flagged(self):
+        off = self._mcp_findings({"recon": {"command": "npx", "args": ["-y", "@acme/nmap-nuclei-mcp"]}})
+        self.assertTrue({"nmap", "nuclei"} <= set(off[0]["detail"]["offensive_tokens"]))
+
+    def test_benign_mcp_not_flagged(self):
+        off = self._mcp_findings({"fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"]}})
+        self.assertEqual(off, [])
+
+    def test_pentest_host_downgrades_offensive_mcp(self):
+        off = self._mcp_findings({"hs": {"command": "hexstrike_mcp"}}, pentest=True)
+        self.assertEqual(off[0]["score"], 0)
+
+
 class HiddenInstructionScan(unittest.TestCase):
     """Phase 4 — the invisible/bidi instruction-smuggling scanner: fires on hidden control characters,
     stays silent on ordinary text, and never returns file content (the Phase-1 privacy wall holds)."""

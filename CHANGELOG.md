@@ -6,6 +6,46 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-11-13
+
+### Added
+
+**Offensive AI framework detection (both agents).** Extends the 1.14 AI-abuse subsystem to cover the
+other side of the AI-security coin: autonomous, LLM-driven **offensive** / pentest frameworks (ARTEX,
+HexStrike AI, CAI, Strix, PentAGI, hackingBuddyGPT, Nebula, PentestGPT, VulnBot, Cairn), which drive
+real attack tooling (nmap/sqlmap/nuclei/metasploit/hydra) under AI control at machine speed. Prompted
+by the Mandiant/GTIG and Check Point reporting on real-world ARTEX/HexStrike abuse. Where benign agents
+are *catalogued, not alarmed*, an offensive framework on a monitored host is itself a finding — and the
+whole feature is **advisory and posture-gated**: a host marked `SCOUTER_PENTEST_HOST` still inventories
+each framework but scores it 0, so an authorized red-teamer's own box is not spammed.
+
+- **Lineage escalation (Phase 1).** An already-flagged dangerous action whose process ancestry traces
+  to an offensive framework is elevated ahead of the benign-agent case: a distinct, higher-confidence
+  reason ("driven by an autonomous offensive AI framework"), a broader danger set (recon/scan/exploit —
+  T1046/T1595/T1190/T1210/T1018/T1110 — count here, where they don't for a benign coding agent), and a
+  higher floor. Lineage fragments are word-boundary-anchored and collision-curated (`cai` never matches
+  `cairn`; bare `nebula` is omitted so the Nebula overlay-network daemon is not mistaken for the tool).
+- **AI-Surface inventory + built-in rules (Phase 2).** The `AISurfaceCollector` catalogues and scores
+  any offensive framework present — by pip console-script on PATH, running process (exe *or* cmdline
+  token, so `python3 hexstrike-server.py` is caught), marker file/dir, and HexStrike's signature `:8888`
+  Flask bridge. Running/listening → high, installed-only → medium, surfaced in a new `ai-offensive`
+  finding category (T1588.002). Two high-fidelity built-in rules (`b-ai-offensive-hexstrike`,
+  `b-ai-offensive-fw`) also flag the framework process in the main threat graph even when AI Surface is
+  disabled; exact program-name matches keep false positives near zero. A framework's own LLM calls join
+  the egress allow-list, so they don't misfire as a LAMEHUG anomaly.
+- **Offensive-capability MCP (Phase 3).** A new high finding (`offensive-mcp`, T1588.002) flags an MCP
+  server that hands the agent attack tooling — a known offensive framework's MCP bridge (HexStrike) or a
+  server wrapping concrete tools (nmap/metasploit/sqlmap/nuclei/…). Fires independent of transport, so an
+  offensive server reached remotely raises both its remote-MCP and offensive-MCP findings.
+- **AI-orchestrated-toolchain correlation (Phase 4).** Recognizes an autonomous pentest by its shape:
+  several distinct offensive tools running under one process lineage. Fires on an AI/offensive ancestor
+  with ≥2 tools, or ≥3 tools spanning ≥2 kill-chain phases under one parent even without a recognized AI
+  ancestor. The whole toolchain is elevated to high as one incident (T1595) — so individually unflagged
+  tools (sqlmap/nuclei/hydra) become significant through the correlation, not in isolation.
+
+The findings reach Scouter Mesh over the existing reason-text + node-type channel with no new wiring;
+the Mesh console surfaces the `ai-offensive` category alongside the other AI-surface findings.
+
 ## [1.14.0] — 2026-11-10
 
 ### Added

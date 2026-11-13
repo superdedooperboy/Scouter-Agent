@@ -3109,6 +3109,7 @@ function aiSurfDraw(){
   h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">'+
      aiTile(c.agents||0,'Agent CLIs')+aiTile(c.runtimes||0,'LLM runtimes')+aiTile(c.mcp||0,'MCP servers')+
      aiTile(c.context||0,'Instruction files')+aiTile(c.egress||0,'LLM egress')+
+     (c.offensive?('<div style="flex:1;min-width:92px;text-align:center;border:1px solid var(--sev-high);border-radius:8px;padding:8px 4px;background:var(--tint-hot-bg)"><b style="display:block;font-size:20px;font-variant-numeric:tabular-nums;color:var(--sev-high)">'+c.offensive+'</b><span style="color:var(--muted);font-size:11px">Offensive AI</span></div>'):'')+
      '<div style="flex:1;min-width:92px;text-align:center;border:1px solid '+(finds?'var(--sev-high)':'var(--line)')+';border-radius:8px;padding:8px 4px;background:'+(finds?'var(--tint-hot-bg)':'var(--panel2)')+'">'+
      '<b style="display:block;font-size:20px;font-variant-numeric:tabular-nums;color:'+(finds?'var(--sev-high)':'var(--txt)')+'">'+finds+'</b><span style="color:var(--muted);font-size:11px">Exposures</span></div></div>';
   // findings (the scored ai-* nodes already in the live snapshot)
@@ -3126,12 +3127,25 @@ function aiSurfDraw(){
        const reach=r.public?aiChip('network-reachable','var(--sev-high)'):aiChip('loopback','var(--good)');
        return '<td>'+esc(r.name)+'</td><td style="font-variant-numeric:tabular-nums">'+esc(''+(r.port||'?'))+'</td><td><code>'+esc((r.bind||[]).join(', ')||'—')+'</code></td><td>'+(r.listening?reach:'<span class="hint">not listening</span>')+'</td>';
      }, ['Runtime','Port','Bind','Reachability']);
+  // --- Offensive AI frameworks (flagged category, 1.15) ---
+  if((d.offensive||[]).length){
+    h+=aiSurfSection('Offensive AI frameworks','Autonomous, LLM-driven offensive / pentest frameworks on this host — flagged, not just catalogued, because they chain real attack tooling under AI control'+(d.pentest_host?' (host marked SCOUTER_PENTEST_HOST — advisory only)':'')+'.',
+       (d.offensive||[]), o=>{
+         let flags=[];
+         if(o.running) flags.push(aiChip('running','var(--sev-high)'));
+         if(o.listening) flags.push(aiChip('listening :'+(o.port||''),'var(--sev-high)'));
+         if(o.installed&&!o.running) flags.push(aiChip('installed','var(--sev-medium)'));
+         if(o.mcp) flags.push(aiChip('MCP','var(--sev-medium)'));
+         return '<td>'+esc(o.name)+'</td><td class="hint">'+esc((o.evidence||[]).join(', '))+'</td><td>'+(flags.join(' '))+'</td><td class="hint" style="word-break:break-all">'+esc(o.path||'')+'</td>';
+       }, ['Framework','Evidence','State','Path']);
+  }
   // --- MCP servers ---
   h+=aiSurfSection('MCP servers','Model Context Protocol servers the agents can call. Env is shown as key names only — never values.',
      (d.mcp||[]), s=>{
        let flags=[];
        if(s.transport==='remote') flags.push(aiChip('remote','var(--sev-medium)'));
        if(s.fetched) flags.push(aiChip('npx-fetched','var(--sev-medium)'));
+       if(s.offensive) flags.push(aiChip('offensive tooling','var(--sev-high)'));
        if(s.writable) flags.push(aiChip('writable','var(--sev-high)'));
        if(s.new_since_baseline) flags.push(aiChip('new','var(--sev-low)'));
        const detail = s.transport==='remote' ? ('host: '+esc(s.url_host||'—'))

@@ -1,6 +1,6 @@
 {
  "platform": "Linux",
- "count": 105,
+ "count": 106,
  "rules": [
   {
    "id": "b-revshell",
@@ -1103,6 +1103,26 @@
    "confidence_label": "weak"
   },
   {
+   "id": "b-sctp-lpe",
+   "name": "SCTP kernel module load (NGINX2Root / HTTP2ROOT privilege-escalation enabler)",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1068",
+   "match": "any",
+   "conditions": [
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "(?i)\\b(modprobe|insmod)\\b[^\\n]*\\bsctp\\b"
+    }
+   ],
+   "description": "Loading the SCTP kernel module by name (modprobe sctp) or from a .ko. SCTP is rarely needed on a web, application or container host, and loading it is the privilege-escalation enabler in the HTTP2ROOT / NGINX2Root chain (CVE-2026-123007 / CVE-2026-123633 in nginx's HTTP/2 stack, CVE-2026-119618 in Apache mod_http2): an unauthenticated HTTP/2 RCE first lands worker-level execution, then a flaw in the Linux SCTP subsystem (kernel >= 4.15, no patch yet) takes it to root, including escape from a container to its host, since every container shares the host kernel. Legitimate SCTP users exist (telecom/SS7 stacks, some lab and clustering setups), so a lone load is a lead to confirm \u2014 but an SCTP load on a host with no reason for it, especially near a web-worker anomaly, is the escalation step firing.",
+   "confidence": 3,
+   "confidence_label": "strong"
+  },
+  {
    "id": "b-upx",
    "name": "UPX-packed executable",
    "enabled": true,
@@ -1793,7 +1813,7 @@
      "value": "^(sh|bash|zsh|dash|ksh|python3?(\\.\\d+)?|perl|ruby|php|node|curl|wget|nc|ncat|socat)$"
     }
    ],
-   "description": "A shell or interpreter spawned by an internet-facing service (web server, app server, database). This is the signature of a webshell or successful remote code execution against that service, and is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells. Covers the PHP web-worker set (php-fpm, php-cgi, FrankenPHP, LiteSpeed, and mod_php via apache), so a PHP2Shell (CVE-2026-109618 / CVE-2026-109619) RCE that lands a shell is caught here. The Node runtime family (node, deno, bun) is covered too, so a Node2Shell (CVE-2026-111497) or any Node app RCE that spawns a shell is caught the same way.",
+   "description": "A shell or interpreter spawned by an internet-facing service (web server, app server, database). This is the signature of a webshell or successful remote code execution against that service, and is one of the highest-fidelity detections in existence \u2014 those daemons should never spawn shells. Covers the PHP web-worker set (php-fpm, php-cgi, FrankenPHP, LiteSpeed, and mod_php via apache), so a PHP2Shell (CVE-2026-109618 / CVE-2026-109619) RCE that lands a shell is caught here. The Node runtime family (node, deno, bun) is covered too, so a Node2Shell (CVE-2026-111497) or any Node app RCE that spawns a shell is caught the same way. The nginx and Apache worker names are in the ancestry set as well, so an HTTP2ROOT / NGINX2Root HTTP/2 RCE (CVE-2026-123007 / CVE-2026-123633 in nginx, CVE-2026-119618 in Apache mod_http2) that drops the attacker into a worker-level shell is caught here too.",
    "confidence": 4,
    "confidence_label": "certain"
   },

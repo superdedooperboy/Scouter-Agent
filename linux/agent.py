@@ -94,7 +94,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.15.0"
+__version__ = "1.15.1"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -667,6 +667,8 @@ BUILTIN_RULES = [
     _b("b-lkm-load", "Kernel module loaded (possible rootkit)", "medium", "T1547.006",
        [_c("cmdline", "regex", r"\binsmod\b"), _c("cmdline", "regex", r"\bmodprobe\b[^\n]*\.ko\b"),
         _c("cmdline", "regex", r"\bmodprobe\s+\./")]),
+    _b("b-sctp-lpe", "SCTP kernel module load (NGINX2Root / HTTP2ROOT privilege-escalation enabler)", "high", "T1068",
+       [_c("cmdline", "regex", r"(?i)\b(modprobe|insmod)\b[^\n]*\bsctp\b")]),
     _b("b-upx", "UPX-packed executable", "medium", "T1027.002",
        [_c("cmdline", "regex", r"\bupx\b")]),
     _b("b-compile-drop", "Compiler building a binary on-host", "low", "T1027.004",
@@ -1067,6 +1069,14 @@ _BUILTIN_DESC = {
     "b-lkm-load": "Loading a kernel module with insmod, or modprobe against a local .ko path, can install a "
         "rootkit or LKM backdoor operating in kernel space. Driver installs normally use modprobe by module name, so "
         "insmod and path-based modprobe stand out.",
+    "b-sctp-lpe": "Loading the SCTP kernel module by name (modprobe sctp) or from a .ko. SCTP is rarely needed on a "
+        "web, application or container host, and loading it is the privilege-escalation enabler in the HTTP2ROOT / "
+        "NGINX2Root chain (CVE-2026-123007 / CVE-2026-123633 in nginx's HTTP/2 stack, CVE-2026-119618 in Apache "
+        "mod_http2): an unauthenticated HTTP/2 RCE first lands worker-level execution, then a flaw in the Linux SCTP "
+        "subsystem (kernel >= 4.15, no patch yet) takes it to root, including escape from a container to its host, "
+        "since every container shares the host kernel. Legitimate SCTP users exist (telecom/SS7 stacks, some lab and "
+        "clustering setups), so a lone load is a lead to confirm — but an SCTP load on a host with no reason for "
+        "it, especially near a web-worker anomaly, is the escalation step firing.",
     "b-upx": "UPX is a legitimate packer, but malware overwhelmingly uses it to shrink and obfuscate ELF payloads. "
         "Seeing upx invoked on-host is a strong obfuscation signal worth a look.",
     "b-compile-drop": "A compiler (gcc/cc/clang/tcc) building an output binary on the host is how droppers turn source "
@@ -1134,7 +1144,9 @@ _BUILTIN_DESC = {
         "PHP web-worker set (php-fpm, php-cgi, FrankenPHP, LiteSpeed, and mod_php via apache), so a PHP2Shell "
         "(CVE-2026-109618 / CVE-2026-109619) RCE that lands a shell is caught here. The Node runtime family (node, "
         "deno, bun) is covered too, so a Node2Shell (CVE-2026-111497) or any Node app RCE that spawns a shell is "
-        "caught the same way.",
+        "caught the same way. The nginx and Apache worker names are in the ancestry set as well, so an HTTP2ROOT / "
+        "NGINX2Root HTTP/2 RCE (CVE-2026-123007 / CVE-2026-123633 in nginx, CVE-2026-119618 in Apache mod_http2) that "
+        "drops the attacker into a worker-level shell is caught here too.",
     "b-litellm-c2": "A command line referencing the litellm 1.107.0 supply-chain backdoor's indicators \u2014 its "
         "GitHub dead-drop (letters9813/pythonclient-test), the /codepy payload endpoint, the /tmp/remote_code_loader.lock "
         "marker, or the lookalike exfiltration domain www.litellm.dev. The backdoor runs in-process at Python startup, so "
@@ -5337,6 +5349,74 @@ ADVISORY_HUNTS = [
              "vql": "SELECT Pid, Name, Username, Exe, CommandLine FROM pslist()\n"
                     "WHERE Exe =~ '(?i)(^/tmp/|^/private/tmp/|^/var/tmp/|/downloads/|/\\.[^/]+/)'\n"
                     "LIMIT 200"},
+        ],
+    },
+    {
+        "id": "http2root-nginx2root-2026-11", "severity": "high", "published": "2026-11-18",
+        "title": "HTTP2ROOT / NGINX2Root — HTTP/2 web-server RCE escalated to host root",
+        "summary": "A wave of HTTP/2 flaws lets an unauthenticated attacker run code inside a web server's worker "
+            "process: nginx CVE-2026-123007 and CVE-2026-123633 (every nginx from 1.9.5 to 1.31.8 with HTTP/2 "
+            "enabled; fixed in 1.30.7 / 1.31.9), and Apache CVE-2026-119618 in mod_http2. The first stage only gives "
+            "worker-level execution; the published NGINX2Root chain then abuses a Linux SCTP-subsystem flaw (kernel "
+            ">= 4.15, no patch yet) to escalate to root, and from inside a container to the host, since every "
+            "container shares the host kernel. No file or network IOCs have been published, so detection is "
+            "behavioral. The host-visible shadows are a shell or interpreter whose parent is an nginx/Apache worker "
+            "(the RCE landing), the SCTP module being loaded on a host that should not need it (the escalation "
+            "enabler), and nginx worker crashes. These hunts sweep recorded history for the first two.",
+        "references": ["https://nvd.nist.gov/vuln/detail/CVE-2026-123007",
+                       "https://www.wiz.io/blog/nginx-http2-rce-vulnerabilities",
+                       "https://attack.mitre.org/techniques/T1190/"],
+        "hunts": [
+            {"name": "A shell or interpreter spawned by an nginx or Apache worker (HTTP/2 RCE)",
+             "why": "The RCE landing — an nginx, apache2 or httpd worker must never spawn a shell, interpreter "
+                    "or network tool; a child like that is the HTTP/2 remote-code-execution firing at worker level.",
+             "sql": "WITH ex AS (\n"
+                    "  SELECT id, pid, ppid, exe, cmdline, ts FROM exec_events\n"
+                    "  WHERE ts >= CAST(strftime('%s','now') AS INTEGER) - 2592000)\n"
+                    "SELECT datetime(c.ts,'unixepoch','localtime') AS t,\n"
+                    "       c.exe AS child_exe, c.cmdline AS child_cmdline, p.exe AS parent_exe, p.cmdline AS parent_cmdline\n"
+                    "FROM ex c JOIN ex p ON c.ppid = p.pid\n"
+                    "WHERE (lower(p.exe) LIKE '%nginx%' OR lower(p.exe) LIKE '%apache2%'\n"
+                    "       OR lower(p.exe) LIKE '%/httpd' OR lower(p.exe) LIKE '%apache%')\n"
+                    "  AND (lower(c.exe) LIKE '%/sh' OR lower(c.exe) LIKE '%/bash' OR lower(c.exe) LIKE '%/zsh'\n"
+                    "       OR lower(c.exe) LIKE '%/dash' OR lower(c.exe) LIKE '%/ksh'\n"
+                    "       OR lower(c.exe) LIKE '%/python' OR lower(c.exe) LIKE '%/python3'\n"
+                    "       OR lower(c.exe) LIKE '%/perl' OR lower(c.exe) LIKE '%/ruby' OR lower(c.exe) LIKE '%/php'\n"
+                    "       OR lower(c.exe) LIKE '%/node'\n"
+                    "       OR lower(c.exe) LIKE '%/curl' OR lower(c.exe) LIKE '%/wget'\n"
+                    "       OR lower(c.exe) LIKE '%/nc' OR lower(c.exe) LIKE '%/ncat' OR lower(c.exe) LIKE '%/socat')\n"
+                    "UNION ALL\n"
+                    "SELECT datetime(last_seen,'unixepoch','localtime') AS t,\n"
+                    "       exe AS child_exe, cmdline AS child_cmdline, ppid_name AS parent_exe, '' AS parent_cmdline\n"
+                    "FROM processes\n"
+                    "WHERE lower(ppid_name) IN ('nginx','apache2','httpd','apache')\n"
+                    "  AND lower(name) IN ('sh','bash','zsh','dash','ksh','python','python3','perl','ruby','php',\n"
+                    "                      'node','curl','wget','nc','ncat','socat')\n"
+                    "ORDER BY t DESC",
+             "vql": "-- a shell/interpreter (child) whose parent is an nginx/apache/httpd worker\n"
+                    "SELECT * FROM foreach(\n"
+                    "  row={ SELECT Pid AS ChildPid, Name AS ChildName, Username AS ChildUser,\n"
+                    "               CommandLine AS ChildCmd, Ppid AS ChildPpid FROM pslist()\n"
+                    "        WHERE Name =~ '(?i)^(sh|bash|zsh|dash|ksh|python3?|perl|ruby|php|node|curl|wget|nc|ncat|socat)$' },\n"
+                    "  query={ SELECT ChildPid, ChildName, ChildUser, ChildCmd, Pid AS ParentPid, Name AS ParentName, CommandLine AS ParentCmd\n"
+                    "          FROM pslist()\n"
+                    "          WHERE Pid = ChildPpid AND Name =~ '(?i)^(nginx|apache2|httpd|apache)$' })\n"
+                    "LIMIT 200"},
+            {"name": "The SCTP kernel module loaded, now or in recorded history (NGINX2Root LPE enabler)",
+             "why": "The escalation enabler — SCTP is rarely needed on a web, app or container host, and the "
+                    "NGINX2Root chain abuses the SCTP subsystem to go from worker to root. This finds the module "
+                    "loaded right now, and any modprobe/insmod of it in recorded history.",
+             "sql": "SELECT datetime(last_seen,'unixepoch','localtime') AS t, name, exe, cmdline, user, ppid_name\n"
+                    "FROM processes\n"
+                    "WHERE lower(cmdline) LIKE '%modprobe%sctp%' OR lower(cmdline) LIKE '%insmod%sctp%'\n"
+                    "UNION ALL\n"
+                    "SELECT datetime(ts,'unixepoch','localtime') AS t, '' AS name, exe, cmdline, '' AS user, '' AS ppid_name\n"
+                    "FROM exec_events\n"
+                    "WHERE lower(cmdline) LIKE '%modprobe%sctp%' OR lower(cmdline) LIKE '%insmod%sctp%'\n"
+                    "ORDER BY t DESC",
+             "vql": "-- the sctp module is loaded right now iff /sys/module/sctp exists (the LPE enabler)\n"
+                    "SELECT OSPath, Mtime FROM glob(globs='/sys/module/{sctp,sctp_diag}')\n"
+                    "LIMIT 50"},
         ],
     },
     {

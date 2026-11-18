@@ -6,6 +6,30 @@ agents, versioned independently.
 
 ## [Unreleased]
 
+## [1.15.1] — 2026-11-18 (Linux agent only)
+
+### Added
+
+**HTTP2ROOT / NGINX2Root detection coverage (Linux agent).** Covers the HTTP/2 web-server RCE-to-root
+chain disclosed this week — nginx CVE-2026-123007 and CVE-2026-123633 (every nginx 1.9.5–1.31.8 with
+HTTP/2 enabled; fixed in 1.30.7 / 1.31.9) and Apache CVE-2026-119618 in mod_http2 — where unauthenticated
+HTTP/2 traffic lands code in a web-server worker, and the published NGINX2Root chain then abuses the Linux
+SCTP subsystem (kernel ≥ 4.15, no patch yet) to escalate worker → root, and container → host. No file or
+network IOCs were published, so the coverage is behavioral:
+
+- **`b-sctp-lpe` (high, T1068).** Flags the SCTP module being loaded by name — `modprobe sctp` /
+  `insmod …sctp.ko` — the escalation enabler the generic `b-lkm-load` rule deliberately does not catch.
+  SCTP is rarely needed on a web, app or container host, so a lone load is a lead.
+- **`b-lin-server-shell` ancestry** already catches the first stage: a shell or interpreter whose parent
+  is an nginx/apache2/httpd worker (the RCE landing). Its analyst description now names the HTTP2ROOT /
+  NGINX2Root CVEs explicitly.
+- **Advisory hunt `http2root-nginx2root-2026-11` (high).** Two ready-to-run hunts sweeping recorded
+  history — a shell/interpreter spawned by a web-server worker, and any modprobe/insmod of SCTP (plus a
+  live `/sys/module/sctp` check in the VQL twin) — each with its Velociraptor single-host query. Mirrored
+  fleet-wide in Scouter Mesh.
+
+The macOS agent is unaffected (the chain is Linux-specific) and stays at 1.15.0.
+
 ## [1.15.0] — 2026-11-13
 
 ### Added

@@ -94,3 +94,8 @@ mesh-exports.json
 vuln-remediation.json
 vuln-alerted.json
 ia-cache.json
+kev-cache.json
+ext-token.json
+provenance-baseline.json
+# OSV ecosystem database downloaded at runtime for offline vuln matching
+osv-pypi.zip

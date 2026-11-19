@@ -1233,6 +1233,7 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
       <div id="kevHuntPanel" style="margin-top:10px"></div>
       </div>
       <div id="huntVqlPane" style="display:none">
+        <div style="border:1px solid var(--accent);border-radius:9px;padding:10px 12px;margin:0 0 12px;background:var(--panel2)"><div id="assessMain"><div class="hint">Compromise Assessment…</div></div></div>
         <div id="aiVqlBar" style="display:none;margin-bottom:6px">
           <div style="display:flex;gap:6px">
             <input type="text" id="aiVqlQ" placeholder="Ask in plain English → AI writes a Velociraptor (VQL) query…" style="flex:1;font-size:12px;padding:5px 8px;background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px" onkeydown="if(event.key==='Enter'){event.preventDefault();aiVqlGenerate()}">
@@ -3071,6 +3072,91 @@ function showTab(t){
   if(t==='groups') renderGroups();
 }
 function vAgo(ts){ if(!ts) return 'never'; const d=Date.now()/1000-ts; if(d<3600) return Math.round(d/60)+'m ago'; if(d<86400) return Math.round(d/3600)+'h ago'; return Math.round(d/86400)+'d ago'; }
+// ---- Compromise Assessment: the Mesh pack, run locally over Velociraptor VQL ----
+var ASSESS=null, assessPollTimer=null;
+var ASSESS_CAT={persistence:'Persistence',credential:'Credential theft',integrity:'Integrity',network:'Network & C2',scope:'Scope'};
+function renderAssess(){ var box=document.getElementById('assessMain'); if(!box) return;
+  fetch('/api/assess').then(r=>r.json()).then(d=>{ ASSESS=d; assessDraw(); if(d.state==='running') assessSchedulePoll(); })
+    .catch(e=>{ box.innerHTML='<div class="hint">Error: '+esc(''+e)+'</div>'; }); }
+function assessSchedulePoll(){ if(assessPollTimer) return;
+  assessPollTimer=setInterval(function(){ if(currentTab!=='hunt' || huntModeCur!=='vql'){ clearInterval(assessPollTimer); assessPollTimer=null; return; }
+    fetch('/api/assess').then(r=>r.json()).then(d=>{ ASSESS=d; assessDraw();
+      if(d.state!=='running'){ clearInterval(assessPollTimer); assessPollTimer=null; } }).catch(()=>{}); }, 1500); }
+function assessRun(){ var b=document.getElementById('assessRunBtn'); if(b){ b.disabled=true; b.textContent='Starting…'; }
+  fetch('/api/assess',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d&&d.ok===false){ alert(d.error||'Could not start the assessment.'); if(b){ b.disabled=false; b.textContent='🔍 Run compromise assessment'; } return; }
+    renderAssess(); }).catch(()=>{ if(b){ b.disabled=false; b.textContent='🔍 Run compromise assessment'; } }); }
+function assessIntroHTML(){
+  return '<div style="font-size:15px;font-weight:700">Compromise Assessment</div>'+
+    '<div class="hint" style="margin-top:3px;max-width:720px">The same compromise-assessment pack the Scouter Mesh runs across a fleet, run locally on this host through Velociraptor — read-only. '+
+    'It asks what is <i>already</i> here: persistence that survived, credential theft that already happened, and the mechanisms current malware families cannot operate without. '+
+    'Each check targets a mechanism, not a filename, and cites the families that made it worth hunting. Nothing is executed on the machine.</div>'; }
+function assessDraw(){ var box=document.getElementById('assessMain'); if(!box) return; var d=ASSESS||{};
+  var h=assessIntroHTML();
+  if(d.available===false){
+    h+='<div style="margin-top:12px;border:1px solid var(--line);border-radius:8px;padding:12px;background:var(--panel2);max-width:720px">'+
+       '<b>Velociraptor is required.</b><div class="hint" style="margin-top:4px">The assessment runs its checks as local Velociraptor VQL — the same engine this Hunt pane uses. '+
+       'Install it once with <b>Get Velociraptor</b> above, then run the sweep.</div></div>';
+    box.innerHTML=h; return; }
+  if(d.locked){
+    h+='<div class="hint" style="margin-top:12px;color:var(--sev-medium)">This agent was started with <code>--no-response</code>, which rules out anything that could act on the machine. VQL can run programs, so the assessment is disabled here.</div>';
+    box.innerHTML=h; return; }
+  var running=(d.state==='running'), p=d.progress||{}, res=d.result;
+  // action row
+  h+='<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0">';
+  if(running){
+    var pct=p.total?Math.round(100*(p.done||0)/p.total):0;
+    h+='<div style="flex:1;min-width:240px"><div class="hint" style="margin-bottom:4px">Running check '+(p.done||0)+' of '+(p.total||0)+(p.current?(' — '+esc(p.current)):'')+'…</div>'+
+       '<div style="height:8px;border-radius:5px;background:var(--panel2);border:1px solid var(--line);overflow:hidden"><div style="height:100%;width:'+pct+'%;background:var(--accent);transition:width .3s"></div></div></div>';
+  } else {
+    h+='<button id="assessRunBtn" class="btn pri" style="font-weight:700" onclick="assessRun()">🔍 '+(res?'Re-run assessment':'Run compromise assessment')+'</button>';
+    if(res) h+='<span class="hint">Last run '+esc(res.generated||'')+' · '+(res.summary&&res.summary.checks||0)+' checks · '+Math.round((res.elapsed_ms||0)/1000)+'s · pack '+esc(res.version||'')+'</span>';
+    else h+='<span class="hint">~two dozen checks · typically under a minute</span>';
+  }
+  h+='</div>';
+  if(res) h+=assessResultHTML(res);
+  else if(!running) h+='<div class="hint" style="margin-top:6px">No assessment has been run yet on this host.</div>';
+  box.innerHTML=h;
+  if(running) { var b=document.getElementById('assessRunBtn'); if(b){ b.disabled=true; } } }
+function assessResultHTML(res){ var s=res.summary||{}, bysev=s.by_severity||{};
+  var h='<div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">'+
+    '<div style="flex:1;min-width:92px;text-align:center;border:1px solid '+(s.with_hits?'var(--sev-high)':'var(--good)')+';border-radius:8px;padding:8px 4px;background:'+(s.with_hits?'var(--tint-hot-bg)':'var(--panel2)')+'">'+
+      '<b style="display:block;font-size:20px;font-variant-numeric:tabular-nums;color:'+(s.with_hits?'var(--sev-high)':'var(--good)')+'">'+(s.with_hits||0)+'</b><span style="color:var(--muted);font-size:11px">Checks with findings</span></div>'+
+    aiTile(s.clean||0,'Clean')+aiTile(s.could_not_run||0,'Could not run')+aiTile(s.rows||0,'Rows surfaced')+aiTile(s.checks||0,'Checks run')+'</div>';
+  // severity summary chips
+  var sevs=['critical','high','medium','low'].filter(function(k){return bysev[k];});
+  if(sevs.length){ h+='<div style="margin:2px 0 8px">'+sevs.map(function(k){return aiChip(k+' · '+bysev[k], aiSevColor(k==='critical'?'high':k));}).join(' ')+'</div>'; }
+  else { h+='<div class="hint" style="margin:2px 0 8px;color:var(--good)">No findings — every mechanism examined came back clean. A clean result is evidence, not silence: each check below ran and matched nothing.</div>'; }
+  var finds=res.findings||[];
+  var hits=finds.filter(function(f){return f.status==='hits';});
+  var skipped=finds.filter(function(f){return f.status==='skipped';});
+  var clean=finds.filter(function(f){return f.status==='clean';});
+  hits.forEach(function(f){ h+=assessFindingCard(f,true); });
+  if(skipped.length){ h+='<div style="font-weight:700;margin:14px 0 4px">Could not run <span class="hint" style="font-weight:400">· '+skipped.length+'</span></div>'+
+    '<div class="hint" style="max-width:720px;margin-bottom:4px">These checks could not complete — most often a resource the agent lacks the privilege to read (Full Disk Access for TCC, root for /etc/shadow). Shown so a clean result is never assumed where nothing was actually examined.</div>';
+    skipped.forEach(function(f){ h+=assessFindingCard(f,false); }); }
+  if(clean.length){ h+='<div style="font-weight:700;margin:14px 0 4px">Clean <span class="hint" style="font-weight:400">· '+clean.length+'</span></div>'+
+    '<div style="display:flex;flex-wrap:wrap;gap:6px">'+clean.map(function(f){
+      return '<span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:7px;padding:4px 9px;background:var(--panel2)" title="'+esc(f.why||'')+'">'+
+        '<span style="color:var(--good)">✓</span><span style="font-size:12px">'+esc(f.title)+'</span></span>'; }).join('')+'</div>'; }
+  return h; }
+function assessFindingCard(f, open){ var col=aiSevColor(f.severity==='critical'?'high':f.severity);
+  var h='<div style="border:1px solid var(--line);border-left:3px solid '+col+';border-radius:7px;padding:9px 11px;margin:7px 0;background:var(--panel2)">'+
+    '<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap">'+
+      '<b>'+esc(f.title)+'</b><span style="white-space:nowrap">'+aiChip(f.severity,col)+' '+aiChip(ASSESS_CAT[f.cat]||f.cat,'var(--muted)')+(f.count?(' '+aiChip(f.count+(f.count>1?' rows':' row'),col)):'')+'</span></div>'+
+    '<div class="hint" style="margin:3px 0;max-width:760px">'+esc(f.why||'')+'</div>';
+  if(f.note) h+='<div class="hint" style="margin:3px 0;color:var(--sev-medium)">⚠ '+esc(f.note)+'</div>';
+  if(open && f.rows && f.rows.length){ h+=assessRowsHTML(f); }
+  h+='</div>'; return h; }
+function assessRowsHTML(f){ var cols=f.columns&&f.columns.length?f.columns:Object.keys(f.rows[0]||{});
+  // keep the table readable: at most ~6 columns, prefer the informative ones
+  if(cols.length>7) cols=cols.slice(0,7);
+  var h='<div style="overflow-x:auto"><table class="aisurf-tbl"><thead><tr>'+cols.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
+  f.rows.forEach(function(r){ h+='<tr>'+cols.map(function(c){ var v=r[c]; v=(v===null||v===undefined)?'':(''+v);
+    return '<td class="hint" style="word-break:break-all;max-width:360px">'+esc(v.length>400?v.slice(0,400)+'…':v)+'</td>'; }).join('')+'</tr>'; });
+  h+='</tbody></table></div>';
+  if(f.truncated) h+='<div class="hint" style="margin-top:3px">Showing the first '+f.rows.length+' rows.</div>';
+  return h; }
 var VHOST=null, VSEL=null, VSHOWRES=false, KEVSTAT=null;
 var VREM_LABEL={patched:'Patched',mitigated:'Mitigated',accepted:'Risk accepted',false_positive:'False positive'};
 function loadKev(cb){ fetch('/api/kev').then(r=>r.json()).then(d=>{ KEVSTAT=d; if(cb)cb(); }).catch(()=>{}); }
@@ -4538,6 +4624,17 @@ function advHuntRestoreAll(){ advHuntPost('restore-all'); }
 function setHuntSql(i){ document.getElementById('huntSql').value=HUNT_QUERIES[i][1]; runHunt(); }
 // ---- Pre-built threat hunts from recently-exploited (KEV) CVEs ----
 var KEVHUNTS=[], KEVHUNT_BYCVE={};
+// Collapse state for the "Hunt from recent KEV" panel. null = use the default (open only when
+// something matches this host); the user's explicit toggle is remembered per browser.
+var KEVHUNT_OPEN=(function(){ try{ var v=localStorage.getItem('kevHuntOpen'); return v===null?null:(v==='1'); }catch(e){ return null; } })();
+function kevHuntToggle(){
+  var b=document.getElementById('kevHuntBody'); if(!b) return;
+  var nowOpen=(b.style.display==='none');
+  KEVHUNT_OPEN=nowOpen;
+  try{ localStorage.setItem('kevHuntOpen', nowOpen?'1':'0'); }catch(e){}
+  b.style.display=nowOpen?'':'none';
+  var c=document.getElementById('kevHuntCaret'); if(c) c.textContent=nowOpen?'▾':'▸';
+}
 function kevHuntLoad(cb){
   fetch('/api/kev-hunts').then(r=>r.json()).then(function(d){
     if(d&&d.available){ KEVHUNTS=d.hunts||[]; KEVHUNT_BYCVE={}; KEVHUNTS.forEach(function(x){ if(x.cve) KEVHUNT_BYCVE[x.cve]=x; }); }
@@ -4557,11 +4654,16 @@ function kevHuntByCve(cve){
 function kevHuntDraw(d){
   var box=document.getElementById('kevHuntPanel'); if(!box) return;
   var onhost=d.on_host||0;
+  var open=(KEVHUNT_OPEN!==null)?KEVHUNT_OPEN:(onhost>0);   // default: open only when something matches this host
   var h='<div style="border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:9px 11px">';
-  h+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:13px">🛑 Hunt from recent KEV</b>'+
+  h+='<div onclick="kevHuntToggle()" title="Click to collapse or expand" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;user-select:none">'+
+     '<span id="kevHuntCaret" class="hint" style="margin:0;font-size:11px;width:10px">'+(open?'▾':'▸')+'</span>'+
+     '<b style="font-size:13px">🛑 Hunt from recent KEV</b>'+
      '<span class="hint" style="margin:0">— ready-to-run queries for CVEs added to KEV in the last '+(d.days||14)+' days'+
+     (KEVHUNTS.length?(' · '+KEVHUNTS.length+' CVE'+(KEVHUNTS.length>1?'s':'')):'')+
      (onhost?(' · <b style="color:var(--sev-high)">'+onhost+' match software on this host</b>'):'')+'</span></div>';
   if(!KEVHUNTS.length){ box.innerHTML=h+'<div class="hint" style="margin-top:4px">No recently-exploited CVEs map to a hunt right now.</div></div>'; return; }
+  h+='<div id="kevHuntBody" style="display:'+(open?'':'none')+'">';
   h+='<div style="display:flex;flex-direction:column;gap:4px;margin-top:7px">';
   KEVHUNTS.slice(0,12).forEach(function(x,i){
     h+='<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0;border-bottom:1px solid var(--line)">'+
@@ -4574,7 +4676,7 @@ function kevHuntDraw(d){
        '<button class="btn" style="font-size:11px;padding:2px 8px" onclick="kevHuntRun('+i+')">▶ Hunt</button>'+
        '</div>';
   });
-  h+='</div><div class="hint" style="margin-top:5px">Each query looks for running processes and recent executions of the affected software (by name) — a starting point to confirm, then pivot.</div></div>';
+  h+='</div><div class="hint" style="margin-top:5px">Each query looks for running processes and recent executions of the affected software (by name) — a starting point to confirm, then pivot.</div></div></div>';
   box.innerHTML=h;
 }
 function kevHuntRun(i){
@@ -6584,6 +6686,7 @@ function huntMode(m){
     : 'Pick a canned hunt above, or write a SELECT against the history tables, then Run (⌘/Ctrl+Enter).')+'</div>';
 }
 function vqlInit(){
+  renderAssess();   // the Compromise Assessment lives at the top of the Velociraptor · VQL pane
   const bar=document.getElementById('aiVqlBar'); if(bar) bar.style.display=aiAvailable()?'':'none';
   const meta=document.getElementById('vqlMeta'), s=(typeof vrState!=='undefined'&&vrState)||{};
   if(meta) meta.textContent = s.available===false

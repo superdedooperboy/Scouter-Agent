@@ -4,6 +4,41 @@ All notable changes to Scouter are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This repository ships the macOS and Linux
 agents, versioned independently.
 
+## [1.16.1] — 2026-11-19
+
+### Compromise Assessment — on-demand, on-host (both agents)
+
+The Scouter Mesh's compromise-assessment pack now runs on the single-host agent too, so an
+open-source user can run it on their own machine post-install — no fleet, no server. It lives where
+the Mesh puts it: **inside the Hunt pane, in the Velociraptor · VQL view** (a one-time, read-only
+sweep belongs with the DFIR tooling, not in a tab of its own).
+
+- **Same pack, same mechanism.** It mirrors the Mesh pack exactly — the same check ids, categories,
+  severities, titles, `why` analysis and keep/drop/probe filters — and runs through the **same engine,
+  Velociraptor VQL**. The only change is single-host: each check's fleet `foreach(clients())` fan-out is
+  unwrapped at runtime (`_assess_localize`) so the query runs locally via `velociraptor query`, and the
+  cross-platform netstat()/pslist() checks are triaged by the identical `assess_filter` in Python.
+- **What it looks for.** The mechanisms an attacker leaves behind *before anyone was watching*:
+  persistence that survived (LaunchAgents/Login Items/BTM, cron, systemd units & timers, udev/rc/motd,
+  ld.so.preload, kernel modules, authorized_keys, login/shell hooks), credential theft that already
+  happened (PAM backdoors, sshd/libkeyutils tampering, NOPASSWD sudoers, uid-0 accounts, FDA grants),
+  integrity (rogue profiles/MDM, system & kernel extensions), and network/C2 (listeners beyond
+  loopback, established connections to public infrastructure, C2-default ports, tunnelling/RMM agents,
+  processes running from temp or hidden paths, hosts/resolver tampering).
+- **Honest by construction.** An empty check is reported as **clean**, never silence; a query that
+  can't read a resource (Full Disk Access for TCC, root for `/etc/shadow`) is **could not run**, not
+  clean; and a netstat/pslist schema the filter doesn't recognize **shows every row with a note**
+  rather than risk a false all-clear. The run is asynchronous with live progress, read-only throughout,
+  and audited to the response log; it's disabled under `--no-response` and needs Velociraptor (one-click
+  install from the Hunt tab).
+
+### Console
+
+- **"Hunt from recent KEV" is now collapsible.** The recent-KEV hunt list on the Hunt pane can grow
+  long; its header is now a click target that collapses or expands the body (the state persists per
+  browser). It opens by default only when something on this host matches a recently-exploited CVE, and
+  the header shows the CVE count so the section stays scannable while collapsed.
+
 ## [1.16.0] — 2026-11-19
 
 ### Agent Access Audit — 1.16.0, all phases complete (both agents)

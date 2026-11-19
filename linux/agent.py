@@ -94,7 +94,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.16.0"
+__version__ = "1.16.1"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -19178,6 +19178,394 @@ HUNT_SCHEMA_HINT = (
     "alerts(node_id,type,label,severity,score,triage_status,first_seen,last_seen)")
 
 
+# ============================ Compromise Assessment ============================
+# The on-demand "what is ALREADY here" sweep, mirrored verbatim from the Scouter Mesh
+# fleet pack (mesh.py COMPROMISE_ASSESSMENT) into the single-host agent so an open-source
+# user can run it on their own machine post-install. SAME pack — same ids, categories,
+# severities, titles, `why` text, VQL and keep/drop/probe filters — run through the SAME
+# mechanism (Velociraptor VQL), only without the fleet `foreach(clients())` fan-out: there
+# is no server on an endpoint, so each check runs locally via `velociraptor query`.
+# Every query is read-only: glob, stat, parse, grep, netstat, pslist. Nothing is executed.
+# ------------------------------------------------------------------------------
+ASSESS_VERSION = "2026.10"
+
+COMPROMISE_ASSESSMENT = [
+    # -- Linux ---------------------------------------------------------------
+    {"id": "lin-ldso-preload", "cat": "persistence", "os": "linux", "severity": "critical",
+     "title": "/etc/ld.so.preload present",
+     "why": "QLNX injects its PAM backdoor through ld.so.preload, and preload rootkits generally depend "
+            "on it. On most estates this file should not exist at all.",
+     "vql": "SELECT Client, OSPath, Mtime, Data FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Mtime, read_file(filename=OSPath, length=512) AS Data "
+            "FROM glob(globs=['/etc/ld.so.preload']) })"},
+    {"id": "lin-pam-modules", "cat": "credential", "os": "linux", "severity": "critical",
+     "title": "PAM modules changed recently",
+     "why": "QLNX's PAM backdoor logs plaintext credentials at authentication time. A security module "
+            "whose mtime does not match the rest of the package is the tell.",
+     "vql": "SELECT Client, OSPath, Mtime, Size FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Mtime, Size "
+            "FROM glob(globs=['/lib/security/*.so','/lib64/security/*.so','/usr/lib/security/*.so',"
+            "'/lib/x86_64-linux-gnu/security/*.so']) })"},
+    {"id": "lin-hidden-varlog", "cat": "credential", "os": "linux", "severity": "high",
+     "title": "Hidden files under /var/log",
+     "why": "QLNX writes XOR-encrypted harvested credentials to /var/log/.ICE-unix — a name chosen to "
+            "look like an X11 socket directory.",
+     "vql": "SELECT Client, OSPath, Size, Mtime FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Size, Mtime "
+            "FROM glob(globs=['/var/log/.*','/var/tmp/.*','/dev/shm/.*']) WHERE NOT IsDir })"},
+    {"id": "lin-authorized-keys", "cat": "persistence", "os": "linux", "severity": "high",
+     "title": "SSH authorized_keys, with age and content",
+     "why": "The most durable Linux persistence there is: one appended key outlives password changes, "
+            "reinstalled tooling and the incident that put it there.",
+     "vql": "SELECT Client, OSPath, Mtime, Data FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Mtime, read_file(filename=OSPath, length=4096) AS Data "
+            "FROM glob(globs=['/root/.ssh/authorized_keys*','/home/*/.ssh/authorized_keys*']) })"},
+    {"id": "lin-systemd-recent", "cat": "persistence", "os": "linux", "severity": "high",
+     "title": "systemd units executing from writable or temporary paths",
+     "why": "QLNX persists through systemd among others. A unit whose ExecStart lives in /tmp, /dev/shm "
+            "or a home directory is not how packages install services.",
+     "vql": "SELECT Client, OSPath, Data FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, read_file(filename=OSPath, length=2048) AS Data "
+            "FROM glob(globs=['/etc/systemd/system/**.service','/usr/lib/systemd/system/**.service',"
+            "'/home/*/.config/systemd/user/**.service']) "
+            "WHERE Data =~ '(?i)ExecStart=[^\\n]*(/tmp/|/dev/shm/|/var/tmp/|/home/)' })"},
+    {"id": "lin-autostart-profile", "cat": "persistence", "os": "linux", "severity": "medium",
+     "title": "XDG autostart entries and shell profiles that fetch or execute",
+     "why": "QLNX uses XDG autostart and .bashrc alongside systemd, so a single persistence sweep that "
+            "checks only services misses it.",
+     "vql": "SELECT Client, OSPath, Data FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, read_file(filename=OSPath, length=2048) AS Data "
+            "FROM glob(globs=['/home/*/.config/autostart/*.desktop','/etc/xdg/autostart/*.desktop',"
+            "'/home/*/.bashrc','/root/.bashrc','/home/*/.profile']) "
+            "WHERE Data =~ '(?i)(curl|wget|/dev/tcp/|base64\\s+-d|nc\\s+-e|bash\\s+-i)' })"},
+    {"id": "lin-cron", "cat": "persistence", "os": "linux", "severity": "medium",
+     "title": "Cron entries that download or execute inline payloads",
+     "why": "Still the most common persistence on a compromised Linux host, and the easiest to overlook "
+            "because it hides in plain sight.",
+     "vql": "SELECT * FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, read_file(filename=OSPath, length=4096) AS Data "
+            "FROM glob(globs=['/etc/cron*/**','/var/spool/cron/**']) WHERE NOT IsDir AND "
+            "Data =~ '(?i)(curl|wget|base64|/dev/tcp/|python -c|perl -e)' })"},
+    {"id": "lin-udev-initrc-motd", "cat": "persistence", "os": "linux", "severity": "high",
+     "title": "udev rules, rc/init scripts and update-motd.d",
+     "why": "Three mechanisms a systemd-focused sweep walks straight past: a udev RUN+= rule fires "
+            "as root on a device event, rc.local and init.d still execute at boot, and "
+            "update-motd.d runs as root on every interactive SSH login.",
+     "vql": "SELECT Client, OSPath, Mtime, Data FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Mtime, "
+            "read_file(filename=OSPath, length=4096) AS Data FROM glob(globs=["
+            "'/etc/udev/rules.d/*.rules','/lib/udev/rules.d/*.rules','/etc/rc.local','/etc/rc.d/rc.local',"
+            "'/etc/init.d/*','/etc/update-motd.d/*']) WHERE NOT IsDir AND "
+            "Data =~ '(?i)(RUN\\+?=|curl|wget|/dev/tcp/|base64\\s+-{1,2}[dD]|nc\\s+-e|bash\\s+-i)' })"},
+    {"id": "lin-systemd-timers", "cat": "persistence", "os": "linux", "severity": "medium",
+     "title": "systemd timers, including per-user timers",
+     "why": "The pack already checks service units; a timer is how a beacon gets its schedule "
+            "without a service that stays running for someone to notice.",
+     "vql": "SELECT Client, OSPath, Mtime, Data FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Mtime, "
+            "read_file(filename=OSPath, length=2048) AS Data FROM glob(globs=["
+            "'/etc/systemd/system/**.timer','/usr/lib/systemd/system/**.timer',"
+            "'/home/*/.config/systemd/user/**.timer','/root/.config/systemd/user/**.timer']) })"},
+    {"id": "lin-kmods", "cat": "persistence", "os": "linux", "severity": "high",
+     "title": "Kernel modules outside package management, and module load configuration",
+     "why": "VoidLink's C2 compiles a rootkit module on demand for each target's exact kernel "
+            "version, which defeats hash matching -- but the module still has to land on disk and be "
+            "configured to load, and the extra/updates directories and modprobe.d are where it lands.",
+     "vql": "SELECT Client, OSPath, Mtime, Size FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Mtime, Size FROM glob(globs=["
+            "'/lib/modules/*/extra/*.ko*','/lib/modules/*/updates/**.ko*',"
+            "'/etc/modules-load.d/*','/etc/modprobe.d/*','/etc/modules']) WHERE NOT IsDir })"},
+    {"id": "lin-sshd-injector", "cat": "credential", "os": "linux", "severity": "critical",
+     "title": "sshd binary and the libraries it links, with size and age",
+     "why": "ELF/Sshdinjector backdoors authentication by replacing sshd or a library it loads "
+            "(libkeyutils is the classic), capturing every credential used to log in. Compare the "
+            "timestamps against the package's install date -- a mismatch is the finding.",
+     "vql": "SELECT Client, OSPath, Mtime, Size FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Mtime, Size FROM glob(globs=["
+            "'/usr/sbin/sshd','/usr/bin/sshd','/sbin/sshd','/lib/*/libkeyutils.so*',"
+            "'/lib64/libkeyutils.so*','/usr/lib/*/libkeyutils.so*']) })"},
+    {"id": "lin-sudoers", "cat": "credential", "os": "linux", "severity": "high",
+     "title": "Linux sudoers rules granting passwordless root",
+     "why": "No process, no file to scan, nothing at runtime to detect -- and root whenever the "
+            "attacker returns. It survives reboots, updates and most incident cleanups.",
+     "vql": "SELECT Client, OSPath, Mtime, Data FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Mtime, "
+            "read_file(filename=OSPath, length=4096) AS Data FROM glob(globs=["
+            "'/etc/sudoers','/etc/sudoers.d/*']) WHERE Data =~ '(?i)NOPASSWD' })"},
+    {"id": "lin-accounts", "cat": "credential", "os": "linux", "severity": "high",
+     "title": "Account database, with uid 0 entries and recent changes",
+     "why": "A second uid-0 account, or a service account given a login shell, is persistence that "
+            "needs no malware at all. The mtime on passwd and shadow also dates the change, which "
+            "is often the only timestamp an assessment gets for when the estate was touched.",
+     "vql": "SELECT Client, OSPath, Mtime, Data FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Mtime, "
+            "read_file(filename=OSPath, length=8192) AS Data FROM glob(globs=["
+            "'/etc/passwd','/etc/shadow','/etc/group','/etc/sudoers']) })"},
+    # -- network & C2 (filtered in Python by assess_filter, exactly like the Mesh) -----------
+    {"id": "net-listening", "cat": "network", "probe": ["status", "state"], "os": "any", "severity": "high",
+     "title": "Processes listening for inbound connections beyond loopback",
+     "why": "An implant that accepts connections, a tunnel client, or a remote-access service "
+            "nobody remembers enabling all appear here. On a managed endpoint the listener set "
+            "should be short and explainable; anything bound past loopback is reachable.",
+     "vql": "SELECT * FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT *, os_info.hostname AS Client FROM netstat() })",
+     "keep": [[None, r"(?i)\blisten"]],
+     "drop": [["laddr", r"^(127\.|::1|\[?::1\]?$)"]]},
+    {"id": "net-established", "cat": "network", "probe": ["status", "state"], "os": "any", "severity": "high",
+     "title": "Established connections to public addresses, with the owning process",
+     "why": "The direct question a compromise assessment exists to ask: is anything on this "
+            "estate talking to infrastructure right now. RedC2 and VoidLink both beacon over "
+            "HTTPS to blend with web traffic, so the peer address and owning binary matter more "
+            "than the protocol.",
+     "vql": "SELECT * FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT *, os_info.hostname AS Client FROM netstat() })",
+     "keep": [[None, r"(?i)\bestab"]],
+     "drop": [["raddr", r"^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|::1|fe80:|fd|0\.0\.0\.0|$)"]]},
+    {"id": "net-backdoor-ports", "cat": "network", "probe": ["addr", "port"], "os": "any", "severity": "medium",
+     "title": "Connections or listeners on ports associated with C2 frameworks",
+     "why": "Cobalt Strike team servers default to 50050, and the 4444/1337/31337 family remains "
+            "the default in Metasploit and countless commodity backdoors. Operators change these, "
+            "so a hit is strong and a miss means nothing.",
+     "vql": "SELECT * FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT *, os_info.hostname AS Client FROM netstat() })",
+     "keep": [["addr", r"(?i)(:|\b)(4444|4445|5555|6666|1337|31337|12345|50050|8443)\b"]]},
+    {"id": "net-tunnel-rmm", "cat": "network", "probe": ["name", "exe", "cmdline", "commandline"], "os": "any", "severity": "high",
+     "title": "Tunnelling clients and remote-management agents running",
+     "why": "SMOKE#SCREEN pairs ScreenConnect with Cloudflare tunnels: signed, notarised software "
+            "that no antivirus objects to, giving hands-on access through an outbound connection "
+            "that no firewall rule blocks. Legitimate where the customer's IT uses one, which is "
+            "why the answer is to confirm which product is sanctioned rather than to ignore the check.",
+     "vql": "SELECT * FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT *, os_info.hostname AS Client FROM pslist() })",
+     "keep": [[None, r"(?i)(cloudflared|\bngrok\b|tailscaled|\bfrpc?\b|chisel|localtunnel|devtunnel|"
+                     r"screenconnect|connectwise|anydesk|teamviewer|rustdesk|splashtop|ateraagent|"
+                     r"syncro|meshagent|\brport\b|gotoassist|logmein)"]]},
+    {"id": "net-proc-oddpath", "cat": "network", "probe": ["exe", "path"], "os": "any", "severity": "high",
+     "title": "Running processes whose executable sits in a temporary or hidden directory",
+     "why": "Packaged software runs from /usr, /opt or /Applications. A live process running out "
+            "of /tmp, /dev/shm, a dot-directory or Application Support is the shape every family "
+            "in this pack shares, independent of what it is named.",
+     "vql": "SELECT * FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT *, os_info.hostname AS Client FROM pslist() })",
+     "keep": [["exe", r"(?i)(^/tmp/|/var/tmp/|/dev/shm/|/\.[A-Za-z0-9_]|/Library/Application Support/)"]]},
+    {"id": "any-hosts-resolvers", "cat": "network", "os": "any", "severity": "medium",
+     "title": "Hosts file and DNS resolver configuration",
+     "why": "Two jobs at once: an entry redirecting a vendor or update domain is how malware blinds "
+            "security tooling, and a resolver pointing somewhere unexpected turns every name lookup "
+            "on the host into someone else's telemetry.",
+     "vql": "SELECT Client, OSPath, Mtime, Data FROM foreach(row={SELECT * FROM clients()}, query={"
+            "SELECT os_info.hostname AS Client, OSPath, Mtime, "
+            "read_file(filename=OSPath, length=4096) AS Data FROM glob(globs=["
+            "'/etc/hosts','/etc/resolv.conf','/etc/resolvconf/resolv.conf.d/*']) WHERE NOT IsDir })"},
+    # -- scope ----------------------------------------------------------------
+    {"id": "any-enrolled", "cat": "scope", "os": "any", "severity": "info",
+     "title": "This host and when the assessment ran",
+     "why": "Establishes the denominator: an assessment states exactly which machine was examined, so "
+            "a report can never be mistaken for one that silently skipped it.",
+     "vql": "SELECT Hostname, OS, Platform, Release, Architecture FROM info()"},
+]
+
+
+def _assess_flat(row, prefix=""):
+    """Flatten a VQL row into (dotted field name, string value) pairs. Same as the Mesh."""
+    out = []
+    if isinstance(row, dict):
+        for k, v in row.items():
+            out.extend(_assess_flat(v, ("%s.%s" % (prefix, k)) if prefix else str(k)))
+    elif isinstance(row, (list, tuple)):
+        for v in row:
+            out.extend(_assess_flat(v, prefix))
+    else:
+        out.append((prefix, "" if row is None else str(row)))
+    return out
+
+
+def _assess_hit(pairs, spec):
+    """True when a field whose name contains the hint holds a value matching the pattern.
+    A hint of None considers every field. Same as the Mesh."""
+    for hint, rx in spec or ():
+        for name, val in pairs:
+            if hint and hint.lower() not in name.lower():
+                continue
+            try:
+                if re.search(rx, val):
+                    return True
+            except re.error:
+                continue
+    return False
+
+
+def assess_filter(rows, q):
+    """Apply a check's keep/drop spec locally. Returns (rows, note). Identical semantics to the
+    Mesh assess_filter: the network checks ask Velociraptor for SELECT * and triage HERE, because
+    the VQL reference documents no output columns for netstat()/pslist() — a WHERE clause naming a
+    column a build does not have returns zero rows, which in an assessment reads as 'nothing wrong'.
+    A check may declare `probe`: the field names its filter relies on. If NONE appear in what came
+    back, this build's schema is not the one the filter was written against, so every row is returned
+    with a note rather than risk a clean result that is not one."""
+    keep, drop, probe = q.get("keep"), q.get("drop"), q.get("probe")
+    if not keep and not drop:
+        return rows, ""
+    flat = [(r, _assess_flat(r)) for r in rows]
+    if rows and probe:
+        names = {n.lower() for (_, pairs) in flat for (n, _) in pairs}
+        if not any(any(h.lower() in n for n in names) for h in probe):
+            return rows, ("this check's filter expected a field named like %s and this "
+                          "Velociraptor build returned none, so every row is shown "
+                          "unfiltered rather than risk reporting a clean result that is not one"
+                          % " / ".join(probe))
+    kept = [(r, p) for (r, p) in flat if (not keep or _assess_hit(p, keep))]
+    return [r for (r, p) in kept if not (drop and _assess_hit(p, drop))], ""
+
+
+def assessment_for(os_filter=None):
+    """The pack, narrowed to one platform (plus the cross-platform 'any' checks)."""
+    if not os_filter or os_filter == "any":
+        return list(COMPROMISE_ASSESSMENT)
+    return [q for q in COMPROMISE_ASSESSMENT if q["os"] in (os_filter, "any")]
+
+
+def _assess_localize(vql):
+    """Turn a fleet pack VQL into the single-host form `velociraptor query` runs locally.
+
+    There is no server on an endpoint, so clients() does not exist. Every fleet check wraps its
+    real work in `... FROM foreach(row={SELECT * FROM clients()}, query={ INNER })` and tags each
+    row with `os_info.hostname AS Client`. Unwrap to INNER (the pack's INNER never nests braces)
+    and drop the per-client hostname column — the agent already knows its own host. A check that
+    selects straight FROM clients() (the scope row) is replaced by the local info() equivalent."""
+    v = (vql or "").strip()
+    if "foreach(" not in v and "clients()" in v:
+        return "SELECT Hostname, OS, Platform, Release, Architecture FROM info()"
+    i = v.find("query={")
+    if i == -1:
+        return v
+    inner = v[i + len("query={"):].rstrip()
+    if inner.endswith("})"):
+        inner = inner[:-2].rstrip()
+    elif inner.endswith("}"):
+        inner = inner[:-1].rstrip()
+    inner = re.sub(r"os_info\.hostname\s+AS\s+Client\s*,\s*", "", inner)
+    inner = re.sub(r"\s*,\s*os_info\.hostname\s+AS\s+Client", "", inner)
+    inner = re.sub(r"os_info\.hostname\s+AS\s+Client", "", inner)
+    return inner.strip()
+
+
+class CompromiseAssessment:
+    """Run the Mesh compromise-assessment pack LOCALLY on this one host, through Velociraptor.
+
+    Same pack, same filters, same honesty invariant (an empty table is 'clean', never an error; a
+    probe-miss shows everything with a note; a query that fails is 'could not run', never silent).
+    The run is asynchronous — the pack is ~two dozen VR queries — with progress the console polls."""
+    ROW_CAP = 300
+    SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+    def __init__(self, vr, responder=None):
+        self.vr = vr
+        self._responder = responder
+        self._lock = threading.Lock()
+        self._state = "idle"        # idle | running | done
+        self._progress = {"done": 0, "total": 0, "current": ""}
+        self._result = None
+        self._error = ""
+        self._started = 0.0
+
+    def _os(self):
+        if sys.platform == "darwin":
+            return "darwin"
+        if sys.platform.startswith("linux"):
+            return "linux"
+        return "any"
+
+    def available(self):
+        return bool(self.vr and self.vr.find_binary())
+
+    def locked(self):
+        return bool(self._responder is not None and getattr(self._responder, "locked", False))
+
+    def status(self):
+        with self._lock:
+            out = {"version": ASSESS_VERSION, "available": self.available(),
+                   "locked": self.locked(), "state": self._state,
+                   "progress": dict(self._progress)}
+            if self._error:
+                out["error"] = self._error
+            if self._result is not None:
+                out["result"] = self._result
+            return out
+
+    def start(self):
+        with self._lock:
+            if self._state == "running":
+                return {"ok": True, "state": "running", "progress": dict(self._progress)}
+            if not self.available():
+                return {"ok": False, "error": "Velociraptor isn't installed yet. Use Get Velociraptor "
+                                              "on the Hunt tab, then run the assessment."}
+            if self.locked():
+                return {"ok": False, "error": "This agent was started with --no-response, which rules "
+                                              "out anything that could act on the machine. VQL can run "
+                                              "programs, so the assessment is disabled here."}
+            checks = assessment_for(self._os())
+            self._state = "running"
+            self._error = ""
+            self._progress = {"done": 0, "total": len(checks), "current": ""}
+            self._started = time.time()
+        threading.Thread(target=self._run, args=(checks,), daemon=True).start()
+        return {"ok": True, "state": "running", "progress": {"done": 0, "total": len(checks)}}
+
+    def _run(self, checks):
+        findings = []
+        for c in checks:
+            with self._lock:
+                self._progress["current"] = c.get("title", c["id"])
+            findings.append(self._run_one(c))
+            with self._lock:
+                self._progress["done"] += 1
+        findings.sort(key=lambda f: (0 if f["status"] == "hits" else (1 if f["status"] == "skipped" else 2),
+                                     self.SEV_ORDER.get(f["severity"], 9)))
+        by_sev = {}
+        for f in findings:
+            if f["status"] == "hits":
+                by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        summary = {
+            "checks": len(findings),
+            "with_hits": sum(1 for f in findings if f["status"] == "hits"),
+            "clean": sum(1 for f in findings if f["status"] == "clean"),
+            "could_not_run": sum(1 for f in findings if f["status"] == "skipped"),
+            "rows": sum(f["count"] for f in findings),
+            "by_severity": by_sev,
+        }
+        result = {"version": ASSESS_VERSION, "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+                  "os": self._os(), "elapsed_ms": int((time.time() - self._started) * 1000),
+                  "summary": summary, "findings": findings}
+        with self._lock:
+            self._result = result
+            self._state = "done"
+            self._progress["current"] = ""
+
+    def _run_one(self, c):
+        base = {k: c.get(k) for k in ("id", "cat", "os", "severity", "title", "why")}
+        vql = _assess_localize(c.get("vql", ""))
+        res = self.vr.query_local(vql, timeout=120)
+        if self._responder is not None:
+            try:
+                self._responder._audit("assess-query", {"id": c["id"]},
+                                       ("ok rows=%d" % res.get("count", 0)) if res.get("ok")
+                                       else "error: " + str(res.get("error"))[:150])
+            except Exception:  # noqa: BLE001
+                pass
+        if not res.get("ok"):
+            base.update(status="skipped", count=0, rows=[], columns=[],
+                        note=str(res.get("error") or "query failed")[:300])
+            return base
+        rows, note = assess_filter(res.get("rows", []), c)
+        base.update(status=("hits" if rows else "clean"), count=len(rows),
+                    rows=rows[:self.ROW_CAP], truncated=len(rows) > self.ROW_CAP,
+                    columns=res.get("columns", []))
+        if note:
+            base["note"] = note
+        return base
+
+
 VQL_LOCAL_HINT = (
     "Velociraptor VQL, run LOCALLY on this one Linux machine. There is no server here, so clients(), "
     "hunts() and flows() do not apply. Syntax: SELECT <cols> FROM plugin(args) WHERE <expr> LIMIT n. No "
@@ -21204,6 +21592,11 @@ def make_handler(cache):
             elif path == "/api/advisory-hunts":
                 adv = getattr(cache, "advisories", None)
                 self._send_json(adv.status() if adv else {"available": False, "advisories": []})
+            elif path == "/api/assess":
+                # Compromise Assessment — the on-demand local "what is ALREADY here" VQL sweep.
+                # GET returns state + last result; the run is kicked off by POST /api/assess.
+                a = getattr(cache, "assess", None)
+                self._send_json(a.status() if a else {"available": False, "state": "idle"})
             elif path == "/api/health":
                 self._send_json({"ok": True, "version": __version__, "euid": os.geteuid(),
                                  "privilege": "full" if os.geteuid() == 0 else "user",
@@ -22331,6 +22724,14 @@ def make_handler(cache):
                                 store.put(nid, data.get("type"), data.get("detail"),
                                           techniques_of(data.get("reasons")), kind, text, mlabel)
                         self._send_json(res, status=200 if res.get("ok") else 400)
+            elif u.path == "/api/assess":
+                # Start the Compromise Assessment sweep (asynchronous; progress via GET /api/assess).
+                a = getattr(cache, "assess", None)
+                if not a:
+                    self._send_json({"ok": False, "error": "Compromise Assessment unavailable"}, status=400)
+                else:
+                    r = a.start()
+                    self._send_json(r, status=200 if r.get("ok") else 400)
             elif u.path == "/api/vr":
                 qs = parse_qs(u.query)
                 action = (qs.get("action") or [""])[0]
@@ -25991,6 +26392,7 @@ def main():
                               kev=cache.kev, ia=cache.ia)
     cache.vulns.start()
     cache.advisories = AdvisoryHunts()   # curated, dismissable advisory hunts (top of the Hunt tab)
+    cache.assess = CompromiseAssessment(vr, responder=responder)   # on-demand local compromise-assessment sweep (VQL)
     cache.shodan = ShodanExposure(interval=args.shodan_interval, kev=cache.kev, ia=cache.ia)   # opt-in external attack surface
     cache.local_control = bool(args.local_control)
     cache.autohunts = AutoHuntStore()      # hunts raised by validated-malicious alerts

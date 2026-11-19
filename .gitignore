@@ -23,6 +23,7 @@ access-baseline.json
 account-baseline.json
 shell-baseline.json
 ai-surface-baseline.json
+agent-access-policy.json
 rules.json
 suppressions.json
 __pycache__/

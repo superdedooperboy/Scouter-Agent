@@ -4,7 +4,132 @@ All notable changes to Scouter are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This repository ships the macOS and Linux
 agents, versioned independently.
 
-## [Unreleased]
+## [1.16.0] — 2026-11-19
+
+### Agent Access Audit — 1.16.0, all phases complete (both agents)
+
+Monitoring for unapproved / overly-scoped access by AI agents to applications, APIs and files — all
+read-only and on-host, never reading a credential value. Phased; see
+`docs/design/agent-access-audit.md`.
+
+- **Phase 1 — Non-Human Identity (NHI) inventory.** A new read-only inventory of the identities an
+  agent's tools can authenticate with: the credential-named env vars wired into each MCP server
+  (attributed to that server, e.g. a `github` MCP → GitHub token), and the well-known on-disk
+  credential stores reachable by the agent's user (`~/.aws/credentials`, `gh` `hosts.yml`, gcloud
+  ADC, kubeconfig, `~/.docker/config.json`, `.npmrc`/`.pypirc`, `.netrc`, SSH private keys, and the
+  platform keystore). Only presence, provider, kind, path, posix mode, and NON-SECRET structural
+  labels (profile names, hosts, contexts) are recorded — a credential **value** is never read. The
+  full list lives in `meta.ai_surface.nhi` and `/api/ai-surface`. Two scored findings, both
+  ATT&CK-mapped and under the new `ai-access` category: **`ai-identity-exposed`** (high, T1552.001)
+  — a secret-bearing credential file an agent could use is world-readable or writable by other users;
+  and **`ai-identity-new`** (low, →medium if the identity reads as admin/owner/service-account;
+  T1078.004) — a new identity since the learn-only baseline. First pass is learn-only, so a *new*
+  identity flags only against a previously-seen state. Suites: mac +11, linux +11.
+- **Phase 2 — Scope reading (best-effort, least-privilege).** Reads the *granted scope* of an
+  identity wherever the host records it locally — gcloud application-default credentials carry a
+  `scopes` array — and, behind an **opt-in** `SCOUTER_AGENT_SCOPE_PROBE` flag (default off, never
+  shells out otherwise), asks `gh auth status` for a GitHub token's scopes (the token value is never
+  captured). A new finding **`ai-scope-excessive`** (T1098) fires when a *read* scope is
+  broad/administrative (GCP `cloud-platform`; GitHub `repo`, `admin:org`, `workflow`, `delete_repo`,
+  …) — high when the identity is wired into an agent, medium when dormant. Honesty contract: every
+  identity carries a `scope_status` of **read** / **unknown** / **none**, and the finding fires only
+  on `read`; a scope that exists but is not locally readable (cloud IAM, server-side RBAC, an opaque
+  bearer token, or the gh probe disabled) is `unknown` and is **never** guessed or shown as `none`.
+  Suites: mac +13, linux +13.
+- **Phase 4 — Agent file-reach / credential-access audit.** When a process in an AI agent's lineage
+  (the agent itself or any descendant, attributed by walking the ppid chain) touches a sensitive
+  credential/secret store, Scouter raises an access event — *even when the command itself is benign*
+  (previously it was silent unless a dangerous-command rule matched). Sources: Linux `/proc/<pid>/fd`
+  of lineage pids, a cross-platform command-line reference scan, and — behind an **opt-in**
+  `SCOUTER_FD_PROBE` flag — an `lsof` fallback on macOS (no `/proc`). Matched targets include cloud
+  credentials, SSH keys, VCS tokens, kubeconfig and browser password/cookie stores. New finding
+  **`ai-access-sensitive`** (high, T1552/T1555), deduped per (agent, path) and learn-only on the first
+  pass; the event records `{agent, path, category, source, ts}` — **never file contents**. Suites:
+  mac +9, linux +9.
+- **Phase 3a — DNS-query collection (default on).** A new best-effort DNS collector feeds a deduped
+  `dns_events` table (one row per distinct qname+qtype+process, `times_seen` bumped) for domain-level
+  threat hunting and to let Phase 3 key destinations on domains. It reads whatever DNS source the host
+  exposes — a local resolver query log on Linux (dnsmasq / Pi-hole / unbound) or the mDNSResponder
+  unified log on macOS — and scores the tunnelling/DGA shapes (TXT/NULL record types, over-long or
+  deeply-nested names, high-entropy labels) into graph nodes. **Honesty invariant:** `/api/dns` and the
+  fleet status always name the source or report `source: "none"`, so an empty table is never mistaken
+  for a quiet host. Default on (opt-out `--no-dns`, `--dns-interval` default 120s). qname/qtype/source
+  only — no response payloads. Suites: mac +17, linux +17.
+- **Phase 3 — Approved-destination baseline.** Extends the AI-lineage egress view into a per-agent
+  (keyed by agent program name, not ephemeral pid) learned set of destinations each agent normally
+  reaches. After the learn-only pass, an AI-lineage process connecting to an **external** destination
+  not in that agent's set — and not a catalogued LLM provider — raises **`ai-dest-unapproved`**
+  (medium, T1071/T1567), **escalating to high** when a new agent identity (Phase 1) also appeared in
+  the same window (new identity + new destination = the strongest unapproved-access signal). The
+  destination keys on the **domain** when a `dns_events` lookup can name the IP (so CDN address rotation
+  doesn't read as a new destination), falling back to the IP otherwise. Host/domain granularity only —
+  no port path or querystring — and private/loopback/link-local and known model APIs are excluded, so
+  ordinary model calls and internal traffic stay quiet. Suites: mac +7, linux +7.
+- **Phase 5 — Mesh fleet rollup + console.** A new whitelisted **`/api/agent-access-summary`** endpoint
+  relays the Agent Access Audit as **counts + scored findings only** — the full NHI / scope / destination
+  inventory stays on the host (in `/api/ai-surface`), and a credential value is never relayed. In Scouter
+  Mesh (0.7.67): the AI Surface fleet tab gains an **Agent Access Audit** panel (fleet tiles: agent
+  identities, exposed identities, excessive scopes, sensitive access, unapproved destinations) and a
+  **DNS** fleet view riding on the P3a `dns_events` table — per host it names the DNS source or reports
+  `none` (the honesty invariant: an empty table is never mistaken for a quiet host). The fleet Exposures
+  feed now derives the ai-access exposures (exposed credential, over-scoped identity, credential-store
+  access, new destination) from each host's inventory. `/api/dns` and `/api/agent-access-summary` added to
+  the relay whitelist. No new agent-push channel — version-robust and derived. Suites: mac +2, linux +2,
+  mesh unchanged (76).
+- **Phase 6 — Operator policy + reversible response.** An **optional** operator policy file
+  (`agent-access-policy.json`, gitignored runtime state like the baselines; see
+  `agent-access-policy.example.json`) turns "new vs. learned baseline" into a first-class
+  **approved / denied** verdict. A `default` block applies to every agent and a per-agent block
+  (keyed by program name, e.g. `claude`) extends it. Effects, all names/hosts/scopes only — a
+  credential value is still never read: an **approved** destination never raises `ai-dest-unapproved`
+  even when new; a **denied** destination raises it (high) even when baselined — denied beats approved;
+  an **approved identity** suppresses `ai-identity-new`; and a scope the operator declared within
+  `max_scope` suppresses `ai-scope-excessive`, while a scope that **exceeds** it fires as a policy
+  breach (`exceeds-max-scope`). With no policy file the audit behaves exactly as Phases 1–5. The
+  **reversible response** reuses the already-shipped active-response channel — no new destructive
+  capability: a denied/unapproved destination offers **`block_ip`** (target derived from the egress
+  IP), and an over-scoped identity wired into an MCP server offers the surgical reversible
+  **`quarantine_mcp`** (removes that one server entry, restorable from the ledger). Both are wired
+  into `recommend_response` / `derive_action_target` and the response registry gains `ai-access` to
+  their `applies` lists; the existing `ACTION_MIN_CONFIDENCE` floors keep `block_ip` (3) and
+  `quarantine_mcp` (2) proportional. The summary endpoints carry `policy_active`. Suites: mac +12,
+  linux +12, mesh unchanged (76). **Final totals: mac 426, linux 318, mesh 76.**
+
+### Performance — faster pivot to the Investigations tab (both agents)
+
+Opening Investigations no longer blocks on a synchronous full `build_graph()`. Three changes:
+- **`/api/incidents` stops forcing a rebuild.** It used to call `cache.get()` on every request, which
+  runs a full collection cycle (every collector + correlation + incident reconcile) whenever the ~3s
+  snapshot cache had lapsed — so clicking the tab could wait on an in-flight rebuild (profiled at up
+  to ~6s on a cold/busy host; the forced `build_graph()` itself is ~1s warm). The handler now serves
+  the already-reconciled `cache.incidents.list()` directly, rebuilding only on the very first request
+  (nothing reconciled yet) or when the operator hits **Refresh** (new `?refresh=1`). This is safe:
+  the 3s background snapshot poll keeps the incident store fresh, and every mutation updates the store
+  in place (`set_status`/`add_note`/… then `cache.invalidate()`), so edits still reflect immediately.
+- **The list payload drops `member_meta`.** The cards never read the per-member captured-alert blobs
+  (up to 400/incident); they're only used to inspect a member whose live node has aged out. The list
+  is now fetched `?compact=1`, and a single case's `member_meta` is pulled lazily via the new
+  **`/api/incidents?id=<case>`** only when such a member is actually opened — cutting the tab-open
+  payload sharply on hosts with deep incident history.
+- **The two tab-open fetches run in parallel.** `/api/alerts?all=1` (closed-member archive) and the
+  incident list no longer run one-after-the-other, so the cards paint as soon as the list returns.
+
+Backward compatible: bare `/api/incidents` still returns full `member_meta` (the Mesh single-host
+drill-in), and `?compact=1` is unchanged for the fleet view. No new builtin rules, no factory drift.
+
+### Console UI (both agents)
+
+- **Agent Access inventory in the AI Surface tab.** The AI Surface tab now renders the Phase 1/2/4
+  inventory directly, not just the scored exposure cards: a **Non-human identities** table (provider,
+  kind, path, permissions, scope, which agents use it) with `world-readable` / `other-writable`,
+  `over-broad` scope, `new`, and `secret-bearing` chips, and an **Agent file-reach** table of sensitive
+  access events (agent, path, category, source, when). A new **Identities** count tile joins the row.
+  Presence and permissions only — a credential value is never shown, same contract as the collector.
+- **Linux AI Surface parity.** The AI Surface pane (inventory, exposures, offensive-framework section,
+  MCP / egress / instruction-file tables, and the inventory panel above) is now in the Linux console,
+  matching macOS — previously macOS-only.
+- **Tab order.** Node Graph moved to just after AI Surface, and Hunt to just after Investigations, so
+  the AI-surface views sit together and the investigation flow reads left to right.
 
 ## [1.15.1] — 2026-11-18 (Linux agent only)
 

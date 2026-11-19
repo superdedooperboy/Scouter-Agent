@@ -164,7 +164,8 @@
    "icon": "\ud83d\udeab",
    "mode": "defensive",
    "applies": [
-    "remote"
+    "remote",
+    "ai-access"
    ],
    "backend": "native",
    "reversible": true,
@@ -223,7 +224,8 @@
    "icon": "\ud83d\udce6",
    "mode": "defensive",
    "applies": [
-    "ai-mcp"
+    "ai-mcp",
+    "ai-access"
    ],
    "backend": "native",
    "reversible": true,

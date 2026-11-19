@@ -1,0 +1,15 @@
+{
+  "_comment": "Agent Access Audit policy (P6). Copy to agent-access-policy.json to activate. OPTIONAL: with no policy file the audit runs on the learned baseline alone. A policy turns 'new vs. baseline' into approved / denied. Names, hosts and scopes only — a credential value is never read. 'default' applies to every agent; an 'agents' entry (keyed by the agent's program name, e.g. 'claude') extends the default for that one agent.",
+  "default": {
+    "approved_destinations": [".anthropic.com", "api.openai.com", "api.github.com"],
+    "denied_destinations": [],
+    "approved_identities": ["Anthropic", "GitHub:token"],
+    "max_scope": ["repo", "read:org"]
+  },
+  "agents": {
+    "claude": {
+      "approved_destinations": ["api.example-internal.test"],
+      "approved_identities": ["AWS:cloud-credentials"]
+    }
+  }
+}

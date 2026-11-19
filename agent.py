@@ -92,7 +92,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.15.0"
+__version__ = "1.16.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -436,6 +436,95 @@ SHELL_BASELINE_FILE = os.path.join(HERE, "shell-baseline.json")
 # identity between runs, so a CHANGE to a steering file or a NEWLY-ADDED MCP server is distinguishable
 # from what was already there. Stores hashes/identities only — never file content.
 AI_SURFACE_BASELINE_FILE = os.path.join(HERE, "ai-surface-baseline.json")
+
+# Agent Access Audit P6 — operator-defined policy. OPTIONAL: with no policy file the audit runs exactly
+# as P1–P5 (learned-baseline only, every target "unknown"). A policy turns "new vs. baseline" into a
+# first-class approved / denied verdict. Shape (all keys optional; "default" applies to every agent, an
+# "agents" entry extends it for one agent base name):
+#   {"default": {"approved_destinations": ["api.anthropic.com", ".github.com"],
+#                "denied_destinations": ["paste.ee"],
+#                "approved_identities": ["GitHub:token", "Anthropic"],
+#                "max_scope": ["repo", "read:org"]},
+#    "agents": {"claude": {"approved_destinations": ["api.example.com"]}}}
+# A destination pattern matches exactly, as a domain suffix (".github.com" ⊇ api.github.com), or "*";
+# an identity entry is "Provider" (any kind) or "Provider:kind". Values are never read — policy is about
+# names, hosts and scopes only, consistent with the rest of the feature.
+AGENT_ACCESS_POLICY_FILE = os.path.join(HERE, "agent-access-policy.json")
+
+
+def load_access_policy(path=AGENT_ACCESS_POLICY_FILE):
+    """Load the operator policy, or {} when absent/malformed (→ learned-baseline-only behaviour). Never
+    raises: a broken policy must not take the audit down, it just means 'no approvals declared'."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _policy_for(policy, agent):
+    """Merge the 'default' block with an agent-specific block (agent extends default)."""
+    merged = dict(policy.get("default") or {})
+    a = (policy.get("agents") or {}).get(agent or "") or {}
+    out = {}
+    for k in ("approved_destinations", "denied_destinations", "approved_identities", "max_scope"):
+        out[k] = list(merged.get(k) or []) + list(a.get(k) or [])
+    return out
+
+
+def _dest_match(pattern, dest):
+    """A destination pattern: '*' (any), a leading-dot domain suffix ('.github.com' matches
+    api.github.com AND github.com), or an exact host/IP. Case-insensitive."""
+    p, d = (pattern or "").strip().lower(), (dest or "").strip().lower()
+    if not p or not d:
+        return False
+    if p == "*":
+        return True
+    if p.startswith("."):
+        return d == p[1:] or d.endswith(p)
+    return d == p
+
+
+def policy_dest_verdict(policy, agent, dest):
+    """'approved' / 'denied' / 'unknown' for a destination under the policy. Denied wins over approved.
+    No policy → 'unknown' (so the learned-baseline logic decides)."""
+    if not policy:
+        return "unknown"
+    p = _policy_for(policy, agent)
+    if any(_dest_match(x, dest) for x in p["denied_destinations"]):
+        return "denied"
+    if any(_dest_match(x, dest) for x in p["approved_destinations"]):
+        return "approved"
+    return "unknown"
+
+
+def policy_identity_approved(policy, agent, provider, kind):
+    """True if the policy approves this identity ('Provider' or 'Provider:kind'), False if a policy
+    exists but doesn't list it, None if there is no policy (→ unknown)."""
+    if not policy:
+        return None
+    p = _policy_for(policy, agent)
+    prov, knd = (provider or "").lower(), (kind or "").lower()
+    for ent in p["approved_identities"]:
+        e = (ent or "").strip().lower()
+        if e and e in (prov, "%s:%s" % (prov, knd), "%s:*" % prov):
+            return True
+    return False
+
+
+def policy_scope_within_max(policy, agent, grants):
+    """True if every granted scope is within the policy's max_scope for this agent, False if it exceeds
+    it, None if no policy / no max_scope is declared (→ the learned 'broad' heuristic decides)."""
+    if not policy:
+        return None
+    mx = _policy_for(policy, agent)["max_scope"]
+    if not mx:
+        return None
+    allowed = {m.strip().lower() for m in mx}
+    return {(g or "").strip().lower() for g in (grants or [])}.issubset(allowed)
+
+
 SHELL_HISTORY_NAMES = (".zsh_history", ".bash_history")
 SHELL_SESSION_DIRS = (".zsh_sessions", ".bash_sessions")
 # (regex, label, ATT&CK, score) — first match wins, ordered highest-signal first.
@@ -8920,6 +9009,377 @@ def _ai_project_roots(limit=60):
     return roots
 
 
+# ---------------------------------------------------------------------------
+# Non-Human Identity (NHI) inventory — the credentials/identities an AI agent's tools can use.
+# (Agent Access Audit, Phase 1.) READ-ONLY and presence/path/mode/provider ONLY: credential VALUES
+# are NEVER read. The only things kept from a file are its posix mode and NON-SECRET structural labels
+# (profile names, registry hosts, kube contexts), each passed through _ai_audit_sanitize first.
+# ---------------------------------------------------------------------------
+
+# env-var name -> (provider, kind) for references that are not obviously a secret by name but DO name
+# an identity (a profile pointer, a path to a key file). Matched before the prefix/keyword test below.
+_NHI_ENV_EXACT = {
+    "GOOGLE_APPLICATION_CREDENTIALS": ("Google Cloud", "service-account"),
+    "AWS_PROFILE": ("AWS", "profile"),
+    "AWS_ACCESS_KEY_ID": ("AWS", "access-key"),
+    "KUBECONFIG": ("Kubernetes", "kubeconfig"),
+    "DATABASE_URL": ("Database", "connection-string"),
+}
+# longest-matching prefix -> provider, so GITHUB_TOKEN/GH_TOKEN both read as GitHub.
+_NHI_ENV_PREFIX = (
+    ("GITHUB_", "GitHub"), ("GH_", "GitHub"), ("GITLAB_", "GitLab"),
+    ("AWS_", "AWS"), ("AZURE_", "Azure"), ("GOOGLE_", "Google Cloud"), ("GCP_", "Google Cloud"),
+    ("GEMINI_", "Google Gemini"), ("OPENAI_", "OpenAI"), ("ANTHROPIC_", "Anthropic"),
+    ("HF_", "Hugging Face"), ("HUGGINGFACE_", "Hugging Face"), ("REPLICATE_", "Replicate"),
+    ("SLACK_", "Slack"), ("STRIPE_", "Stripe"), ("NOTION_", "Notion"), ("LINEAR_", "Linear"),
+    ("CLOUDFLARE_", "Cloudflare"), ("CF_", "Cloudflare"), ("SENTRY_", "Sentry"),
+    ("DOCKER_", "Docker"), ("NPM_", "npm"), ("PYPI_", "PyPI"), ("TWILIO_", "Twilio"),
+    ("SENDGRID_", "SendGrid"), ("JIRA_", "Jira"), ("ATLASSIAN_", "Atlassian"),
+    ("BRAVE_", "Brave Search"), ("TAVILY_", "Tavily"), ("PERPLEXITY_", "Perplexity"),
+    ("DIGITALOCEAN_", "DigitalOcean"), ("DO_", "DigitalOcean"), ("HEROKU_", "Heroku"),
+    ("VERCEL_", "Vercel"), ("SUPABASE_", "Supabase"), ("POSTGRES_", "Database"),
+    ("MYSQL_", "Database"), ("MONGODB_", "Database"), ("REDIS_", "Database"),
+)
+# a key NAMES a credential if it carries one of these tokens — same family as the audit scrubber.
+# (Bare "PWD" is deliberately excluded: it is the shell's working-directory variable, not a secret.)
+_NHI_CRED_RE = re.compile(r"(?i)(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|APIKEY|_API_|_AUTH)")
+
+
+def _nhi_kind_from_key(key):
+    k = key.upper()
+    if "APPLICATION_CREDENTIALS" in k:
+        return "service-account"
+    if "PASSWORD" in k or "PASSWD" in k or k.endswith("PWD"):
+        return "password"
+    if "SECRET" in k:
+        return "secret"
+    if "TOKEN" in k:
+        return "token"
+    if "KEY" in k:
+        return "api-key"
+    if "CREDENTIAL" in k:
+        return "credential"
+    return "auth"
+
+
+def classify_cred_env(key):
+    """(provider, kind) for a credential-bearing env-var NAME, or None if the name does not denote a
+    credential/identity. Never sees a value — the name alone is classified."""
+    if not key or not isinstance(key, str):
+        return None
+    if key in _NHI_ENV_EXACT:
+        return _NHI_ENV_EXACT[key]
+    ku = key.upper()
+    if not _NHI_CRED_RE.search(ku):
+        return None
+    prov = "Other"
+    for pre, p in _NHI_ENV_PREFIX:
+        if ku.startswith(pre):
+            prov = p
+            break
+    return (prov, _nhi_kind_from_key(ku))
+
+
+def _nhi_read_lines(path, cap=200_000, maxlines=400):
+    """Bounded, never-raising line read for light label parsing. Returns [] on any problem."""
+    try:
+        if os.path.getsize(path) > cap:
+            return []
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return [fh.readline() for _ in range(maxlines)]
+    except OSError:
+        return []
+
+
+# on-disk credential stores to inventory: (relpath-from-home, provider, kind, secret_bearing, labeler).
+# secret_bearing=True means the file holds a secret VALUE, so world-readable is a real exposure. The
+# labeler extracts NON-SECRET identity names from the file (or None to record presence only).
+def _labels_ini_sections(path):
+    # [profile] / [name] section headers — AWS credentials/config, .pypirc
+    out = []
+    for ln in _nhi_read_lines(path):
+        m = re.match(r"\s*\[([^\]]+)\]\s*$", ln)
+        if m:
+            out.append(m.group(1).strip())
+    return out
+
+
+def _labels_gh_hosts(path):
+    # top-level "host:" keys and "user:" values from gh hosts.yml — hostnames/usernames aren't secrets
+    out = []
+    for ln in _nhi_read_lines(path):
+        mh = re.match(r"^(\S+):\s*$", ln)
+        if mh and "." in mh.group(1):
+            out.append(mh.group(1))
+        mu = re.match(r"\s+user:\s*(\S+)\s*$", ln)
+        if mu:
+            out.append("user " + mu.group(1))
+    return out
+
+
+def _labels_kube_contexts(path):
+    out = []
+    for ln in _nhi_read_lines(path):
+        m = re.match(r"\s*-?\s*name:\s*(\S+)\s*$", ln)
+        if m:
+            out.append(m.group(1))
+    return out[:20]
+
+
+def _labels_netrc_machines(path):
+    out = []
+    for ln in _nhi_read_lines(path):
+        for m in re.finditer(r"\bmachine\s+(\S+)", ln):
+            out.append(m.group(1))
+    return out[:20]
+
+
+def _labels_docker_auths(path):
+    obj = _read_json_lenient(path)
+    if isinstance(obj, dict) and isinstance(obj.get("auths"), dict):
+        return list(obj["auths"].keys())[:20]
+    return []
+
+
+CREDENTIAL_STORES = [
+    (os.path.join(".aws", "credentials"), "AWS", "access-key", True, _labels_ini_sections),
+    (os.path.join(".aws", "config"), "AWS", "config", False, _labels_ini_sections),
+    (os.path.join(".config", "gh", "hosts.yml"), "GitHub", "oauth-token", True, _labels_gh_hosts),
+    (os.path.join(".config", "gcloud", "application_default_credentials.json"),
+     "Google Cloud", "adc", True, None),
+    (os.path.join(".config", "gcloud", "credentials.db"), "Google Cloud", "credential-store", True, None),
+    (os.path.join(".kube", "config"), "Kubernetes", "kubeconfig", True, _labels_kube_contexts),
+    (os.path.join(".docker", "config.json"), "Docker", "registry-auth", True, _labels_docker_auths),
+    (".npmrc", "npm", "auth-token", True, None),
+    (".pypirc", "PyPI", "password", True, _labels_ini_sections),
+    (".netrc", "netrc", "basic-auth", True, _labels_netrc_machines),
+    (os.path.join(".config", "doctl", "config.yaml"), "DigitalOcean", "api-token", True, None),
+]
+
+
+def scan_credential_stores(home=None, platform=None):
+    """Read-only inventory of well-known on-disk credential stores plus SSH private keys and the
+    platform keystore. One record per store: provider, kind, path, posix mode, world-readable flag,
+    writable-by-others flag, secret_bearing, and NON-SECRET labels. Never reads a credential value."""
+    home = home if home is not None else _ai_home()
+    platform = platform if platform is not None else sys.platform
+    out = []
+
+    def _add(path, provider, kind, secret, labels=()):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        mode = st.st_mode
+        labs = []
+        for l in labels or ():
+            s = _ai_audit_sanitize(str(l), home)
+            if s:
+                labs.append(s)
+        out.append({"provider": provider, "kind": kind, "source": path, "path": path,
+                    "present": True, "mode": oct(mode & 0o777),
+                    "world_readable": bool(mode & 0o044),
+                    "writable": _world_writable(path),
+                    "secret_bearing": bool(secret), "labels": labs,
+                    "used_by": [], "scope": None})
+
+    for rel, provider, kind, secret, labeler in CREDENTIAL_STORES:
+        path = os.path.join(home, rel)
+        if not os.path.isfile(path):
+            continue
+        labels = []
+        if labeler:
+            try:
+                labels = labeler(path)
+            except Exception:  # noqa: BLE001
+                labels = []
+        _add(path, provider, kind, secret, labels)
+
+    # SSH private keys — each id_* (not .pub) is an identity; expected 0600, so group/other-readable
+    # is the exposure the finding looks for.
+    ssh = os.path.join(home, ".ssh")
+    try:
+        for name in sorted(os.listdir(ssh)):
+            if name.endswith(".pub") or name in ("known_hosts", "known_hosts.old", "config",
+                                                 "authorized_keys"):
+                continue
+            if name.startswith("id_") or name.endswith(".pem") or name.endswith(".key"):
+                _add(os.path.join(ssh, name), "SSH", "private-key", True, [name])
+    except OSError:
+        pass
+
+    # platform keystore — presence only (never opened).
+    if platform == "darwin":
+        _add(os.path.join(home, "Library", "Keychains", "login.keychain-db"),
+             "Apple Keychain", "keychain", True)
+    else:
+        for rel, prov, kind in ((os.path.join(".local", "share", "keyrings"), "GNOME Keyring", "keyring"),
+                                (".password-store", "pass", "password-store")):
+            p = os.path.join(home, rel)
+            if os.path.exists(p):
+                _add(p, prov, kind, True)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Agent Access Audit P2 — scope reading. Best-effort and read-only. The granted scope of an identity is
+# read ONLY where the host already records it locally (a gcloud ADC file), or via a bounded, OPT-IN
+# `gh auth status` probe; everything else is reported as scope UNKNOWN, never guessed. scope_status:
+#   "read"    — we read the actual granted scopes (in `scope`)
+#   "unknown" — a scope exists but is not locally readable (cloud IAM, server-side RBAC, an opaque bearer
+#               token, or the gh probe is disabled). The operator MUST NOT read this as "no privilege".
+#   "none"    — this credential kind has no token-scope concept at all (an SSH key, a profile pointer…).
+# ---------------------------------------------------------------------------
+SCOUTER_SCOPE_PROBE_ENV = "SCOUTER_AGENT_SCOPE_PROBE"
+
+# per-provider grants that mean broad / administrative access.
+GH_BROAD_SCOPES = {"repo", "admin:org", "admin:enterprise", "admin:public_key", "admin:repo_hook",
+                   "admin:org_hook", "admin:gpg_key", "workflow", "delete_repo", "write:org",
+                   "user", "site_admin"}
+GCP_BROAD_SCOPE_MARKERS = ("cloud-platform",)   # substring: .../auth/cloud-platform == full access
+BROAD_SCOPE_TABLE = {"GitHub": GH_BROAD_SCOPES}
+
+# credential kinds that have no token-scope concept -> scope_status "none", never "unknown".
+_NHI_NO_SCOPE_KINDS = {"private-key", "profile", "config", "basic-auth",
+                       "keychain", "keyring", "password-store", "registry-auth"}
+
+
+def read_gcp_adc_scopes(path):
+    """Granted OAuth scopes from a gcloud application-default-credentials JSON, or None when the file
+    has no scopes array (a bare service-account key, whose scope is IAM-defined and not in the file).
+    Reads only the `scopes` array — never a token or private-key value."""
+    obj = _read_json_lenient(path)
+    if not isinstance(obj, dict):
+        return None
+    scopes = obj.get("scopes")
+    if isinstance(scopes, list) and all(isinstance(s, str) for s in scopes):
+        return scopes
+    return None
+
+
+def probe_github_scopes(env_value=None):
+    """OPT-IN (SCOUTER_AGENT_SCOPE_PROBE): ask `gh auth status` for the active token's scopes. Returns a
+    sorted scope list, or None when the probe is disabled, gh is absent, or no scope line is present.
+    The token value is never captured (gh does not print it without --show-token)."""
+    val = env_value if env_value is not None else os.environ.get(SCOUTER_SCOPE_PROBE_ENV, "")
+    if (val or "").strip().lower() in ("", "0", "false", "no", "off"):
+        return None
+    if not shutil.which("gh"):
+        return None
+    _rc, out, err = run(["gh", "auth", "status"], timeout=8)
+    text = (out or "") + "\n" + (err or "")      # some gh versions print status to stderr
+    m = re.search(r"(?im)^.*Token scopes:\s*(.+)$", text)
+    if not m:
+        return None
+    scopes = re.findall(r"[A-Za-z][A-Za-z0-9:_\-]*", m.group(1))
+    return sorted(set(scopes)) or None
+
+
+def classify_scope_breadth(provider, scopes):
+    """(broad: bool, broad_grants: list) for a provider's granted scopes against the broad-scope table."""
+    if not scopes:
+        return (False, [])
+    if provider == "Google Cloud":
+        broad = [s for s in scopes if any(b in s for b in GCP_BROAD_SCOPE_MARKERS)]
+    else:
+        table = BROAD_SCOPE_TABLE.get(provider, set())
+        broad = [s for s in scopes if s in table]
+    return (bool(broad), broad)
+
+
+# ---------------------------------------------------------------------------
+# Agent Access Audit P4 — agent file-reach / credential-access audit. When a process in an AI agent's
+# lineage touches a credential store, key, or browser secret DB, that is an access event even when the
+# command is otherwise benign (today it is silent unless the command trips a dangerous-command rule).
+# Record {agent, path, category, source, ts} ONLY — never file contents, never the secret.
+# ---------------------------------------------------------------------------
+SCOUTER_FD_PROBE_ENV = "SCOUTER_AGENT_FD_PROBE"   # macOS opt-in: lsof running agents (no /proc there)
+
+# (path marker, category, ATT&CK). Each marker carries a slash so it matches a path segment, not a word.
+SENSITIVE_ACCESS_MARKERS = (
+    ("/.aws/credentials", "cloud-credentials", "T1552.001"),
+    ("/.config/gcloud/", "cloud-credentials", "T1552.001"),
+    ("/.config/gh/hosts.yml", "vcs-token", "T1552.001"),
+    ("/.kube/config", "kubeconfig", "T1552.001"),
+    ("/.docker/config.json", "registry-auth", "T1552.001"),
+    ("/.ssh/id_", "ssh-key", "T1552.004"),
+    ("/.ssh/authorized_keys", "ssh-authorized-keys", "T1098.004"),
+    ("/.netrc", "netrc", "T1552.001"),
+    ("/.npmrc", "package-token", "T1552.001"),
+    ("/.pypirc", "package-token", "T1552.001"),
+    ("/Login Data", "browser-passwords", "T1555.003"),
+    ("/logins.json", "browser-passwords", "T1555.003"),
+    ("/key4.db", "browser-passwords", "T1555.003"),
+    ("/Cookies", "browser-cookies", "T1539"),
+    ("/cookies.sqlite", "browser-cookies", "T1539"),
+    ("login.keychain", "keychain", "T1555.001"),
+    ("/.password-store/", "password-store", "T1555"),
+    ("/.local/share/keyrings/", "keyring", "T1555"),
+)
+
+
+def match_sensitive_path(path):
+    """(category, ATT&CK) if `path` is a known credential/secret store, else None."""
+    if not path:
+        return None
+    for marker, cat, mitre in SENSITIVE_ACCESS_MARKERS:
+        if marker in path:
+            return (cat, mitre)
+    return None
+
+
+def _iter_proc_fds(pid, cap=512):
+    """Yield the targets of <pid>'s open fds (Linux /proc). Read-only, bounded, never raises."""
+    d = "/proc/%d/fd" % pid
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for i, name in enumerate(names):
+        if i >= cap:
+            break
+        try:
+            yield os.readlink(os.path.join(d, name))
+        except OSError:
+            continue
+
+
+def _lsof_paths(pid, cap=512):
+    """macOS opt-in fallback: regular-file paths held open by <pid>, via lsof. Bounded, never raises."""
+    _rc, out, _err = run(["lsof", "-p", str(pid), "-Fn"], timeout=6)
+    for i, line in enumerate((out or "").splitlines()):
+        if i >= cap * 2:
+            break
+        if line.startswith("n/"):
+            yield line[1:]
+
+
+def ai_lineage_map(procs, ai_pids, ai_bases, maxdepth=16):
+    """{pid: responsible_agent_base} for every process that IS an AI agent/runtime/offensive framework
+    or descends from one. Walks ppid chains, bounded and loop-safe. The value is the AI ancestor's
+    program basename, so an access event can name which agent is responsible."""
+    def base_of(p):
+        return (os.path.basename((p.get("exe") or "").strip())
+                or os.path.basename((p.get("cmdline") or "").split(" ")[0])).lower()
+    out = {}
+    for pid in procs:
+        cur, depth, seen, resp = pid, 0, set(), None
+        while cur and cur not in seen and depth < maxdepth:
+            seen.add(cur)
+            cp = procs.get(cur)
+            if cp is None:
+                break
+            b = base_of(cp)
+            if cur in ai_pids or b in ai_bases:
+                resp = b
+                break
+            cur = cp.get("ppid")
+            depth += 1
+        if resp:
+            out[pid] = resp
+    return out
+
+
 # Agent instruction / rules files: (relative glob, product). Captured as hash+mtime only.
 AI_CONTEXT_FILES = [
     ("CLAUDE.md", "Claude Code"),
@@ -9083,20 +9543,24 @@ class AISurfaceCollector:
     NPX_FETCHERS = ("npx", "npx.cmd", "uvx", "bunx", "pnpm", "pnpx", "dlx", "deno")
 
     def __init__(self, enabled=True, interval=600, endpoints=None, context_roots=None,
-                 baseline_file=AI_SURFACE_BASELINE_FILE):
+                 baseline_file=AI_SURFACE_BASELINE_FILE, history=None,
+                 policy_file=AGENT_ACCESS_POLICY_FILE):
         self.enabled = enabled
         self.interval = max(60, interval)
         self.endpoints = endpoints        # LLMEndpointFeed (optional)
+        self.history = history            # HistoryDB (optional) — P3 uses dns_events for IP→domain
+        self.policy_file = policy_file    # P6 operator policy (optional); reloaded each scan
+        self.policy = load_access_policy(policy_file) if policy_file else {}
         self.extra_roots = list(context_roots or [])
         self.lock = threading.Lock()
         self.items = {}                   # scored finding nodes only
         self.inv = {}                     # full inventory (for meta + /api/ai-surface)
         self.started = False
-        # Phase 4 integrity baseline: {"context": {path: sha256}, "mcp": [identity, ...]}. First run is
-        # learn-only (records what's there, raises nothing), so a change/new flags only against a
-        # previously-seen state — never on the very first scan.
+        # Integrity baseline: {"context": {path: sha256}, "mcp": [identity, ...], "nhi": [identity, ...]}.
+        # First run is learn-only (records what's there, raises nothing), so a change/new flags only
+        # against a previously-seen state — never on the very first scan.
         self.baseline_file = baseline_file
-        self.baseline = {"context": {}, "mcp": []}
+        self.baseline = {"context": {}, "mcp": [], "nhi": [], "access": [], "dest": []}
         self.learn_only = True
         self._load_baseline()
 
@@ -9108,14 +9572,22 @@ class AISurfaceCollector:
                 d = json.load(f)
             if isinstance(d, dict):
                 self.baseline = {"context": dict(d.get("context") or {}),
-                                 "mcp": list(d.get("mcp") or [])}
-                self.learn_only = not (self.baseline["context"] or self.baseline["mcp"])
+                                 "mcp": list(d.get("mcp") or []),
+                                 "nhi": list(d.get("nhi") or []),
+                                 "access": list(d.get("access") or []),
+                                 "dest": list(d.get("dest") or [])}
+                self.learn_only = not (self.baseline["context"] or self.baseline["mcp"]
+                                       or self.baseline["nhi"] or self.baseline["access"]
+                                       or self.baseline["dest"])
         except (OSError, ValueError):
-            self.baseline = {"context": {}, "mcp": []}
+            self.baseline = {"context": {}, "mcp": [], "nhi": [], "access": [], "dest": []}
 
-    def _save_baseline(self, context, mcp):
+    def _save_baseline(self, context, mcp, nhi, access, dest):
         self.baseline = {"context": {c["path"]: c["sha256"] for c in context if c.get("sha256")},
-                         "mcp": sorted({self._mcp_identity(s) for s in mcp})}
+                         "mcp": sorted({self._mcp_identity(s) for s in mcp}),
+                         "nhi": sorted({self._nhi_identity(r) for r in nhi}),
+                         "access": sorted({self._access_identity(a) for a in access}),
+                         "dest": sorted({self._dest_identity(d) for d in dest})}
         self.learn_only = False
         if not self.baseline_file:
             return
@@ -9134,6 +9606,189 @@ class AISurfaceCollector:
         return "|".join(str(x) for x in (s.get("client", ""), s.get("name", ""),
                                           s.get("transport", ""),
                                           s.get("url_host", "") or s.get("command", "")))
+
+    @staticmethod
+    def _nhi_identity(r):
+        """Stable identity for a non-human identity across runs: provider + kind + source. A new one
+        appearing after the learn-only pass is an ai-identity-new finding."""
+        return "|".join((r.get("provider", ""), r.get("kind", ""), r.get("source", "")))
+
+    @staticmethod
+    def _access_identity(a):
+        """Stable identity for a sensitive-access event: which agent touched which path. A new pair
+        after the learn-only pass is an ai-access-sensitive finding."""
+        return "%s|%s" % (a.get("agent", ""), a.get("path", ""))
+
+    @staticmethod
+    def _dest_identity(d):
+        """Stable identity for an egress destination: which agent reached which destination (a domain
+        where DNS could resolve it, else the IP). A new pair after learn-only is an ai-dest-unapproved
+        finding — keyed on the domain, not the IP, so CDN address rotation does not look like a new dest."""
+        return "%s|%s" % (d.get("agent", ""), d.get("dest", ""))
+
+    @staticmethod
+    def _mcp_target(r):
+        """P6: the MCP server wired to this identity, as response-target fields, or {} when the identity
+        isn't an MCP env var. Lets an over-scoped / exposed identity offer a reversible quarantine of the
+        exact server that uses it (reusing the shipped MCP-quarantine channel)."""
+        refs = r.get("mcp_refs") or []
+        if not refs:
+            return {}
+        ref = refs[0]
+        return {"mcp_path": ref.get("path"), "mcp_server": ref.get("server"),
+                "mcp_client": ref.get("client", "")}
+
+    @staticmethod
+    def _nhi_admin_ish(r):
+        """A new identity is medium (not low) when it reads as broadly privileged by name — an admin/
+        owner/root label, or a service-account (which commonly carries wide cloud scope)."""
+        if r.get("kind") == "service-account":
+            return True
+        hay = " ".join([r.get("source", "")] + list(r.get("labels") or [])).lower()
+        return any(w in hay for w in ("admin", "owner", "root", "superuser"))
+
+    # -- Agent Access Audit P1: the identities each agent's tools can authenticate with ----------
+    def _gather_nhi(self, mcp):
+        """Inventory the non-human identities reachable on this host: the credential-named env vars
+        wired into each MCP server (attributed to that server), and the well-known on-disk credential
+        stores + SSH keys + platform keystore. Presence / provider / path / mode only — never a value."""
+        identities = {}
+        for s in mcp:
+            tag = f"{s.get('client', '')}/{s.get('name', '')}"
+            for k in s.get("env_keys", []):
+                cl = classify_cred_env(k)
+                if not cl:
+                    continue
+                prov, kind = cl
+                key = f"env|{prov}|{kind}|{k}"
+                rec = identities.setdefault(key, {
+                    "provider": prov, "kind": kind, "source": f"env:{k}", "path": "",
+                    "present": True, "mode": "", "world_readable": False, "writable": False,
+                    "secret_bearing": True, "labels": [k], "used_by": [], "scope": None,
+                    "mcp_refs": []})
+                if tag.strip("/") and tag not in rec["used_by"]:
+                    rec["used_by"].append(tag)
+                # P6: remember the MCP server(s) wired to this identity, so an over-scoped/exposed
+                # identity can offer a reversible quarantine of the exact server that uses it.
+                if s.get("source") and s.get("name"):
+                    ref = {"path": s["source"], "server": s["name"], "client": s.get("client", "")}
+                    if ref not in rec["mcp_refs"]:
+                        rec["mcp_refs"].append(ref)
+        try:
+            for rec in scan_credential_stores():
+                identities[f"file|{rec['provider']}|{rec['kind']}|{rec['source']}"] = rec
+        except Exception:  # noqa: BLE001
+            pass
+        return sorted(identities.values(),
+                      key=lambda r: (r["provider"], r["kind"], r["source"]))
+
+    # -- Agent Access Audit P2: the granted scope of each identity, where locally readable -------
+    def _annotate_scopes(self, nhi):
+        """Fill each NHI record's scope / scope_status / scope_broad fields. Scopes are read only where
+        the host records them locally (GCP ADC) or via the opt-in gh probe; everything else is reported
+        as unknown (a scope exists, unreadable) or none (the kind has no scope concept) — never guessed."""
+        gh_scopes = probe_github_scopes()         # None unless SCOUTER_AGENT_SCOPE_PROBE is on
+        for r in nhi:
+            provider, kind = r.get("provider"), r.get("kind")
+            scopes, status = None, "unknown"
+            if kind in _NHI_NO_SCOPE_KINDS:
+                status = "none"
+            elif provider == "Google Cloud" and kind == "adc" and r.get("path"):
+                s = read_gcp_adc_scopes(r["path"])
+                if s is not None:
+                    scopes, status = s, "read"
+            elif provider == "GitHub" and gh_scopes is not None:
+                scopes, status = gh_scopes, "read"
+            broad, grants = classify_scope_breadth(provider, scopes)
+            r["scope"] = scopes
+            r["scope_status"] = status
+            r["scope_broad"] = broad
+            r["scope_broad_grants"] = grants
+        return nhi
+
+    # -- Agent Access Audit P4: credential/secret files touched by a process in an AI agent's lineage.
+    def _gather_access(self, procs, ai_pids, ai_bases):
+        """Return [{agent, pid, path, category, mitre, source, ts}] for every sensitive-path access by an
+        AI-lineage process. Linux reads /proc/<pid>/fd; macOS uses the opt-in lsof fallback (no /proc)
+        plus a cross-platform cmdline check for short-lived reads a tick would miss. Paths only — never
+        contents."""
+        lineage = ai_lineage_map(procs, ai_pids, ai_bases)
+        deep = (os.environ.get(SCOUTER_FD_PROBE_ENV) or "").strip().lower() \
+            not in ("", "0", "false", "no", "off")
+        events, now = {}, int(time.time())
+
+        def _emit(agent_base, pid, path, cat, mitre, src):
+            key = f"{agent_base}|{path}"
+            if key not in events:
+                events[key] = {"agent": agent_base, "pid": pid, "path": path, "category": cat,
+                               "mitre": mitre, "source": src, "ts": now}
+
+        for pid, agent_base in lineage.items():
+            p = procs.get(pid, {})
+            cmd = p.get("cmdline") or ""
+            # cross-platform: a sensitive path named on the command line
+            for marker, cat, mitre in SENSITIVE_ACCESS_MARKERS:
+                idx = cmd.find(marker)
+                if idx != -1:
+                    seg = cmd[max(0, idx - 64):idx + len(marker) + 64].split()
+                    tok = next((t for t in seg if marker in t), marker)
+                    _emit(agent_base, pid, tok, cat, mitre, "cmdline")
+            # open file descriptors (Linux /proc, else opt-in macOS lsof)
+            if os.path.isdir("/proc/%d/fd" % pid):
+                paths = _iter_proc_fds(pid)
+            elif deep and sys.platform == "darwin" and shutil.which("lsof"):
+                paths = _lsof_paths(pid)
+            else:
+                paths = ()
+            for tgt in paths:
+                m = match_sensitive_path(tgt)
+                if m:
+                    _emit(agent_base, pid, tgt, m[0], m[1], "fd")
+        return sorted(events.values(), key=lambda a: (a["agent"], a["path"]))
+
+    # -- Agent Access Audit P3: approved-destination baseline ------------------------------------
+    def _dns_ip_domain_map(self, days=7, cap=20000):
+        """{resolved_ip: qname} from recent dns_events, so a connection to an IP can be named by the
+        domain the agent actually looked up. Only rows whose source captured the answer IP contribute;
+        most resolver logs don't, so this is a best-effort enrichment that keys a destination on its
+        domain when possible and silently falls back to the IP when not."""
+        if not self.history:
+            return {}
+        out = {}
+        try:
+            for r in self.history.recent_dns(days=days, limit=cap):
+                ip, qn = r.get("resolved_ip"), r.get("qname")
+                if ip and qn and qn != "<private>":
+                    out.setdefault(ip, qn)
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+
+    def _gather_destinations(self, procs, net, ai_pids, ai_bases, llm_ipmap, dns_ipmap):
+        """[{agent, dest, kind, raddr, rport, pid}] for every EXTERNAL destination an AI-lineage process
+        is currently connected to that is NOT a known LLM provider. The agent is the responsible AI
+        ancestor's basename (so the baseline is per-agent, not per-ephemeral-pid); the destination is the
+        looked-up domain where DNS can name the IP, else the IP itself. Private/loopback/link-local and
+        catalogued model-API endpoints are excluded, so ordinary model calls and internal traffic are
+        quiet — only a new outbound destination for that agent surfaces. Host/domain granularity only
+        (no port path, no querystring), consistent with the no-token-capture rule."""
+        lineage = ai_lineage_map(procs, ai_pids, ai_bases)
+        out = {}
+        for pid, agent_base in lineage.items():
+            for c in net.get(pid, []):
+                ra = c.get("raddr") or ""
+                if not ra or is_private_ip(ra):      # external, routable destinations only
+                    continue
+                if ra in llm_ipmap:                  # a catalogued LLM provider = expected, excluded
+                    continue
+                domain = dns_ipmap.get(ra)
+                dest = domain or ra
+                key = "%s|%s" % (agent_base, dest)
+                if key not in out:
+                    out[key] = {"agent": agent_base, "dest": dest,
+                                "kind": "domain" if domain else "ip",
+                                "raddr": ra, "rport": c.get("rport", ""), "pid": pid}
+        return sorted(out.values(), key=lambda d: (d["agent"], d["dest"]))
 
     def start(self):
         if not self.enabled or self.started:
@@ -9165,12 +9820,51 @@ class AISurfaceCollector:
                     "hidden_instructions": sum(1 for c in inv.get("context", []) if c.get("hidden")),
                     "changed_context": sum(1 for c in inv.get("context", []) if c.get("changed")),
                     "new_mcp": sum(1 for s in inv.get("mcp", []) if s.get("new_since_baseline")),
+                    "nhi": len(inv.get("nhi", [])),
+                    "exposed_identities": sum(1 for r in inv.get("nhi", [])
+                                              if r.get("path") and (r.get("writable")
+                                              or (r.get("secret_bearing") and r.get("world_readable")))),
+                    "new_identities": sum(1 for r in inv.get("nhi", [])
+                                          if r.get("new_since_baseline")),
+                    "excessive_scopes": sum(1 for r in inv.get("nhi", []) if r.get("scope_broad")),
+                    "access": len(inv.get("access", [])),
+                    "new_access": sum(1 for a in inv.get("access", []) if a.get("new_since_baseline")),
+                    "dest": len(inv.get("dest", [])),
+                    "new_dest": sum(1 for d in inv.get("dest", []) if d.get("new_since_baseline")),
+                    "policy_active": bool(self.policy),
                     "endpoints": inv.get("endpoints", {}),
                     "flagged": len(self.items)}
 
     def detail(self):
         with self.lock:
             return {"enabled": True, **self.inv, "flagged": len(self.items)}
+
+    def access_summary(self):
+        """Agent Access Audit (P5): the COUNTS-ONLY + scored-findings surface the Mesh fans across the
+        fleet. The full NHI/access/destination INVENTORY stays on the host (in /api/ai-surface); this
+        relay carries per-category tallies and the scored ai-access findings (which name the exposed
+        path or destination the operator must act on), never the identity inventory and never a value."""
+        with self.lock:
+            c = self.inv.get("counts", {})
+            finds = [n for n in self.items.values()
+                     if n.get("detail", {}).get("category") == "ai-access"]
+            out = {"enabled": True,
+                   "generated": self.inv.get("generated"),
+                   "policy_active": bool(self.policy),
+                   "counts": {k: c.get(k, 0) for k in (
+                       "nhi", "exposed_identities", "new_identities", "excessive_scopes",
+                       "access", "new_access", "dest", "new_dest")},
+                   "findings": [{"id": n["id"], "label": n["label"], "severity": n["severity"],
+                                 "finding": n["detail"].get("finding"),
+                                 "mitre": (n["reasons"][0]["mitre"] if n.get("reasons") else None),
+                                 "agent": n["detail"].get("agent"),
+                                 "provider": n["detail"].get("provider"),
+                                 "kind": n["detail"].get("kind"),
+                                 "path": n["detail"].get("path"),
+                                 "dest": n["detail"].get("dest"),
+                                 "policy": n["detail"].get("policy")}
+                                for n in finds]}
+        return out
 
     @staticmethod
     def _finding(ntype, key, label, score, mitre, txt, detail):
@@ -9474,6 +10168,8 @@ class AISurfaceCollector:
     def _endpoint_ip_map(self):
         """Resolve the known LLM endpoint hosts to a {ip: provider} map, cached ~1h and
         timeout-bounded. Best-effort: resolution failures just shrink the map."""
+        if not self.endpoints:
+            return {}
         now = time.time()
         if self._IPCACHE["map"] and now - self._IPCACHE["ts"] < 3600:
             return self._IPCACHE["map"]
@@ -9493,6 +10189,8 @@ class AISurfaceCollector:
         return ipmap
 
     def _collect(self):
+        if self.policy_file:            # P6: reload the operator policy each scan so edits take effect
+            self.policy = load_access_policy(self.policy_file)
         procs = collect_processes()
         net = collect_network()
         agents = self._gather_agents(procs)
@@ -9500,6 +10198,7 @@ class AISurfaceCollector:
         offensive = self._gather_offensive(procs, net)
         mcp = self._gather_mcp()
         context = self._gather_context()
+        nhi = self._annotate_scopes(self._gather_nhi(mcp))
         # the AI inventory is the allow-list for the egress baseline: a catalogued agent/runtime/
         # offensive-framework reaching an LLM endpoint is EXPECTED (it is an AI tool), so its own LLM
         # calls never read as a LAMEHUG egress anomaly — the framework itself is flagged separately.
@@ -9509,6 +10208,11 @@ class AISurfaceCollector:
         ai_bases = set(AI_AGENT_CLIS) | set(AI_RUNTIMES) \
             | {p for meta in AI_OFFENSIVE_FRAMEWORKS.values() for p in meta["procs"]}
         egress = self._gather_egress(procs, net, ai_pids, ai_bases)
+        access = self._gather_access(procs, ai_pids, ai_bases)
+        # P3: per-agent approved-destination baseline. llm_ipmap (the catalogued model APIs) is the
+        # allow-list; dns_ipmap names an IP by the domain the agent looked up, when a resolver logged it.
+        dest = self._gather_destinations(procs, net, ai_pids, ai_bases,
+                                         self._endpoint_ip_map() or {}, self._dns_ip_domain_map())
         # A host explicitly marked a pentest box downgrades the 1.15 offensive findings (framework +
         # offensive-MCP) to advisory (score 0) — listed, not alarmed. Computed once, used below.
         pentest_host = (os.environ.get(AI_OFFENSIVE_ALLOWLIST_ENV) or "").strip().lower() \
@@ -9520,6 +10224,9 @@ class AISurfaceCollector:
         # run nothing is marked changed/new.
         base_ctx = self.baseline.get("context", {})
         base_mcp = set(self.baseline.get("mcp", []))
+        base_nhi = set(self.baseline.get("nhi", []))
+        base_access = set(self.baseline.get("access", []))
+        base_dest = set(self.baseline.get("dest", []))
         for c in context:
             prev = base_ctx.get(c["path"])
             c["changed"] = bool(prev and c.get("sha256") and prev != c["sha256"])
@@ -9527,6 +10234,23 @@ class AISurfaceCollector:
         for s in mcp:
             s["new_since_baseline"] = bool(not self.learn_only
                                            and self._mcp_identity(s) not in base_mcp)
+        for r in nhi:
+            r["new_since_baseline"] = bool(not self.learn_only
+                                           and self._nhi_identity(r) not in base_nhi)
+            # P6: policy verdict for the identity (used by nhi-new) and scope (used by scope-excessive).
+            r["policy_identity"] = policy_identity_approved(
+                self.policy, (r.get("used_by") or [""])[0].split("/")[0], r.get("provider"), r.get("kind"))
+            r["policy_scope_ok"] = policy_scope_within_max(
+                self.policy, (r.get("used_by") or [""])[0].split("/")[0], r.get("scope_broad_grants"))
+        for a in access:
+            a["new_since_baseline"] = bool(not self.learn_only
+                                           and self._access_identity(a) not in base_access)
+        for d in dest:
+            d["new_since_baseline"] = bool(not self.learn_only
+                                           and self._dest_identity(d) not in base_dest)
+            # P6: a policy verdict overrides the learned baseline — an approved destination never fires
+            # (even when new), a denied one always fires (even when baselined).
+            d["policy"] = policy_dest_verdict(self.policy, d.get("agent"), d.get("dest"))
 
         items = {}
         # F4(config): one finding per world-writable MCP config FILE (the file is the exposure,
@@ -9688,24 +10412,170 @@ class AISurfaceCollector:
                  "allowlisted": pentest_host})
             items[n["id"]] = n
 
+        # -- Agent Access Audit P1: non-human-identity findings. Inventory-don't-alarm — the full NHI
+        # list lives in inv/meta; severity appears only for A1 (a secret-bearing credential file an
+        # agent could use is world-readable or writable by others) and A2 (a NEW identity since the
+        # learn-only baseline). Values are never read, so these are posture/exposure findings, not
+        # value disclosures.
+        for r in nhi:
+            if r.get("path") and (r.get("writable")
+                                  or (r.get("secret_bearing") and r.get("world_readable"))):
+                how = "writable by other users" if r.get("writable") else \
+                    f"readable by any user on this host (mode {r.get('mode', '?')})"
+                labs = (" [" + ", ".join(r["labels"][:4]) + "]") if r.get("labels") else ""
+                n = self._finding(
+                    "ai-access", f"nhi-exposed:{r['source']}".replace(" ", "_"),
+                    f"Agent-usable credential exposed: {r['provider']} ({os.path.basename(r['source'])})",
+                    70, "T1552.001",
+                    f"{r['source']} holds a {r['provider']} {r['kind']} credential and is {how}{labs}. "
+                    "Any local user — or an AI agent running as one — can read or replace it and "
+                    "authenticate as this identity. Tighten it to owner-only (chmod 600).",
+                    {"category": "ai-access", "finding": "nhi-exposed", "provider": r["provider"],
+                     "kind": r["kind"], "path": r["source"], "mode": r.get("mode", ""),
+                     "world_readable": r.get("world_readable", False),
+                     "writable": r.get("writable", False), "labels": r.get("labels", []),
+                     "used_by": r.get("used_by", []), **self._mcp_target(r)})
+                items[n["id"]] = n
+        for r in nhi:
+            if not r.get("new_since_baseline"):
+                continue
+            if r.get("policy_identity") is True:   # P6: operator pre-approved this identity → not new-news
+                continue
+            admin = self._nhi_admin_ish(r)
+            score = 45 if admin else 25
+            used = (" wired into " + ", ".join(r["used_by"][:3])) if r.get("used_by") else ""
+            labs = (" [" + ", ".join(r["labels"][:4]) + "]") if r.get("labels") else ""
+            # P6: with a policy present, a new identity that is NOT on the approved list is "unapproved"
+            # (not merely unknown) — say so and lift it to medium so the operator sees a policy breach.
+            unapproved = (r.get("policy_identity") is False)
+            if unapproved and score < 45:
+                score = 45
+            n = self._finding(
+                "ai-access", f"nhi-new:{r['source']}".replace(" ", "_"),
+                f"New agent identity: {r['provider']} {r['kind']}", score, "T1078.004",
+                f"A {r['provider']} {r['kind']} identity ({r['source']}){used} appeared on this host "
+                f"since the last baseline{labs}." + (
+                    " It is NOT on the approved-identity policy for this agent." if unapproved else
+                    (" It reads as broadly privileged — confirm the scope is intended."
+                     if admin else " Confirm this identity and its access were approved.")),
+                {"category": "ai-access", "finding": "nhi-new", "provider": r["provider"],
+                 "kind": r["kind"], "source": r["source"], "path": r.get("path", ""),
+                 "admin_ish": admin, "labels": r.get("labels", []),
+                 "used_by": r.get("used_by", []),
+                 "policy": ("unapproved" if unapproved else "unknown")})
+            items[n["id"]] = n
+        # -- Agent Access Audit P2: an identity whose readable scope is broad/administrative. High when
+        # it is wired into an agent (an agent can authenticate with it right now); medium when dormant.
+        # Only fires where the scope was actually READ — never on scope_status unknown/none.
+        for r in nhi:
+            # Fire when the READ scope is broad (the P2 heuristic) OR the policy says it exceeds max_scope.
+            # A policy that declares the scope within max_scope SUPPRESSES it, even if the heuristic
+            # thought it broad — the operator has made the call.
+            within = r.get("policy_scope_ok")
+            if within is True:
+                continue
+            breach = (within is False)
+            if not (r.get("scope_broad") or breach):
+                continue
+            grants = ", ".join(r.get("scope_broad_grants") or [])
+            active = bool(r.get("used_by"))
+            score = 70 if active else 45
+            where = (" — used by " + ", ".join(r["used_by"][:3])) if active else \
+                " (not currently wired to an agent)"
+            n = self._finding(
+                "ai-access", f"scope-excessive:{r['source']}".replace(" ", "_"),
+                f"Over-scoped agent identity: {r['provider']} grants {grants}", score, "T1098",
+                f"The {r['provider']} {r['kind']} at {r['source']} carries broad / administrative "
+                f"scope [{grants}]{where}. An AI agent authenticating with it inherits that access — far "
+                "more than a task needs." + (
+                    " This exceeds the max_scope policy for this agent." if breach else
+                    " Reissue it with least-privilege scopes."),
+                {"category": "ai-access", "finding": "scope-excessive", "provider": r["provider"],
+                 "kind": r["kind"], "source": r["source"], "scope": r.get("scope"),
+                 "broad_grants": r.get("scope_broad_grants", []), "active": active,
+                 "used_by": r.get("used_by", []),
+                 "policy": ("exceeds-max-scope" if breach else "unknown"), **self._mcp_target(r)})
+            items[n["id"]] = n
+        # -- Agent Access Audit P4: a process in an AI agent's lineage touched a credential store, key
+        # or browser secret DB. The full access list lives in inv/meta; the scored finding is a NEW
+        # (agent, path) pair since the learn-only baseline — so an agent's routine, approved reads are
+        # learned and stay quiet, and a first-time reach at a secret is what surfaces. Path only.
+        for a in access:
+            if not a.get("new_since_baseline"):
+                continue
+            n = self._finding(
+                "ai-access", f"access:{a['agent']}:{a['path']}".replace(" ", "_"),
+                f"AI agent accessed a credential store: {a['agent']} → {os.path.basename(a['path'])}",
+                70, a.get("mitre", "T1552.001"),
+                f"The process {a['agent']} (in an AI agent's lineage) accessed {a['path']} "
+                f"({a['category'].replace('-', ' ')}) via {a['source']} — a credential/secret store it "
+                "had not touched before this baseline. An agent reading a key, token or browser secret "
+                "store is credential access whether or not the command itself looked malicious. Confirm "
+                "the agent is meant to use this identity.",
+                {"category": "ai-access", "finding": "access-sensitive", "agent": a["agent"],
+                 "path": a["path"], "access_category": a["category"], "source": a["source"],
+                 "pid": a.get("pid")})
+            items[n["id"]] = n
+        # -- Agent Access Audit P3: an AI-lineage process reached an external destination (domain where
+        # DNS could name it, else IP) it had not used before the learn-only baseline and that is not a
+        # catalogued LLM provider. Medium by default; escalates to high when a NEW agent identity also
+        # appeared in this window — a new identity reaching a new destination is the strongest
+        # unapproved-access signal. Deduped per (agent, destination); domain/host granularity only.
+        new_identity_window = any(r.get("new_since_baseline") for r in nhi)
+        for d in dest:
+            verdict = d.get("policy", "unknown")
+            # P6: an approved destination never fires (even when new); a denied one always fires (even if
+            # baselined); otherwise the learned baseline decides (fire only when new).
+            if verdict == "approved":
+                continue
+            if verdict != "denied" and not d.get("new_since_baseline"):
+                continue
+            denied = (verdict == "denied")
+            escalate = denied or new_identity_window
+            score = 70 if escalate else 45
+            dtype = "domain" if d["kind"] == "domain" else "IP address"
+            n = self._finding(
+                "ai-access", f"dest-unapproved:{d['agent']}:{d['dest']}".replace(" ", "_"),
+                f"AI agent reached a {'denied' if denied else 'new'} destination: {d['agent']} → {d['dest']}",
+                score, "T1071",
+                f"The process {d['agent']} (in an AI agent's lineage) connected to {d['dest']} "
+                f"({d['raddr']}:{d['rport']}) — a {dtype} that is not a known LLM provider." + (
+                    " It is on the DENIED-destination policy for this agent." if denied else
+                    (" It had not been reached before this baseline. A new agent identity also appeared in "
+                     "this window; a new identity reaching a new destination is the strongest "
+                     "unapproved-access signal — confirm both were intended." if new_identity_window else
+                     " It had not been reached before this baseline — confirm it is approved for the agent.")),
+                {"category": "ai-access", "finding": "dest-unapproved", "agent": d["agent"],
+                 "dest": d["dest"], "dest_kind": d["kind"], "raddr": d["raddr"], "rport": d["rport"],
+                 "correlated_new_identity": (new_identity_window and not denied),
+                 "policy": verdict})
+            items[n["id"]] = n
+
         inv = {"generated": time.strftime("%Y-%m-%d %H:%M:%S"),
                "agents": agents, "runtimes": runtimes, "offensive": offensive, "mcp": mcp,
-               "context": context, "egress": egress,
+               "context": context, "egress": egress, "nhi": nhi, "access": access, "dest": dest,
                "pentest_host": pentest_host,
                "endpoints": (self.endpoints.status() if self.endpoints
                              else {"enabled": False, "static": len(LLM_ENDPOINTS)}),
                "counts": {"agents": len(agents), "runtimes": len(runtimes),
                           "offensive": len(offensive), "mcp": len(mcp), "context": len(context),
-                          "egress": len(egress),
+                          "egress": len(egress), "nhi": len(nhi), "access": len(access),
+                          "dest": len(dest),
                           "egress_anomalies": sum(1 for e in egress if e.get("score")),
                           "hidden_instructions": sum(1 for c in context if c.get("hidden")),
                           "changed_context": sum(1 for c in context if c.get("changed")),
                           "new_mcp": sum(1 for s in mcp if s.get("new_since_baseline")),
+                          "exposed_identities": sum(1 for r in nhi if r.get("path") and (r.get("writable")
+                                                    or (r.get("secret_bearing") and r.get("world_readable")))),
+                          "new_identities": sum(1 for r in nhi if r.get("new_since_baseline")),
+                          "excessive_scopes": sum(1 for r in nhi if r.get("scope_broad")),
+                          "new_access": sum(1 for a in access if a.get("new_since_baseline")),
+                          "new_dest": sum(1 for d in dest if d.get("new_since_baseline")),
                           "findings": len(items)}}
-        # Phase 4: fold the current state into the baseline for the next run (and turn off learn-only
-        # after the first pass). Done after findings are computed, so this run is diffed against the
-        # PREVIOUS state, not against itself.
-        self._save_baseline(context, mcp)
+        # Fold the current state into the baseline for the next run (and turn off learn-only after the
+        # first pass). Done after findings are computed, so this run is diffed against the PREVIOUS
+        # state, not against itself.
+        self._save_baseline(context, mcp, nhi, access, dest)
         with self.lock:
             self.items, self.inv = items, inv
 
@@ -9719,6 +10589,244 @@ def _is_loopback_addr(addr):
     if a.startswith("127."):
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Agent Access Audit P3a — DNS collection. DNS is table-stakes security telemetry, so this is default-on
+# (opt-out via --no-dns), not a deep probe. It is best-effort BY SOURCE: there is no universal,
+# unprivileged, stdlib way to see every query, so the collector reads whatever the host exposes — a local
+# caching resolver's query log (dnsmasq / Pi-hole / unbound) on Linux, the unified log on macOS — and
+# HONESTLY reports when no source is available (status source == "none"), so an empty table is never
+# misread as a clean host. Queries are deduped into dns_events (one row per distinct qname/qtype), so
+# storage tracks distinct lookups, not query volume. qname / qtype / source only — no payloads.
+# ---------------------------------------------------------------------------
+_DNS_QTYPES = {"A", "AAAA", "CNAME", "MX", "TXT", "NS", "PTR", "SRV", "SOA", "NULL", "ANY",
+               "HTTPS", "SVCB", "CAA", "DNSKEY", "DS"}
+
+
+def parse_dnsmasq_query(line):
+    """A dnsmasq / Pi-hole query-log line: '... query[A] example.com from 192.168.1.5'."""
+    m = re.search(r"query\[(\w+)\]\s+(\S+)\s+from\s+(\S+)", line)
+    if not m:
+        return None
+    qt = m.group(1).upper()
+    if qt not in _DNS_QTYPES:
+        return None
+    return {"qname": m.group(2).rstrip(".").lower(), "qtype": qt,
+            "client": m.group(3), "resolved_ip": None}
+
+
+def parse_unbound_query(line):
+    """An unbound query-log line: '... info: 192.168.1.5 example.com. A IN'."""
+    m = re.search(r"info:\s+(\S+)\s+(\S+?)\.?\s+(\w+)\s+IN\b", line)
+    if not m:
+        return None
+    qt = m.group(3).upper()
+    if qt not in _DNS_QTYPES:
+        return None
+    return {"qname": m.group(2).rstrip(".").lower(), "qtype": qt,
+            "client": m.group(1), "resolved_ip": None}
+
+
+def parse_macos_mdns_query(line):
+    """A macOS unified-log mDNSResponder line. The query name is frequently redacted to <private>
+    unless private-data logging is enabled — we COUNT such a lookup but never guess the name."""
+    if "mDNSResponder" not in line and "Question" not in line and "query" not in line.lower():
+        return None
+    if "<private>" in line:
+        return {"qname": "<private>", "qtype": "", "client": "", "resolved_ip": None}
+    # Require an FQDN written with its trailing dot, then the qtype as a STANDALONE token — otherwise a
+    # qtype's letters get pulled out of the middle of a label (e.g. 'networkexteNSion' -> name+NS).
+    m = re.search(r"\b([a-z0-9_-]+(?:\.[a-z0-9_-]+)+)\.\s+[\(\[]?"
+                  r"(A|AAAA|CNAME|MX|TXT|NS|PTR|SRV|HTTPS|SVCB)[\)\]]?(?=\s|$|[\)\],;])",
+                  line, re.I)
+    if not m:
+        return None
+    return {"qname": m.group(1).rstrip(".").lower(), "qtype": m.group(2).upper(),
+            "client": "", "resolved_ip": None}
+
+
+# Linux file sources, in priority order. (path, source-name, parser)
+DNS_FILE_SOURCES = (
+    ("/var/log/pihole/pihole.log", "pihole", parse_dnsmasq_query),
+    ("/var/log/pihole.log", "pihole", parse_dnsmasq_query),
+    ("/var/log/dnsmasq.log", "dnsmasq", parse_dnsmasq_query),
+    ("/var/log/unbound/unbound.log", "unbound", parse_unbound_query),
+    ("/var/log/unbound.log", "unbound", parse_unbound_query),
+)
+
+
+def detect_dns_file_source(candidates=DNS_FILE_SOURCES):
+    """The first readable local resolver query log, or None."""
+    for path, name, parser in candidates:
+        try:
+            if os.path.isfile(path) and os.access(path, os.R_OK):
+                return {"kind": "file", "path": path, "name": name, "parser": parser}
+        except OSError:
+            continue
+    return None
+
+
+def _shannon_entropy(s):
+    import math
+    if not s:
+        return 0.0
+    counts = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def dns_anomaly(qname, qtype):
+    """(score, reason-text, ATT&CK) for a suspicious lookup, or None. Catches the DNS-tunneling and
+    DGA shapes that make DNS worth hunting: data-bearing record types, over-long or deeply nested
+    names, and high-entropy (algorithmically generated) labels."""
+    if not qname or qname == "<private>":
+        return None
+    q = qname.rstrip(".").lower()
+    labels = q.split(".")
+    first = labels[0] if labels else q
+    if qtype in ("TXT", "NULL"):
+        return (55, f"DNS {qtype} lookup for {qname} — the record type DNS tunnelling uses to carry "
+                "data out past egress controls", "T1071.004")
+    if len(q) >= 80 or len(first) >= 50:
+        return (55, f"Over-long DNS name ({len(q)} chars) for {qname[:40]}… — the shape of data "
+                "smuggled inside a DNS label", "T1048.003")
+    if len(first) >= 16 and _shannon_entropy(first) >= 3.9:
+        return (45, f"High-entropy DNS label '{first[:24]}' — a likely DGA / tunnelling domain "
+                f"({qname})", "T1568.002")
+    if len(labels) >= 7:
+        return (40, f"Deeply nested DNS name ({len(labels)} labels) for {qname[:40]}… — the "
+                "subdomain-tunnelling shape", "T1071.004")
+    return None
+
+
+class DNSCollector:
+    """Reads the host's available DNS source, dedup-records queries into dns_events, and scores the
+    tunnelling/DGA shapes. Default-on and best-effort: status() always names the source (or 'none'),
+    so an empty table is never mistaken for a quiet host. The line reader is pluggable (_read_lines) so
+    the parse/dedup/anomaly pipeline is testable without a live resolver."""
+
+    def __init__(self, history, enabled=True, interval=120, platform=None, candidates=None):
+        self.history = history
+        self.enabled = enabled
+        self.interval = max(30, interval)
+        self.platform = platform if platform is not None else sys.platform
+        self.candidates = candidates if candidates is not None else DNS_FILE_SOURCES
+        self.source = None            # {"kind","name",...} or None
+        self.source_name = "none"
+        self.note = "not started"
+        self.items = {}               # node_id -> anomaly finding node
+        self.counts = {"queries": 0, "anomalies": 0}
+        self._fpos = {"path": None, "inode": None, "offset": 0}
+        self.lock = threading.Lock()
+        self.started = False
+
+    def _detect(self):
+        src = detect_dns_file_source(self.candidates)
+        if src:
+            return src
+        if self.platform == "darwin" and shutil.which("log"):
+            return {"kind": "unified-log", "name": "unified-log", "parser": parse_macos_mdns_query}
+        return None
+
+    def start(self):
+        if not self.enabled or self.started:
+            return
+        self.started = True
+        self.source = self._detect()
+        self.source_name = self.source["name"] if self.source else "none"
+        self.note = ("reading %s" % self.source_name) if self.source else \
+            "no readable DNS source on this host (no local resolver query log; " \
+            "queries go straight to upstream)"
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                if self.source:
+                    self._collect()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(self.interval)
+
+    def _read_lines(self):
+        """Yield new raw log lines since the last tick. File source: tail from the saved offset
+        (reset on rotation). macOS: a bounded `log show` over the last interval."""
+        src = self.source or {}
+        if src.get("kind") == "file":
+            yield from self._tail_file(src["path"])
+        elif src.get("kind") == "unified-log":
+            secs = int(self.interval) + 15
+            _rc, out, _err = run(["log", "show", "--style", "syslog", "--last", "%ds" % secs,
+                                  "--predicate", 'process == "mDNSResponder"'], timeout=25)
+            for line in (out or "").splitlines()[:5000]:
+                yield line
+
+    def _tail_file(self, path, cap=5000):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        inode = (st.st_dev, st.st_ino)
+        if self._fpos["path"] != path or self._fpos["inode"] != inode or st.st_size < self._fpos["offset"]:
+            self._fpos = {"path": path, "inode": inode, "offset": 0}   # new/rotated file
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(self._fpos["offset"])
+                lines = fh.readlines(2_000_000)
+                self._fpos["offset"] = fh.tell()
+        except OSError:
+            return
+        for line in lines[:cap]:
+            yield line
+
+    def _collect(self):
+        parser = self.source["parser"]
+        now = int(time.time())
+        rows, items = [], {}
+        for line in self._read_lines():
+            rec = parser(line)
+            if not rec:
+                continue
+            self.counts["queries"] += 1
+            qname, qtype = rec["qname"], rec["qtype"]
+            proc = rec.get("client") or ""
+            key = _hkey("dns", qname, qtype, proc)
+            rows.append((key, qname, qtype, proc, "", 0, self.source_name,
+                         rec.get("resolved_ip"), now, now))
+            an = dns_anomaly(qname, qtype)
+            if an:
+                score, why, mitre = an
+                nid = "dns:%s:%s" % (qname, qtype)
+                items[nid] = {"id": nid, "type": "dns",
+                              "label": "Suspicious DNS lookup: %s" % qname,
+                              "score": score, "severity": severity_for(score),
+                              "reasons": [reason(why, mitre, score)],
+                              "detail": {"source": "DNS", "qname": qname, "qtype": qtype,
+                                         "client": proc, "dns_source": self.source_name}}
+        if rows:
+            self.history.record_dns(rows)
+        with self.lock:
+            self.items = items
+            self.counts["anomalies"] = len(items)
+
+    def snapshot(self):
+        with self.lock:
+            return list(self.items.values())
+
+    def status(self):
+        """The honesty surface: whether a DNS source was found, and which. 'none' means no readable
+        source on this host — NOT that DNS is quiet."""
+        return {"enabled": self.enabled, "source": self.source_name,
+                "source_kind": (self.source or {}).get("kind", "none"),
+                "note": self.note, "queries_seen": self.counts["queries"],
+                "anomalies": self.counts["anomalies"]}
+
+    def detail(self, days=7):
+        return {"enabled": self.enabled, "status": self.status(),
+                "recent": self.history.recent_dns(days) if self.history else []}
 
 
 # ---------------------------------------------------------------------------
@@ -13461,9 +14569,14 @@ CREATE TABLE IF NOT EXISTS conn_events(
   id TEXT PRIMARY KEY, ts INTEGER, exe TEXT, proc_name TEXT,
   raddr TEXT, rport TEXT, proto TEXT, asorg TEXT, country TEXT,
   first_seen INTEGER, last_seen INTEGER);
+CREATE TABLE IF NOT EXISTS dns_events(
+  key TEXT PRIMARY KEY, qname TEXT, qtype TEXT, proc_name TEXT, exe TEXT, pid INTEGER,
+  source TEXT, resolved_ip TEXT, first_seen INTEGER, last_seen INTEGER, times_seen INTEGER);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE INDEX IF NOT EXISTS ix_cev_ts ON conn_events(ts);
 CREATE INDEX IF NOT EXISTS ix_cev_dest ON conn_events(raddr, ts);
+CREATE INDEX IF NOT EXISTS ix_dns_name ON dns_events(qname);
+CREATE INDEX IF NOT EXISTS ix_dns_seen ON dns_events(last_seen);
 CREATE INDEX IF NOT EXISTS ix_exec_ts ON exec_events(ts);
 CREATE INDEX IF NOT EXISTS ix_exec_exe ON exec_events(exe);
 CREATE INDEX IF NOT EXISTS ix_fileev_ts ON file_events(ts);
@@ -13482,7 +14595,7 @@ CREATE INDEX IF NOT EXISTS ix_alert_seen ON alerts(last_seen);
 # alerts/auth_events are pruned LAST (kept longest); auth_baseline is never pruned (it's the
 # learned normal). _HIST_TABLES drives stats + size-cap pruning.
 _HIST_TABLES = ("processes", "connections", "jobs", "hashes", "downloads", "exec_events",
-                "conn_events", "file_events", "auth_events", "alerts")
+                "conn_events", "dns_events", "file_events", "auth_events", "alerts")
 _HUNT_FORBIDDEN = ("attach", "pragma", "insert", "update", "delete", "drop",
                    "alter", "create", "replace", "reindex", "vacuum")
 
@@ -14609,6 +15722,41 @@ class HistoryDB:
             except Exception:  # noqa: BLE001
                 return []
 
+    def record_dns(self, rows):
+        """Dedup-upsert DNS queries. rows: (key, qname, qtype, proc_name, exe, pid, source,
+        resolved_ip, first_seen, last_seen). A repeat of the same (qname, qtype, proc) bumps
+        last_seen/times_seen instead of adding a row, so storage tracks distinct lookups, not volume."""
+        if not self.enabled or not rows:
+            return
+        with self.lock:
+            try:
+                self.conn.executemany(
+                    "INSERT INTO dns_events(key,qname,qtype,proc_name,exe,pid,source,resolved_ip,"
+                    "first_seen,last_seen,times_seen) VALUES(?,?,?,?,?,?,?,?,?,?,1) "
+                    "ON CONFLICT(key) DO UPDATE SET last_seen=excluded.last_seen, "
+                    "times_seen=times_seen+1, resolved_ip=COALESCE(excluded.resolved_ip, dns_events.resolved_ip)",
+                    rows)
+                self.conn.commit()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def recent_dns(self, days=7, limit=20000):
+        """Distinct DNS queries in the last `days`, newest first, for the DNS view and hunts."""
+        if not self.enabled:
+            return []
+        cutoff = int(time.time()) - int(days) * 86400
+        with self.lock:
+            try:
+                cur = self.conn.execute(
+                    "SELECT qname, qtype, proc_name, source, resolved_ip, times_seen, last_seen "
+                    "FROM dns_events WHERE last_seen >= ? ORDER BY last_seen DESC LIMIT ?",
+                    (cutoff, int(limit)))
+                return [{"qname": r[0], "qtype": r[1], "proc_name": r[2], "source": r[3],
+                         "resolved_ip": r[4], "times_seen": r[5], "last_seen": r[6]}
+                        for r in cur.fetchall()]
+            except Exception:  # noqa: BLE001
+                return []
+
     def record_exec_events(self, rows):
         """rows: (id, ts, pid, ppid, exe, cmdline, uid, signing_id, platform, first_seen, last_seen)."""
         if not self.enabled or not rows:
@@ -15301,6 +16449,17 @@ def recommend_response(n):
         return rec("quarantine_mcp",
                    {"path": d["path"], "server": d["server"], "client": d.get("client")},
                    "Remove this MCP server from its config (reversible) so the agent can't launch it until you vet it.")
+    # Agent Access Audit (P6): an unapproved/denied destination an AI-lineage process reached → reversible
+    # blackhole; an over-scoped or exposed identity wired into an MCP server → quarantine that server.
+    if t == "ai-access":
+        if d.get("finding") == "dest-unapproved" and d.get("raddr"):
+            return rec("block_ip", {"ip": d["raddr"]},
+                       "Cut this agent's path to the destination with a reversible blackhole route while you confirm it.")
+        if d.get("finding") in ("scope-excessive", "nhi-exposed") and d.get("mcp_path") and d.get("mcp_server"):
+            return rec("quarantine_mcp",
+                       {"path": d["mcp_path"], "server": d["mcp_server"], "client": d.get("mcp_client")},
+                       "Remove the MCP server wired to this risky identity (reversible) so the agent can't use it until you re-scope the credential.")
+        return None
     if t == "job" and (d.get("path") or "").endswith(".plist"):
         return rec("disable_job", {"path": d["path"]},
                    "Disable the launchd job (reversible) so it stops running and re-launching.")
@@ -15324,6 +16483,12 @@ def derive_action_target(action_id, node, registry):
         return {"path": d["path"]}
     if t == "ai-mcp" and d.get("path") and d.get("server"):
         return {"path": d["path"], "server": d["server"], "client": d.get("client")}
+    if t == "ai-access":
+        if action_id in ("block_ip", "unblock_ip") and d.get("finding") == "dest-unapproved" and d.get("raddr"):
+            return {"ip": d["raddr"]}
+        if action_id in ("quarantine_mcp", "restore_mcp") and d.get("mcp_path") and d.get("mcp_server"):
+            return {"path": d["mcp_path"], "server": d["mcp_server"], "client": d.get("mcp_client")}
+        return None
     if t == "job" and (d.get("path") or "").endswith(".plist"):
         return {"path": d["path"]}
     return None
@@ -16735,7 +17900,7 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
                 auth=None, filescan=None, persist=None, tcc=None, raccess=None, accounts=None,
                 posture=None, shellhist=None, rules=None, sqldet=None, browser_threats=None, suppressions=None,
                 responder=None, esf=None, incident_store=None, history=None, decoys=None,
-                provenance=None, webshell=None, ialog=None, aisurf=None, ai_audit=None):
+                provenance=None, webshell=None, ialog=None, aisurf=None, ai_audit=None, dns=None):
     t0 = time.time()
     procs = collect_processes()
     net = collect_network()
@@ -17081,6 +18246,11 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         for item in aisurf.snapshot():
             add_node(item)
 
+    # --- suspicious DNS lookups (DGA/entropy + TXT/NULL tunnelling shapes from the host DNS source) ---
+    if dns:
+        for item in dns.snapshot():
+            add_node(item)
+
     # --- ESF real-time nodes (ephemeral exec-and-exit processes + new files in watched dirs) ---
     if esf:
         for item in esf.snapshot():
@@ -17302,6 +18472,8 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
         "ai_surface": aisurf.summary() if aisurf else {"enabled": False},
         # Phase 5: COUNTS ONLY reach the Mesh (opt-in, local-only); excerpts stay on the host.
         "ai_audit": ai_audit.summary() if ai_audit else {"enabled": False},
+        # P3a: DNS status (source name or 'none', query/anomaly counts) — honesty surface for the fleet.
+        "dns": dns.status() if dns else {"enabled": False},
         "esf": esf.summary() if esf else {"enabled": False},
         "incidents": incidents_meta,
         "rules": {"enabled": bool(rules), "builtin": len(BUILTIN_RULES),
@@ -17329,7 +18501,7 @@ class SnapshotCache:
                  posture=None, shellhist=None, rules=None, sqldet=None, vr=None, responder=None,
                  lifecycle=None, ai=None, suppressions=None, ntfy=None, esf=None, incidents=None,
                  exporter=None, attack=None, decoys=None, provenance=None, webshell=None,
-                 ialog=None, aisurf=None, ai_audit=None, accepted=None):
+                 ialog=None, aisurf=None, ai_audit=None, dns=None, accepted=None):
         self.interval = interval
         self.no_sig = no_sig
         self.sig = SignatureChecker(enabled=not no_sig)
@@ -17363,6 +18535,7 @@ class SnapshotCache:
         self.ialog = ialog
         self.aisurf = aisurf
         self.ai_audit = ai_audit
+        self.dns = dns
         self.accepted = accepted             # analyst-accepted "known noise" dets (fidelity view)
         self.lock = threading.Lock()
         self.data = None
@@ -17408,7 +18581,7 @@ class SnapshotCache:
                                esf=self.esf, incident_store=self.incidents,
                                history=self.history, decoys=self.decoys,
                                provenance=self.provenance, webshell=self.webshell, ialog=self.ialog,
-                               aisurf=self.aisurf, ai_audit=self.ai_audit)
+                               aisurf=self.aisurf, ai_audit=self.ai_audit, dns=self.dns)
             if self.history:
                 data["meta"]["history"] = self.history.stats()
             if self.decoys:
@@ -19873,7 +21046,8 @@ class MeshReporter:
                       "/api/alert-history", "/api/ai-analysis", "/api/health", "/api/sensors",
                       "/api/export", "/api/ioc-feeds", "/api/geoip", "/api/respond", "/api/ai",
                       "/api/decoys", "/api/auth-map", "/api/vulns",
-                      "/api/ai-surface", "/api/ai-audit-summary"}   # + AI surface & AI-audit COUNTS (never /api/ai-audit, which carries excerpts)
+                      "/api/ai-surface", "/api/ai-audit-summary", "/api/dns",
+                      "/api/agent-access-summary"}   # + AI surface, AI-audit COUNTS (never /api/ai-audit excerpts), DNS status/recent & Agent-Access counts
     VIEW_MAX_BYTES = 6 * 1024 * 1024          # cap a relayed view body (stays under the mesh ingest cap)
     # POST endpoints the mesh may drive on demand for REMOTE MANAGEMENT — only when the operator opted
     # this host into remote commands (--mesh-commands), gated by the mesh admin token.
@@ -21356,10 +22530,10 @@ class Responder:
                          applies=["process"], backend="native", reversible=False,
                          destructive=False, verb="Resumed", hidden=True),
             "block_ip": d(label="Block IP", icon="🚫", mode="defensive", kind="network",
-                          applies=["remote"], backend="native", reversible=True,
+                          applies=["remote", "ai-access"], backend="native", reversible=True,
                           destructive=False, undo="unblock_ip", verb="Blocked"),
             "unblock_ip": d(label="Unblock", icon="✅", mode="defensive", kind="network",
-                            applies=["remote"], backend="native", reversible=False,
+                            applies=["remote", "ai-access"], backend="native", reversible=False,
                             destructive=False, verb="Unblocked", hidden=True),
             "block_domain": d(label="Block site", icon="🚫", mode="defensive", kind="hosts",
                               applies=["process", "remote"], backend="native", reversible=True,
@@ -21384,10 +22558,10 @@ class Responder:
             # holds other servers + unrelated state, so we never quarantine the whole file). The
             # removed definition is kept in the ledger so "restore_mcp" puts it back exactly.
             "quarantine_mcp": d(label="Quarantine MCP", icon="📦", mode="defensive", kind="ai-mcp",
-                                applies=["ai-mcp"], backend="native", reversible=True,
+                                applies=["ai-mcp", "ai-access"], backend="native", reversible=True,
                                 destructive=False, undo="restore_mcp", verb="Quarantined MCP server"),
             "restore_mcp": d(label="Restore MCP", icon="♻", mode="defensive", kind="ai-mcp",
-                             applies=["ai-mcp"], backend="native", reversible=False,
+                             applies=["ai-mcp", "ai-access"], backend="native", reversible=False,
                              destructive=False, verb="Restored MCP server", hidden=True),
             "vr_forensics": d(label="Forensics (VR)", icon="🦖", mode="defensive", kind="vr",
                               applies=["process"], backend="velociraptor", reversible=False,
@@ -23161,6 +24335,16 @@ def make_handler(cache):
                 # LLM-egress baseline). Whitelisted read-only so the mesh can fan it across the fleet.
                 ais = getattr(cache, "ai_surface", None)
                 self._send_json(ais.detail() if ais else {"enabled": False})
+            elif path == "/api/agent-access-summary":
+                # P5: Agent Access Audit COUNTS + scored findings only (no raw identity inventory). This
+                # is the fleet-relay surface; the full NHI/access/dest lists stay on-host in /api/ai-surface.
+                ais = getattr(cache, "ai_surface", None)
+                self._send_json(ais.access_summary() if ais else {"enabled": False})
+            elif path == "/api/dns":
+                # P3a: DNS-query collection status + recent dedup'd queries (and the tunnelling/DGA
+                # anomalies). Whitelisted read-only; status names the source (or 'none' — never silent).
+                dnsc = getattr(cache, "dns", None)
+                self._send_json(dnsc.detail() if dnsc else {"enabled": False})
             elif path == "/api/ai-audit":
                 # Phase 5: sanitised AI audit-log findings. LOCAL CONSOLE ONLY — deliberately NOT in
                 # VIEW_WHITELIST, so the Mesh relay cannot fetch the excerpts; the fleet sees only the
@@ -23288,15 +24472,29 @@ def make_handler(cache):
                 if not cache.incidents:
                     self._send_json({"enabled": False, "incidents": []})
                 else:
-                    cache.get()   # ensure a fresh reconcile has run this cycle
-                    incs = cache.incidents.list()
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                    if q.get("compact", ["0"])[0] in ("1", "true", "yes"):
-                        # The mesh FLEET view renders ids/labels/status/counts only — never
-                        # member_meta (per-member captured-alert blobs, up to 400/incident). Dropping
-                        # it keeps the relayed body under the mesh's VIEW_MAX_BYTES on hosts with a
-                        # deep incident history; the single-host drill-in omits compact and still
-                        # gets member_meta.
+                    refresh = (q.get("refresh") or ["0"])[0] in ("1", "true", "yes")
+                    # Don't force a full build_graph() just to render the Investigations tab: the ~3s
+                    # snapshot poll already reconciles incidents every cycle, and a triage/incident
+                    # mutation calls cache.invalidate(), so edits reflect within one poll. Build only
+                    # on the very first request (nothing reconciled yet) or when the user hits Refresh
+                    # (?refresh=1 → force). This keeps the tab-open path off the synchronous rebuild.
+                    if cache.data is None or refresh:
+                        cache.get(force=refresh)
+                    incs = cache.incidents.list()
+                    want_id = (q.get("id") or [None])[0]
+                    if want_id:
+                        # One case WITH its member_meta — the UI pulls this lazily only when a member
+                        # whose live node has aged out is actually inspected. The list itself is
+                        # fetched compact, so the big per-member capture blobs never ride the
+                        # tab-open path.
+                        incs = [c for c in incs if c.get("id") == want_id]
+                    elif q.get("compact", ["0"])[0] in ("1", "true", "yes"):
+                        # The mesh FLEET view and the local list view render ids/labels/status/counts
+                        # — never member_meta (per-member captured-alert blobs, up to 400/incident).
+                        # Dropping it keeps the relayed body under the mesh's VIEW_MAX_BYTES and the
+                        # local tab-open payload lean on hosts with a deep incident history; the
+                        # single-host drill-in (?id=…) still gets member_meta.
                         incs = [{k: v for k, v in c.items() if k != "member_meta"} for c in incs]
                     self._send_json({"enabled": True, "incidents": incs})
             elif path == "/api/auth-map":
@@ -25469,6 +26667,12 @@ def main():
                     help="seconds between AI audit-log scans (default 900)")
     ap.add_argument("--ai-audit-all-users", action="store_true",
                     help="with --ai-audit and root, scan every user's transcripts (default: this user only)")
+    ap.add_argument("--no-dns", action="store_true",
+                    help="disable DNS-query collection (default on). Best-effort: reads a local resolver "
+                         "query log on Linux (dnsmasq/Pi-hole/unbound) or the mDNSResponder unified log on "
+                         "macOS; hosts with no readable DNS source report source 'none'")
+    ap.add_argument("--dns-interval", type=int, default=120,
+                    help="seconds between DNS-source reads (default 120)")
     ap.add_argument("--no-llm-endpoint-feed", action="store_true",
                     help="use only the built-in LLM-endpoint set (don't refresh it from a feed URL)")
     ap.add_argument("--llm-endpoint-feed-url", default=None, metavar="URL",
@@ -25715,13 +26919,17 @@ def main():
     llm_endpoints.start()
     aisurf = AISurfaceCollector(enabled=not args.no_ai_surface,
                                 interval=args.ai_surface_interval, endpoints=llm_endpoints,
-                                context_roots=tuple(args.ai_context_dir or ()))
+                                context_roots=tuple(args.ai_context_dir or ()), history=history)
     aisurf.start()
     # Phase 5: AI-agent audit-log intelligence — OPT-IN (off by default). Parses local agent transcripts
     # for executed dangerous commands; sanitised excerpts stay on this host, only counts reach the Mesh.
     ai_audit = AIAuditCollector(enabled=args.ai_audit, interval=args.ai_audit_interval,
                                 home_only=not args.ai_audit_all_users)
     ai_audit.start()
+    # P3a: DNS-query collection — default on, best-effort by source. Feeds dns_events for domain-level
+    # hunting (DGA/entropy, TXT/NULL tunnelling) and lets the access audit key on domains, not just IPs.
+    dns = DNSCollector(history=history, enabled=not args.no_dns, interval=args.dns_interval)
+    dns.start()
     esf = ESFCollector(history=history, enabled=not args.no_esf,
                        ephemeral_lifetime=args.esf_ephemeral_secs)
     esf.start()
@@ -25776,9 +26984,10 @@ def main():
                           lifecycle=lifecycle, ai=ai, suppressions=suppressions, ntfy=ntfy, esf=esf,
                           incidents=incidents, exporter=exporter, attack=attack, decoys=decoys,
                           provenance=provenance, webshell=webshell, ialog=ialog,
-                          aisurf=aisurf, ai_audit=ai_audit, accepted=accepted)
+                          aisurf=aisurf, ai_audit=ai_audit, dns=dns, accepted=accepted)
     cache.ai_surface = aisurf          # full AI-surface inventory, served by /api/ai-surface
     cache.ai_audit = ai_audit          # local-only sanitised findings, served by /api/ai-audit
+    cache.dns = dns                    # DNS-query collector, served by /api/dns
     cache.llm_endpoints = llm_endpoints
     cache.analyses = analyses          # exposed to the ai-analyze handler + the /api/ai-analysis reader
     cache.updater = updater            # served by /api/health + /api/update
@@ -25937,6 +27146,11 @@ def main():
               f"{args.ai_audit_interval}s (local-only; Mesh gets counts)")
     else:
         print("│  AI audit: off (opt-in with --ai-audit; local-only)")
+    if dns.enabled:
+        _ds = dns.status()
+        print(f"│  DNS:        source {_ds['source']} ({_ds['source_kind']}), every {args.dns_interval}s")
+    else:
+        print("│  DNS:        off")
     if tcc.enabled:
         ts = tcc.summary()
         access = ("reading TCC.db" if ts["accessible"]

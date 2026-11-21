@@ -4,6 +4,42 @@ All notable changes to Scouter are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This repository ships the macOS and Linux
 agents, versioned independently.
 
+## [1.16.2] — 2026-11-20
+
+### Console
+
+- **AI Surface: remote IPs are now geo-placed and linked to VirusTotal.** When GeoIP enrichment is on,
+  each LLM-API egress destination is resolved to its location (offline, against the local ipinfo DB —
+  the address never leaves the host) and shown under the remote endpoint, and every public IP in the
+  AI Surface and Authentications views links out to VirusTotal for a one-click reputation check.
+- **Closing an investigation now cascades by default.** The "apply closure to the member alerts"
+  checkbox is pre-checked when you close a case (single or bulk), so closing an investigation closes
+  the alerts it gathered unless you opt out.
+- **Authentications: "resolve device location by external IP" no longer sits on "resolving…".** When
+  the public IP is fetched but can't be geo-placed (geo database not downloaded, still downloading, or
+  no match for the address), the control now shows the IP with a short reason instead of an indefinite
+  spinner — so a host whose ipinfo database isn't populated yet reads as "needs the geo DB," not
+  "broken." The identified external IP links out to VirusTotal either way (placed or not).
+- **Readable links in dark mode.** Hyperlinks (the VirusTotal lookups, release links, etc.) now use the
+  themed accent instead of the browser's default blue/purple — the default "visited" purple in
+  particular was hard to read on the dark ground. Light mode is unchanged in practice.
+- **Wording.** Removed references to the multi-host reporting layer from the standalone console copy
+  (e.g. the Compromise Assessment and break-glass descriptions); the reporting-configuration section
+  is unchanged.
+
+### Managed hosts
+
+- **Break-glass now covers the external attack-surface (Shodan) lookup.** On a managed host the
+  centralized reporting layer runs its own external-exposure path and never pushes a key to endpoints,
+  so the local view was empty. A root-armed break-glass window now lets an operator set a Shodan key
+  and enable the opt-in, read-only lookup locally — audited, touching no reporting link, monitoring or
+  response policy, and persisting so the window need not stay open.
+- **Break-glass now also covers the Authentications external-IP lookup.** The same opt-in, one-outbound
+  -lookup enrichment that places this host's device logins on the map — fetch the public IP, geolocate
+  it locally against the ipinfo DB — can now be enabled on a managed host during a break-glass window.
+  It only decorates the Authentications map, touches no reporting link, monitoring or response policy,
+  and the enablement persists; the audit records the write.
+
 ## [1.16.1] — 2026-11-19
 
 ### Compromise Assessment — on-demand, on-host (both agents)

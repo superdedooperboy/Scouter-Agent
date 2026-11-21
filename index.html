@@ -179,6 +179,12 @@ if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)
   html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
     font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-text-size-adjust:100%;overflow:hidden}
+  /* Base link color: themed accent, not the browser default blue/purple — the default "visited" purple
+     in particular is unreadable on the dark ground. Applies to every bare <a> (e.g. the VirusTotal
+     lookups); class-scoped link rules below (.hrow a, .ulinks a, …) keep winning on specificity. */
+  a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+  a:visited{color:var(--accent)}
+  a:hover{color:var(--accent2)}
   /* The body stacks any in-flow top banner (e.g. the mesh "managed" bar) above #app and lets #app
      fill the rest. Without this, a visible banner pushes #app (height:100%) partly below the viewport
      and the bottom rows of every pane are clipped off-screen — only reachable by overscroll. */
@@ -905,8 +911,8 @@ header{box-shadow:var(--hdr-shadow);color:var(--txt)}
   <div><b>Break-glass</b> — a time-boxed override of your provider’s authority, for when they cannot be reached.</div>
   <div class="bgcmd"><code id="bgCmd"></code><button class="btn" onclick="bgCopy()">Copy</button></div>
   <div class="hint">Run it in Terminal. It must be root — that is the check — so it cannot be armed from this page.
-    It covers triage, investigation — including live Velociraptor forensics — reversible containment and restarting
-    the agent; never the mesh link, monitoring or response settings. It expires by itself, and every window is
+    It covers triage, investigation — including live Velociraptor forensics and external-exposure checks — reversible
+    containment and restarting the agent; never the reporting link, monitoring or response settings. It expires by itself, and every window is
     recorded and reported to your provider.</div>
   <div class="hint" id="bgState"></div>
 </div>
@@ -3088,7 +3094,7 @@ function assessRun(){ var b=document.getElementById('assessRunBtn'); if(b){ b.di
     renderAssess(); }).catch(()=>{ if(b){ b.disabled=false; b.textContent='🔍 Run compromise assessment'; } }); }
 function assessIntroHTML(){
   return '<div style="font-size:15px;font-weight:700">Compromise Assessment</div>'+
-    '<div class="hint" style="margin-top:3px;max-width:720px">The same compromise-assessment pack the Scouter Mesh runs across a fleet, run locally on this host through Velociraptor — read-only. '+
+    '<div class="hint" style="margin-top:3px;max-width:720px">A compromise-assessment pack run locally on this host through Velociraptor — read-only. '+
     'It asks what is <i>already</i> here: persistence that survived, credential theft that already happened, and the mechanisms current malware families cannot operate without. '+
     'Each check targets a mechanism, not a filename, and cites the families that made it worth hunting. Nothing is executed on the machine.</div>'; }
 function assessDraw(){ var box=document.getElementById('assessMain'); if(!box) return; var d=ASSESS||{};
@@ -3181,11 +3187,34 @@ function kevSetToken(){ var t=prompt('VulnCheck community API token (free at vul
 // ---- AI Surface inventory -------------------------------------------------
 var AISURF=null;
 function aiSevColor(s){ return s==='high'?'var(--sev-high)':(s==='medium'?'var(--sev-medium)':(s==='low'?'var(--sev-low)':'var(--sev-info)')); }
-function aiTile(n,label){ return '<div style="flex:1;min-width:92px;text-align:center;border:1px solid var(--line);border-radius:8px;padding:8px 4px;background:var(--panel2)">'+
+// A count tile. When `target` (a section id) is given it becomes a jump link: clicking scrolls that
+// sub-section into view, so you can reach e.g. MCP servers without scrolling past everything above it.
+function aiTile(n,label,target){
+  var oc=target?(' onclick="aiSurfScrollTo(\''+target+'\')" title="Jump to '+esc(label)+'"'):'';
+  return '<div'+oc+' style="flex:1;min-width:92px;text-align:center;border:1px solid var(--line);border-radius:8px;padding:8px 4px;background:var(--panel2)'+(target?';cursor:pointer':'')+'">'+
   '<b style="display:block;font-size:20px;font-variant-numeric:tabular-nums">'+n+'</b><span style="color:var(--muted);font-size:11px">'+label+'</span></div>'; }
+function aiSurfScrollTo(id){ var el=document.getElementById(id); if(el&&el.scrollIntoView) el.scrollIntoView({behavior:'smooth',block:'start'}); }
 function aiChip(txt,col){ return '<span style="display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;border:1px solid '+col+';color:'+col+';white-space:nowrap">'+esc(txt)+'</span>'; }
+// A public IP address, rendered with a link out to VirusTotal and (when GeoIP is on) its place.
+function aiIsPublicIp(ip){ if(!ip||/[^0-9a-fA-F:.]/.test(ip)) return false;
+  if(ip.indexOf(':')>=0) return !/^(::1$|fe80:|f[cd])/i.test(ip);           // IPv6, minus loopback/link-local/ULA
+  var m=ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/); if(!m) return false;
+  var a=+m[1], b=+m[2]; if(a>255||b>255||+m[3]>255||+m[4]>255) return false;
+  return !(a===10 || a===127 || a===0 || (a===192&&b===168) || (a===172&&b>=16&&b<=31) || (a===169&&b===254) || a>=224); }
+function aiVtIp(ip){ return aiIsPublicIp(ip)
+  ? '<a href="https://www.virustotal.com/gui/ip-address/'+encodeURIComponent(ip)+'" target="_blank" rel="noopener" title="Look up this IP on VirusTotal">'+esc(ip)+'</a>'
+  : esc(ip||''); }
+// Remote endpoint cell for an egress row: VT-linked IP + :port, with the GeoIP place underneath when present.
+function aiRemoteCell(ip,port,geo){
+  var line=aiVtIp(ip)+(port?('<span class="hint">:'+esc(''+port)+'</span>'):'');
+  if(geo) line+='<div class="hint" style="margin-top:1px">📍 '+esc(geo)+'</div>';
+  return '<td class="hint" style="font-variant-numeric:tabular-nums">'+line+'</td>'; }
+// Section id by title, so the count tiles can scroll straight to a sub-section (and so the mapping
+// lives in one place instead of on every call site).
+var AISURF_SECID={'Non-human identities':'aisec-nhi','Agent file-reach':'aisec-access','Agent CLIs':'aisec-agents','Local LLM runtimes':'aisec-runtimes','Offensive AI frameworks':'aisec-offensive','MCP servers':'aisec-mcp','Agent instruction files':'aisec-context','LLM API egress':'aisec-egress'};
 function aiSurfSection(title,sub,rows,rowFn,heads){
-  let h='<div style="margin-top:14px"><div style="font-weight:700">'+esc(title)+' <span class="hint" style="font-weight:400">· '+rows.length+'</span></div>'+
+  const _sid=AISURF_SECID[title]||'';
+  let h='<div'+(_sid?(' id="'+_sid+'"'):'')+' style="margin-top:14px;scroll-margin-top:8px"><div style="font-weight:700">'+esc(title)+' <span class="hint" style="font-weight:400">· '+rows.length+'</span></div>'+
     '<div class="hint" style="margin:2px 0 6px;max-width:680px">'+esc(sub)+'</div>';
   if(!rows.length){ return h+'<div class="hint" style="padding:4px 0">None found.</div></div>'; }
   h+='<div style="overflow-x:auto"><table class="aisurf-tbl">'+
@@ -3213,13 +3242,13 @@ function aiSurfDraw(){
   h+='<div class="hint" style="white-space:nowrap">Scanned '+esc(d.generated||'—')+'</div></div>';
   // count tiles
   h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0">'+
-     aiTile(c.agents||0,'Agent CLIs')+aiTile(c.nhi||0,'Identities')+aiTile(c.runtimes||0,'LLM runtimes')+aiTile(c.mcp||0,'MCP servers')+
-     aiTile(c.context||0,'Instruction files')+aiTile(c.egress||0,'LLM egress')+
-     (c.offensive?('<div style="flex:1;min-width:92px;text-align:center;border:1px solid var(--sev-high);border-radius:8px;padding:8px 4px;background:var(--tint-hot-bg)"><b style="display:block;font-size:20px;font-variant-numeric:tabular-nums;color:var(--sev-high)">'+c.offensive+'</b><span style="color:var(--muted);font-size:11px">Offensive AI</span></div>'):'')+
-     '<div style="flex:1;min-width:92px;text-align:center;border:1px solid '+(finds?'var(--sev-high)':'var(--line)')+';border-radius:8px;padding:8px 4px;background:'+(finds?'var(--tint-hot-bg)':'var(--panel2)')+'">'+
+     aiTile(c.agents||0,'Agent CLIs','aisec-agents')+aiTile(c.nhi||0,'Identities','aisec-nhi')+aiTile(c.runtimes||0,'LLM runtimes','aisec-runtimes')+aiTile(c.mcp||0,'MCP servers','aisec-mcp')+
+     aiTile(c.context||0,'Instruction files','aisec-context')+aiTile(c.egress||0,'LLM egress','aisec-egress')+
+     (c.offensive?('<div onclick="aiSurfScrollTo(\'aisec-offensive\')" title="Jump to Offensive AI frameworks" style="flex:1;min-width:92px;text-align:center;border:1px solid var(--sev-high);border-radius:8px;padding:8px 4px;background:var(--tint-hot-bg);cursor:pointer"><b style="display:block;font-size:20px;font-variant-numeric:tabular-nums;color:var(--sev-high)">'+c.offensive+'</b><span style="color:var(--muted);font-size:11px">Offensive AI</span></div>'):'')+
+     '<div onclick="aiSurfScrollTo(\'aisec-exposures\')" title="Jump to Exposures" style="flex:1;min-width:92px;text-align:center;cursor:pointer;border:1px solid '+(finds?'var(--sev-high)':'var(--line)')+';border-radius:8px;padding:8px 4px;background:'+(finds?'var(--tint-hot-bg)':'var(--panel2)')+'">'+
      '<b style="display:block;font-size:20px;font-variant-numeric:tabular-nums;color:'+(finds?'var(--sev-high)':'var(--txt)')+'">'+finds+'</b><span style="color:var(--muted);font-size:11px">Exposures</span></div></div>';
   // findings (the scored ai-* nodes already in the live snapshot)
-  h+='<div style="font-weight:700;margin:12px 0 6px">Exposures</div>';
+  h+='<div id="aisec-exposures" style="font-weight:700;margin:12px 0 6px;scroll-margin-top:8px">Exposures</div>';
   h+=aiSurfFindingsHTML();
   // --- Non-human identities (Agent Access Audit) ---
   h+=aiSurfSection('Non-human identities','Every identity an AI agent’s tools can authenticate with — AWS, GitHub, gcloud, kube, Docker, npm/pypi, .netrc, SSH keys, the platform keychain, and the credential-named env wired into each MCP server. Presence and permissions only; a credential value is never read.',
@@ -3302,7 +3331,7 @@ function aiSurfDraw(){
     h+=aiSurfSection('LLM API egress','Live connections to known LLM-API endpoints. A catalogued AI client or a browser is expected; a non-AI process reaching an LLM API (a dropped binary, an interpreter one-liner, a raw HTTP tool) is the LAMEHUG shape and is flagged above.',
        egRows, g=>{ const m=egCat[g.category]||['—','var(--muted)'];
          const chip=aiChip(m[0],m[1]);
-         return '<td><code>'+esc(g.proc||'')+'</code></td><td>'+esc(g.provider||'')+'</td><td>'+chip+(g.why?(' <span class="hint">'+esc(g.why)+'</span>'):'')+'</td><td class="hint" style="font-variant-numeric:tabular-nums">'+esc((g.raddr||'')+':'+(g.rport||''))+'</td>'; },
+         return '<td><code>'+esc(g.proc||'')+'</code></td><td>'+esc(g.provider||'')+'</td><td>'+chip+(g.why?(' <span class="hint">'+esc(g.why)+'</span>'):'')+'</td>'+aiRemoteCell(g.raddr,g.rport,g.raddr_geo); },
        ['Process','Provider','Classification','Remote']);
   }
   // --- endpoint set status ---
@@ -3326,7 +3355,7 @@ function renderAiAudit(){
     if(d.enabled===false){
       h+='<div class="hint" style="max-width:640px">'+esc(d.note||'Off. Enable with --ai-audit.')+
          ' This parses local agent transcripts (Claude Code, Aider, …) for executed dangerous commands; '+
-         'sanitized excerpts stay on this host and the Mesh receives category counts only.</div>';
+         'sanitized excerpts stay on this host, and only category counts are ever reported upstream.</div>';
       sec.innerHTML=h; return;
     }
     const fs=d.findings||[];
@@ -4009,7 +4038,12 @@ function authDraw(){
   const ex=d.external_ip||{};
   h+='<div class="hint" style="margin-bottom:8px;font-size:11px">';
   h+='<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" '+(ex.enabled?'checked':'')+' onchange="authToggleExtIp(this.checked)"> Resolve device location by external IP <span style="opacity:.7">(one outbound lookup; off by default)</span></label>';
-  if(ex.enabled) h+=ex.resolved?(' · this host: <b>'+esc(ex.place||ex.ip||'?')+'</b>'):(' · '+esc(ex.error||'resolving…'));
+  if(ex.enabled){
+    if(ex.resolved) h+=' · this host: <b>'+esc(ex.place||ex.ip||'?')+'</b>'+(ex.ip&&ex.place&&ex.place!==ex.ip?' <span style="opacity:.7">('+aiVtIp(ex.ip)+')</span>':'');
+    else if(ex.ip) h+=' · <b>'+aiVtIp(ex.ip)+'</b>'+(ex.note?' <span style="opacity:.7">('+esc(ex.note)+')</span>':'');
+    else if(ex.error) h+=' · <span style="color:var(--sev-medium)">'+esc(ex.error)+'</span>';
+    else h+=' · resolving…';
+  }
   else h+=' · <span style="opacity:.8">off — device logins are counted but not placed on the map</span>';
   if(!d.geo_available) h+='<br><span style="color:var(--sev-medium)">Geo enrichment is off — turn it on (Geo / ASN Enrichment) to place points. Free tier is country-level; a paid ipinfo DB gives city precision.</span>';
   h+='</div>';
@@ -4098,7 +4132,7 @@ function authRenderTable(){
        '<td style="padding:3px 8px;white-space:nowrap">'+esc(dt)+'</td>'+
        '<td style="padding:3px 8px;color:'+(e.ok?'var(--good)':'var(--sev-critical)')+'">'+(e.ok?'success':'failed')+'</td>'+
        '<td style="padding:3px 8px">'+esc(e.user||'—')+'</td>'+
-       '<td style="padding:3px 8px;font-family:var(--mono,monospace)">'+esc(e.source||'—')+'</td>'+
+       '<td style="padding:3px 8px;font-family:var(--mono,monospace)">'+((e.cat==='remote'&&e.source)?aiVtIp(e.source):esc(e.source||'—'))+'</td>'+
        '<td style="padding:3px 8px">'+esc(e.method||'—')+'</td>'+
        '<td style="padding:3px 8px">'+esc(loc)+' <span style="opacity:.6;font-size:10px">'+esc(e.cat)+'</span></td></tr>';
   });
@@ -5407,7 +5441,7 @@ let showClosedInc=false;
 function toggleClosedInc(v){ showClosedInc=v; incShowN=100; renderIncidents(); }
 function loadMoreIncidents(){ incShowN+=100; renderIncidents(); }
 // ---- bulk investigation actions (select several → one status change; mirrors the alerts bulk bar) ----
-let incSel=new Set(), incBulkCascade=false, lastIncShownIds=[];
+let incSel=new Set(), incBulkCascade=true, lastIncShownIds=[];
 function incSelToggle(id,on){ if(on) incSel.add(id); else incSel.delete(id); incSelRefresh(); }
 function incSelSyncBoxes(){ document.querySelectorAll('#incidents .incsel').forEach(cb=>{ cb.checked=incSel.has(cb.dataset.id); }); }
 function incSelAllShown(on){ for(const id of lastIncShownIds){ if(on) incSel.add(id); else incSel.delete(id); } incSelSyncBoxes(); incSelRefresh(); }
@@ -5584,7 +5618,7 @@ function incidentCard(c){
       <div class="incrow"><span class="inck">members</span><div class="incmems">${members}</div></div>
       <div class="incrow"><span class="inck">case</span><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         ${triageIncSelectHTML(c)}
-        <label class="hint" style="cursor:pointer"><input type="checkbox" id="casc_${c.id}"> apply closure to all ${c.size} member alert${c.size===1?'':'s'}</label>
+        <label class="hint" style="cursor:pointer"><input type="checkbox" id="casc_${c.id}" checked> apply closure to all ${c.size} member alert${c.size===1?'':'s'}</label>
       </div></div>
       ${st==='closed'&&c.note?`<div class="incrow"><span class="inck">closure</span><div class="hint">${esc(c.note)}</div></div>`:''}
       <div class="incrow"><span class="inck">case&nbsp;notes</span><div style="flex:1">
@@ -7280,7 +7314,7 @@ function decoyRender(){
     h+=`<div class="hint" style="margin-bottom:6px"><b>${d.planted||0}</b> planted · <b>${d.intact||0}</b> intact`+
        (d.hits?` · <b style="color:var(--sev-critical)">${d.hits}</b> bait credential use${d.hits===1?'':'s'}`:'')+
        (d.tampered?` · <b style="color:var(--sev-medium)">${d.tampered}</b> tampered`:'')+
-       (d.fleet_bait?` · watching <b>${d.fleet_bait}</b> fleet bait name${d.fleet_bait===1?'':'s'}`:'')+`</div>`;
+       (d.fleet_bait?` · watching <b>${d.fleet_bait}</b> shared bait name${d.fleet_bait===1?'':'s'}`:'')+`</div>`;
     if(d.bait_user) h+=`<div class="hint" style="margin-bottom:6px">Bait username on this host: <code>${esc(d.bait_user)}</code> — any login attempt using it raises a critical alert.</div>`;
     const list=(d.decoys||[]);
     if(list.length){

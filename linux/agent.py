@@ -94,7 +94,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. linux-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.16.1"
+__version__ = "1.16.2"
 AGENT_PLATFORM = "Linux"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Linux Scouter"
@@ -10079,9 +10079,20 @@ class AISurfaceCollector:
                     "endpoints": inv.get("endpoints", {}),
                     "flagged": len(self.items)}
 
-    def detail(self):
+    def detail(self, geo=None):
         with self.lock:
-            return {"enabled": True, **self.inv, "flagged": len(self.items)}
+            d = {"enabled": True, **self.inv, "flagged": len(self.items)}
+        # Geo-enrich the LLM-egress destinations when GeoIP is on, so every consumer (this console,
+        # and the Mesh drill-in / fleet view that relay this same payload) can place the remote IP and
+        # link it out to VirusTotal. The lookup is offline against the local ipinfo DB — the raddr
+        # never leaves the host. geo.lookup() returns None for a hostname or a private/unknown IP.
+        if geo is not None and getattr(geo, "enabled", False) and d.get("egress"):
+            eg = []
+            for e in d["egress"]:
+                g = geo.lookup(e.get("raddr")) if e.get("raddr") else None
+                eg.append(dict(e, raddr_geo=g.get("summary")) if (g and g.get("summary")) else e)
+            d["egress"] = eg
+        return d
 
     def access_summary(self):
         """Agent Access Audit (P5): the COUNTS-ONLY + scored-findings surface the Mesh fans across the
@@ -13424,13 +13435,38 @@ class ExternalIp:
 
     def status(self):
         rec = self.rec or {}
+        geo = self.geo
+        geo_on = bool(geo and geo.enabled)
+        geo_rows, geo_fetching, geo_has_token = 0, False, False
+        if geo is not None:
+            try:
+                geo_rows = int((geo.state or {}).get("rows") or 0)
+                geo_fetching = bool((geo.state or {}).get("fetching"))
+                geo_has_token = bool(geo.has_token())
+            except Exception:                        # noqa: BLE001 — status must never raise
+                pass
+        resolved = bool(self.ip and self.rec)
+        # Explain a non-resolved-but-no-error state so the console doesn't sit on "resolving…"
+        # forever: once we have the public IP, the only thing left is geolocating it, and the
+        # reason it isn't placed is almost always a geo database that isn't ready, not a hang.
+        note = None
+        if self.enabled and self.ip and not resolved and not self.error:
+            if not geo_on:
+                note = "geo enrichment is off — turn it on to place this host"
+            elif geo_fetching:
+                note = "geo database still downloading"
+            elif geo_rows == 0:
+                note = ("geo database not downloaded — add an ipinfo token under Geo / ASN Enrichment"
+                        if not geo_has_token else "geo database not downloaded yet")
+            else:
+                note = "no location match for this IP in the geo database"
         return {"enabled": self.enabled, "ip": self.ip,
-                "resolved": bool(self.ip and self.rec),
+                "resolved": resolved,
                 "lat": rec.get("lat"), "lng": rec.get("lng"),
                 "country": rec.get("country"),
                 "place": rec.get("summary") or rec.get("country"),
-                "ts": self.ts, "error": self.error,
-                "geo_available": bool(self.geo and self.geo.enabled)}
+                "ts": self.ts, "error": self.error, "note": note,
+                "geo_available": geo_on}
 
 
 _EXTERNAL_IP = None
@@ -21720,7 +21756,8 @@ def make_handler(cache):
                 # Full AI-surface inventory (agents / runtimes / MCP servers / instruction files /
                 # LLM-egress baseline). Whitelisted read-only so the mesh can fan it across the fleet.
                 ais = getattr(cache, "ai_surface", None)
-                self._send_json(ais.detail() if ais else {"enabled": False})
+                geo = cache.enrich.geo if cache.enrich else None   # geo-enrich egress raddrs (offline)
+                self._send_json(ais.detail(geo=geo) if ais else {"enabled": False})
             elif path == "/api/agent-access-summary":
                 # P5: Agent Access Audit COUNTS + scored findings only (no raw identity inventory). This
                 # is the fleet-relay surface; the full NHI/access/dest lists stay on-host in /api/ai-surface.
@@ -23293,7 +23330,22 @@ BREAKGLASS_PATHS = {"/api/triage", "/api/triage-bulk", "/api/incidents", "/api/i
                     # wedged a managed host whose mesh was unreachable: the local Restart was refused
                     # and the mesh could not push one either, so the agent could never be patched. It
                     # changes no policy, touches no mesh link, and root can kill the process anyway.
-                    "/api/restart"}
+                    "/api/restart",
+                    # External attack-surface lookup (Shodan) is opt-in, read-only recon — "what does the
+                    # public internet see of this host right now?" — the same outside-in investigation the
+                    # console offers on an unmanaged host. The Mesh keeps its own centralized Shodan path
+                    # and never pushes a key to endpoints, so a managed host otherwise shows nothing here;
+                    # break-glass lets an operator set the key and enable it locally when that is what the
+                    # investigation needs. It touches no mesh link, monitoring or response policy, and the
+                    # enablement persists (so the window need not stay open) — the audit records the write.
+                    "/api/shodan",
+                    # Resolving this host's own device-login location by its external IP is the same opt-in,
+                    # one-outbound-lookup enrichment the console offers on an unmanaged host — it fetches the
+                    # public IP and geolocates it locally against the ipinfo DB (the IP is never sent out). It
+                    # only decorates the Authentications map; it changes no mesh link, monitoring or response
+                    # policy, and the enablement persists — so break-glass lets an operator turn it on when a
+                    # live investigation wants device logins placed on the map. The audit records the write.
+                    "/api/extip"}
 # /api/respond carries both actions and posture config; only the actions are in scope.
 # Break-glass covers acting on what is happening, not changing how the machine behaves
 # afterwards. Case-wide containment is squarely the former — the same reversible actions,

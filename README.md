@@ -13,6 +13,11 @@
   <img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache_2.0-ff3b3b?style=flat-square">
 </p>
 
+<p align="center">
+  <a href="https://github.com/superdedooperboy/Scouter-Agent/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/superdedooperboy/Scouter-Agent/actions/workflows/codeql.yml/badge.svg"></a>
+  <a href="https://securityscorecards.dev/viewer/?uri=github.com/superdedooperboy/Scouter-Agent"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/superdedooperboy/Scouter-Agent/badge"></a>
+</p>
+
 Assess threats to your machine like a true Saiyan. How else will you know when you're facing a power level that's OVER 9000?!
 
 Scouter is a lightweight, dependency-free (pure Python 3 standard library) EDR/XDR toolkit for

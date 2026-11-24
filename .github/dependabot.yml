@@ -1,0 +1,17 @@
+# Keep GitHub Actions pinned-by-SHA dependencies current. Dependabot opens a PR when a pinned
+# action has a newer release, updating both the SHA and the version comment — so hash-pinning
+# (which Scorecard rewards) stays maintainable instead of going stale.
+#
+# There is no application package ecosystem here on purpose: Scouter is Python standard-library
+# only (CI enforces zero third-party imports), so Actions are the only external dependency.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]

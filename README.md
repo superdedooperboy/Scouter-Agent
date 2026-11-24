@@ -183,6 +183,11 @@ You can also restart the running agent from the ↻ Restart button in the web UI
 
 ### Options
 
+The table below covers the common options; run `python3 agent.py --help` for the complete,
+always-current list. For a one-page reference to all of Scouter's external interfaces — the CLI, the
+web console, and the SIEM/SOAR and chat integration outputs — see
+[`docs/INTERFACES.md`](docs/INTERFACES.md).
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--port N` | `8787` | Port to serve on (localhost only). |

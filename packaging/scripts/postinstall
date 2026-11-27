@@ -1,0 +1,46 @@
+#!/bin/bash
+# Scouter agent — package postinstall. Runs as root during installation (local or MDM-pushed).
+#
+# It hands off to the agent's own, already-vetted installer: copying the code to the service
+# directory, building the Full Disk Access launcher, writing the LaunchDaemon, generating the MDM
+# Full-Disk-Access profile, and starting the background service. All the privilege-safety checks
+# (refusing a user-writable interpreter as a root service, locking down the service directory) live
+# there — this script only locates a usable python3 and invokes it.
+set -euo pipefail
+
+INSTALL_ROOT="/Library/Application Support/Scouter/agent-install"
+LOG="/Library/Logs/Scouter/postinstall.log"
+mkdir -p "$(dirname "$LOG")"
+
+log() { echo "$(date '+%Y-%m-%dT%H:%M:%S') $*" | tee -a "$LOG" >&2; }
+
+# A root service must run a root-owned interpreter (the installer enforces this too). Prefer the
+# system python3, then common root-owned locations; never a per-user Python.
+PY=""
+for cand in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3 \
+            /Library/Frameworks/Python.framework/Versions/Current/bin/python3; do
+  if [ -x "$cand" ]; then PY="$cand"; break; fi
+done
+if [ -z "$PY" ]; then
+  log "ERROR: no python3 found. Install the Command Line Tools (xcode-select --install) or a"
+  log "       python.org/Homebrew Python, then re-run: sudo \"$INSTALL_ROOT/agent.py\" --install-service --yes"
+  exit 1
+fi
+
+log "using interpreter: $PY"
+cd "$INSTALL_ROOT"
+
+# --yes: non-interactive (no TTY under an installer). --install-service does code install, launcher,
+# FDA profile, LaunchDaemon and start. It is idempotent, so this is also the upgrade path.
+if "$PY" "$INSTALL_ROOT/agent.py" --install-service --yes >>"$LOG" 2>&1; then
+  log "Scouter agent installed and started."
+else
+  rc=$?
+  log "ERROR: agent.py --install-service exited $rc. See $LOG above and /Library/Logs/Scouter/launchd.log."
+  exit $rc
+fi
+
+# Remind the operator about the one thing an installer structurally cannot do.
+log "NOTE: grant Full Disk Access via the MDM profile (Scouter-FullDiskAccess.mobileconfig) — an"
+log "      installer cannot grant it. Without it the agent runs read-only with reduced visibility."
+exit 0

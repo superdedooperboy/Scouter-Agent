@@ -1,6 +1,6 @@
 {
  "platform": "macOS",
- "count": 116,
+ "count": 117,
  "rules": [
   {
    "id": "b-revshell",
@@ -2631,6 +2631,31 @@
    "description": "An interpreter or network tool running under an SSH session. On a workstation, remote hands-on-keyboard activity is itself notable. (Deliberately NOT shipped on Linux, where administrators drive servers over SSH constantly \u2014 there it is context, and the multi-stage SQL detections use it instead.)",
    "confidence": 1,
    "confidence_label": "weak"
+  },
+  {
+   "id": "b-pkg-script-risky",
+   "name": "Installer package script performing a high-risk action",
+   "enabled": true,
+   "builtin": true,
+   "node_type": "process",
+   "severity": "high",
+   "mitre": "T1546.016",
+   "match": "all",
+   "conditions": [
+    {
+     "field": "ancestry",
+     "op": "regex",
+     "value": "\\b(package_script_service|installd|[Ii]nstaller)\\b"
+    },
+    {
+     "field": "cmdline",
+     "op": "regex",
+     "value": "((curl|wget)\\b[^|]*\\|\\s*(sudo\\s+)?(ba|z)?sh\\b|base64\\s+(-{1,2}[dD]|--decode)\\b[^|]*\\|\\s*(ba|z)?sh\\b|/dev/tcp/|\\bn(c|cat)\\b[^|]*\\s-e\\b|launchctl\\s+(load|bootstrap)\\b|\\bcurl\\b[^|]*\\s-o\\s)"
+    }
+   ],
+   "description": "An installer package's pre/post-install script performing a high-risk action \u2014 the macOS pkg-install vector (T1546.016). installd runs these scripts through package_script_service (or the `installer` CLI) with the installing user's privileges, so a malicious .pkg uses its postinstall to download-and-run a payload, open a reverse shell, or load a launchd job. The interpreter alone is NOT the signal (every legitimate postinstall IS /bin/sh); the rule fires only when that script reaches the network or stages code, which routine installs never do. Pairs with b-rare-exec-drop and the dropper phone-home correlation when the payload then runs.",
+   "confidence": 3,
+   "confidence_label": "strong"
   },
   {
    "id": "b-tcc-input-monitor",

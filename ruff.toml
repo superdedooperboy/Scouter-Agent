@@ -1,0 +1,14 @@
+# Ruff — the project's static-lint gate. Dev-only tooling: Ruff is never imported at runtime, so this
+# does not break the zero-third-party-dependency rule (see CONTRIBUTING.md). CI runs `ruff check`.
+#
+# The gate is deliberately focused on real-bug rules, not style:
+#   F   — Pyflakes: undefined names, unused imports, redefinitions, broken f-strings (the high-signal
+#         bug catches; this gate has already caught genuine latent NameErrors in the port).
+#   E9  — pycodestyle runtime errors (syntax / IndentationError).
+#   BLE — flake8-blind-except: every intentional broad `except Exception` is marked `# noqa: BLE001`,
+#         so a NEW unmarked blanket catch is flagged for review.
+target-version = "py39"
+line-length = 110
+
+[lint]
+select = ["F", "E9", "BLE"]

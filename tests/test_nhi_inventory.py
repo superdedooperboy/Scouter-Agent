@@ -10,7 +10,6 @@ directly.
 Pure stdlib. Run from the repo root:  python3 -m unittest discover -s tests -v
 """
 import os
-import stat
 import sys
 import tempfile
 import unittest

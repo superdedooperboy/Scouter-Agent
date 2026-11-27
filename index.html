@@ -1956,6 +1956,32 @@ function lineageSection(id, n, det){
   const more = desc.length>=BUDGET ? `<div class="hint" style="margin-top:3px">(showing first ${BUDGET} descendants)</div>` : '';
   return `<h2>Process lineage</h2>${note}<div class="lineage">${rows}</div>${more}`;
 }
+// Lineage frozen onto the alert at detection time (det.proc_lineage: root→owner rows). Rendered when
+// the owning process has exited, so a stored connection/listener/download alert keeps its "what ran
+// this" trail instead of going blank once the live tree is gone.
+function lineagePersistedSection(n, det){
+  const lin = det && det.proc_lineage;
+  if(!Array.isArray(lin) || !lin.length) return '';
+  const owner = det.lineage_owner || {};
+  let rows='';
+  lin.forEach((r,i)=>{
+    const cur=(i===lin.length-1), col=SEV_COLOR[r.sev]||SEV_COLOR.info;
+    const guide=i>0?('│ '.repeat(Math.max(0,i-1))+'└ '):'';
+    const pid=r.pid!=null?('pid '+r.pid):'';
+    const cmd=((r.cmd||'')+'').trim();
+    rows+=`<div class="lrow${cur?' cur':''}" style="padding-left:6px">
+      <span class="lguide">${guide}</span><span class="ldot" style="background:${col}"></span>
+      <div class="lbody">
+        <div class="lline1"><span class="lname">${esc(r.name)}</span><span class="lpid">${esc(pid)}</span>
+          ${r.sev&&r.sev!=='info'?`<span class="lsev" style="color:${col}">${esc(r.sev)}</span>`:''}</div>
+        ${cmd?`<div class="lcmd" title="${esc(cmd).replace(/"/g,'&quot;')}">${esc(cmd)}</div>`:''}
+      </div></div>`;
+  });
+  const note = (n.type!=='process')
+    ? `<div class="hint" style="margin:2px 0 4px">This ${esc(n.type)} belonged to <b>${esc(owner.label||'a process')}</b>${owner.pid!=null?` (pid ${owner.pid})`:''} — lineage captured when the alert fired (the process has since exited):</div>`
+    : `<div class="hint" style="margin:2px 0 4px">Lineage captured when the alert fired (the process has since exited):</div>`;
+  return `<h2>Process lineage</h2>${note}<div class="lineage">${rows}</div>`;
+}
 // Evidence an investigation captured for a member, for alerts that exist nowhere else any more.
 // The incident list is fetched compact (no member_meta), so when a member whose live node has aged
 // out is inspected we pull that ONE case's captures lazily and re-render the detail once they land.
@@ -2212,8 +2238,12 @@ function renderDetail(id){
     html+='<h2>Relationships</h2><div class="chips">'+rel.map(r=>
       `<span class="c" onclick="focusNode('${esc(r.id)}')">${esc(r.kind)}: ${esc(r.label)}</span>`).join('')+'</div>';
   }
-  // scoped process lineage (ancestry + descendants) for this alert
-  if(liveN){ try{ html+=lineageSection(id, n, det); }catch(e){} }
+  // scoped process lineage (ancestry + descendants) for this alert — the live tree while the process
+  // runs, else the snapshot frozen onto the alert at detection time (so it survives the process exit).
+  { let lin='';
+    if(liveN){ try{ lin=lineageSection(id, n, det); }catch(e){} }
+    if(!lin){ try{ lin=lineagePersistedSection(n, det); }catch(e){} }
+    html+=lin; }
   // reasons
   if(d.reasons && d.reasons.length){
     html+='<h2>Why it’s flagged</h2><div class="reasons">'+d.reasons.map(r=>
@@ -3341,8 +3371,11 @@ function aiSurfDraw(){
      (ep.updated?(' · refreshed '+esc(ep.updated)):'')+'.</div>';
   // --- Phase 5: AI audit-log intelligence (local-only; filled asynchronously) ---
   h+='<div id="aiAuditSection" style="margin-top:18px"></div>';
+  // --- Gap 1: AI-agent session forensics (per-prompt timeline; filled asynchronously) ---
+  h+='<div id="aiSessionsSection" style="margin-top:22px"></div>';
   box.innerHTML=h;
   renderAiAudit();
+  renderAiSessions();
   // badge on the tab
   const b=document.getElementById('aiSurfBadge');
   if(b){ if(finds){ b.textContent=finds; b.style.display=''; } else b.style.display='none'; }
@@ -3372,6 +3405,104 @@ function renderAiAudit(){
        '</tbody></table></div>';
     sec.innerHTML=h;
   }).catch(e=>{ sec.innerHTML='<div class="hint">AI audit: '+esc(''+e)+'</div>'; });
+}
+// ---- Gap 1: AI-agent session forensics -----------------------------------
+var AISESS=null, AISESSEL=null;
+function renderAiSessions(){
+  const sec=document.getElementById('aiSessionsSection'); if(!sec) return;
+  fetch('/api/ai-sessions').then(r=>r.json()).then(d=>{
+    AISESS=d;
+    let h='<div style="font-size:14px;font-weight:700;margin-bottom:4px">Agent Sessions '+
+      '<span class="hint" style="font-weight:400">· per-prompt forensics</span></div>';
+    if(d.enabled===false){
+      h+='<div class="hint" style="max-width:660px">'+esc(d.note||'Off. Enable with --ai-audit.')+
+         ' Each AI-agent transcript is reconstructed into a session: the prompts you gave and the tool '+
+         'calls each one drove, with any credential-store reads or dangerous commands flagged inline.</div>';
+      sec.innerHTML=h; return;
+    }
+    const ss=d.sessions||[];
+    h+='<div class="hint" style="max-width:720px;margin-bottom:6px">AI-agent sessions reconstructed from local transcripts — the prompts given and the tool calls each drove, with credential-store reads and dangerous commands flagged. '+
+       (d.capture_prompts? '<b>Prompt text is being captured</b> (<code>--ai-prompts</code>).'
+                         : 'Prompt text is withheld; tool calls and findings are shown. Enable with <code>--ai-prompts</code>.')+
+       '</div>';
+    if(!ss.length){ h+='<div class="hint">No agent sessions in the scanned transcripts yet.</div>'; sec.innerHTML=h; return; }
+    h+='<div style="overflow-x:auto"><table class="aisurf-tbl"><thead><tr>'+
+       ['Agent','Session','Project','Prompts','Tool calls','Findings','Last activity'].map(x=>'<th>'+esc(x)+'</th>').join('')+'</tr></thead><tbody>'+
+       ss.map(s=>{ const sel=(s.id===AISESSEL);
+         const fl=s.flagged||0;
+         return '<tr onclick="aiSessionOpen(\''+encodeURIComponent(s.id)+'\')" style="cursor:pointer'+(sel?';background:var(--panel2)':'')+'">'+
+           '<td>'+esc(s.source||'')+'</td>'+
+           '<td><code style="word-break:break-all">'+esc(aiSessShort(s.id))+'</code></td>'+
+           '<td class="hint">'+esc(s.project||'—')+'</td>'+
+           '<td style="text-align:right;font-variant-numeric:tabular-nums">'+(s.prompts||0)+'</td>'+
+           '<td style="text-align:right;font-variant-numeric:tabular-nums">'+(s.tool_calls||0)+'</td>'+
+           '<td>'+(fl? aiChip(fl+' flagged','var(--sev-high)') : '<span class="hint">—</span>')+'</td>'+
+           '<td class="hint" style="white-space:nowrap">'+esc(aiSessTime(s.ended))+'</td></tr>'; }).join('')+
+       '</tbody></table></div>';
+    h+='<div id="aiSessDetail" style="margin-top:12px"></div>';
+    sec.innerHTML=h;
+    if(AISESSEL) aiSessionOpen(encodeURIComponent(AISESSEL), true);
+  }).catch(e=>{ sec.innerHTML='<div class="hint">Agent sessions: '+esc(''+e)+'</div>'; });
+}
+function aiSessShort(id){ id=id||''; const i=id.indexOf(':'); let tail=(i>=0?id.slice(i+1):id);
+  if(tail.length>22) tail=tail.slice(0,10)+'…'+tail.slice(-8); return tail; }
+function aiSessTime(t){ if(!t) return '—'; try{ return new Date(t).toLocaleString(); }catch(e){ return t; } }
+function aiSessionOpen(encId, keep){
+  const id=decodeURIComponent(encId);
+  if(!keep && AISESSEL===id){ AISESSEL=null; const dd=document.getElementById('aiSessDetail'); if(dd) dd.innerHTML=''; renderAiSessions(); return; }
+  AISESSEL=id;
+  const dd=document.getElementById('aiSessDetail'); if(dd) dd.innerHTML='<div class="hint">Loading session…</div>';
+  fetch('/api/ai-sessions?id='+encId).then(r=>r.json()).then(d=>{ aiSessionDrawDetail(d); })
+    .catch(e=>{ if(dd) dd.innerHTML='<div class="hint">Session: '+esc(''+e)+'</div>'; });
+}
+function aiSessionDrawDetail(d){
+  const dd=document.getElementById('aiSessDetail'); if(!dd) return;
+  if(!d || d.found===false){ dd.innerHTML='<div class="hint">Session no longer available (it may have rolled out of the recent window).</div>'; return; }
+  const s=d.session||{}, turns=s.turns||[], finds=s.findings||[];
+  let h='<div style="border:1px solid var(--line);border-radius:8px;padding:12px 14px;background:var(--panel2)">';
+  h+='<div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap">'+
+     '<div style="font-weight:700">'+esc(s.source||'')+' session <code style="font-weight:400">'+esc(aiSessShort(s.id))+'</code></div>'+
+     '<div class="hint">'+(s.prompts||0)+' prompt(s) · '+(s.tool_calls||0)+' tool call(s) · '+esc(aiSessTime(s.started))+' → '+esc(aiSessTime(s.ended))+'</div></div>';
+  if(s.project) h+='<div class="hint" style="margin-top:2px">Project: '+esc(s.project)+'</div>';
+  // findings summary
+  if(finds.length){
+    h+='<div style="margin:10px 0 4px"><b>Findings in this session</b></div>';
+    h+=finds.map(f=>{ const col=aiSevColor(f.severity);
+      return '<div style="border-left:3px solid '+col+';padding:5px 9px;margin:4px 0;background:var(--panel)">'+
+        aiChip((f.kind==='credential-read'?'credential read':'dangerous command'),col)+' '+
+        '<b>'+esc(f.label||'')+'</b>'+(f.mitre?(' '+aiChip(f.mitre,'var(--muted)')):'')+
+        ' <span class="hint">via '+esc(f.tool||'?')+'</span>'+
+        '<div><code style="word-break:break-all">'+esc(f.detail||'')+'</code></div></div>'; }).join('');
+  } else {
+    h+='<div class="hint" style="margin:8px 0">No credential reads or dangerous commands flagged in this session.</div>';
+  }
+  // per-prompt timeline
+  h+='<div style="margin:12px 0 4px"><b>Timeline</b> <span class="hint">· prompt → tool calls</span></div>';
+  if(!turns.length){ h+='<div class="hint">No prompts recorded.</div>'; }
+  turns.forEach((t,i)=>{
+    h+='<div style="margin:8px 0;border:1px solid var(--line);border-radius:7px;overflow:hidden">';
+    h+='<div style="padding:6px 10px;background:var(--panel);display:flex;gap:8px;align-items:baseline">'+
+       '<span class="hint" style="font-variant-numeric:tabular-nums">#'+(i+1)+'</span>';
+    if(t.prompt_redacted){
+      h+='<span class="hint" style="font-style:italic">prompt withheld ('+(t.prompt_len||0)+' chars) — enable with <code>--ai-prompts</code></span>';
+    } else {
+      h+='<span style="word-break:break-word">'+esc(t.prompt||'(empty prompt)')+'</span>';
+    }
+    h+='</div>';
+    const calls=t.calls||[];
+    if(calls.length){
+      h+='<table class="aisurf-tbl" style="margin:0"><tbody>'+calls.map(c=>{
+        const cr=c.credential_read;
+        return '<tr><td style="white-space:nowrap;width:1%"><b>'+esc(c.tool||'?')+'</b></td>'+
+          '<td><code style="word-break:break-all">'+esc(c.summary||'')+'</code>'+
+          (cr?(' '+aiChip('credential read: '+cr,'var(--sev-high)')):'')+'</td></tr>'; }).join('')+'</tbody></table>';
+    } else {
+      h+='<div class="hint" style="padding:5px 10px">(no tool calls)</div>';
+    }
+    h+='</div>';
+  });
+  h+='</div>';
+  dd.innerHTML=h;
 }
 function aiSurfFindingsHTML(){
   // the scored exposures are the ai-* nodes in the live snapshot we already keep in RAW

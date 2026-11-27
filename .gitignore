@@ -100,3 +100,4 @@ ext-token.json
 provenance-baseline.json
 # OSV ecosystem database downloaded at runtime for offline vuln matching
 osv-pypi.zip
+update-check.json

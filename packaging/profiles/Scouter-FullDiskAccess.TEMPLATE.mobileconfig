@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Scouter — Full Disk Access (PPPC / TCC) profile TEMPLATE.
+
+  This is a TEMPLATE, not a ready-to-deploy profile. Full Disk Access granted by code requirement
+  needs the launcher's REAL signing identity, so the real profile is generated per build, not shipped
+  as a static file. There are two ways to get the deployable profile:
+
+    1. (recommended) Build the launcher with your Developer ID, run the agent installer once, and copy
+       the profile it writes:
+           SIGN_IDENTITY="Developer ID Application: Your Co (TEAMID)" launcher/build.sh
+           sudo python3 agent.py --install-service --yes
+           cp "/Library/Application Support/Scouter/Scouter-FullDiskAccess.mobileconfig" .
+       That file already carries the correct CodeRequirement and bundle identifier — upload it to MDM.
+
+    2. Fill this template by hand: replace the two placeholders below with your launcher's values.
+         __BUNDLE_ID__        -> the launcher bundle id (default: com.scouter.agent.launcher)
+         __CODE_REQUIREMENT__ -> the output of:  codesign -dr - "/path/to/ScouterAgent.app"
+                                 (take the text after "designated => ")
+       With a stable Developer ID signature the requirement is identity-based and survives updates; an
+       ad-hoc (unsigned) launcher produces a cdhash-pinned requirement that breaks on every rebuild —
+       which is exactly why production needs a Developer ID (see README.md).
+
+  Deliver through MDM. A PPPC payload is honored ONLY when installed by a user-approved MDM; a Mac
+  cannot grant itself Full Disk Access by double-clicking this file.
+-->
+<plist version="1.0">
+<dict>
+  <key>PayloadDisplayName</key>
+  <string>Scouter — Full Disk Access</string>
+  <key>PayloadDescription</key>
+  <string>Grants the Scouter endpoint agent's background service Full Disk Access so it can read privacy databases and receive real-time Endpoint Security events. Deliver through MDM.</string>
+  <key>PayloadIdentifier</key>
+  <string>com.scouter.agent.pppc</string>
+  <key>PayloadOrganization</key>
+  <string>Scouter</string>
+  <key>PayloadScope</key>
+  <string>System</string>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>REPLACE-WITH-A-FRESH-UUID-TOP</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadDisplayName</key>
+      <string>Privacy Preferences Policy Control</string>
+      <key>PayloadIdentifier</key>
+      <string>com.scouter.agent.pppc.tcc</string>
+      <key>PayloadType</key>
+      <string>com.apple.TCC.configuration-profile-policy</string>
+      <key>PayloadUUID</key>
+      <string>REPLACE-WITH-A-FRESH-UUID-INNER</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>Services</key>
+      <dict>
+        <key>SystemPolicyAllFiles</key>
+        <array>
+          <dict>
+            <key>Identifier</key>
+            <string>__BUNDLE_ID__</string>
+            <key>IdentifierType</key>
+            <string>bundleID</string>
+            <key>CodeRequirement</key>
+            <string>__CODE_REQUIREMENT__</string>
+            <key>Allowed</key>
+            <true/>
+            <key>Comment</key>
+            <string>Scouter endpoint agent (LaunchDaemon)</string>
+          </dict>
+        </array>
+      </dict>
+    </dict>
+  </array>
+</dict>
+</plist>

@@ -92,7 +92,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.16.2"
+__version__ = "1.17.0"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -963,6 +963,14 @@ BUILTIN_RULES = [
     _b("b-lin-ssh-shell", "Interpreter or network tool under an SSH session", "medium", "T1021.004",
        [_c("ancestry", "regex", r"\bsshd\b"),
         _c("label", "regex", r"^(sh|bash|zsh|dash|ksh|python3?(\.\d+)?|perl|ruby|php|osascript|node|curl|wget|nc|ncat|socat)$")], match="all"),
+    # An installer package's pre/post-install script (run by installd via package_script_service, or by
+    # the `installer` CLI) reaching out to the network or staging a payload. A legitimate postinstall IS
+    # /bin/sh, so matching the interpreter alone would flag every install — the SECOND half anchors it to
+    # a genuinely malicious action (download→shell, base64→shell, reverse shell, launchd load, curl-to-disk).
+    _b("b-pkg-script-risky", "Installer package script performing a high-risk action", "high", "T1546.016",
+       [_c("ancestry", "regex", r"\b(package_script_service|installd|[Ii]nstaller)\b"),
+        _c("cmdline", "regex", r"((curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b|base64\s+(-{1,2}[dD]|--decode)\b[^|]*\|\s*(ba|z)?sh\b|/dev/tcp/|\bn(c|cat)\b[^|]*\s-e\b|launchctl\s+(load|bootstrap)\b|\bcurl\b[^|]*\s-o\s)")],
+       match="all"),
     # ---- Coverage-debt pass: rules on the NON-PROCESS nodes the collectors already emit. These
     # ---- techniques previously had telemetry (depth 1) but nothing that ever fired.
     _b("b-tcc-input-monitor", "Input monitoring granted to a non-bundled binary", "high", "T1056.001",
@@ -1364,6 +1372,12 @@ _BUILTIN_DESC = {
     "b-lin-ssh-shell": "An interpreter or network tool running under an SSH session. On a workstation, remote "
         "hands-on-keyboard activity is itself notable. (Deliberately NOT shipped on Linux, where administrators drive "
         "servers over SSH constantly \u2014 there it is context, and the multi-stage SQL detections use it instead.)",
+    "b-pkg-script-risky": "An installer package's pre/post-install script performing a high-risk action \u2014 the macOS "
+        "pkg-install vector (T1546.016). installd runs these scripts through package_script_service (or the `installer` "
+        "CLI) with the installing user's privileges, so a malicious .pkg uses its postinstall to download-and-run a "
+        "payload, open a reverse shell, or load a launchd job. The interpreter alone is NOT the signal (every legitimate "
+        "postinstall IS /bin/sh); the rule fires only when that script reaches the network or stages code, which routine "
+        "installs never do. Pairs with b-rare-exec-drop and the dropper phone-home correlation when the payload then runs.",
     "b-rare-exec-drop": "A binary NEVER SEEN on this host before, executing from a temp / cache / Downloads / "
         "removable-media path. Rarity is the signal an adversary cannot fake \u2014 they can rename the file and rewrite "
         "the command line, but the first execution is still the first. Pairing novelty with a drop location is what "
@@ -4465,8 +4479,8 @@ class OSVFeeds:
                     self._idx.pop(osv_eco, None)
 
     def _ensure(self, key, osv_eco):
-        st = self.state.setdefault(osv_eco, {"records": 0, "last_fetched": None,
-                                             "last_error": None, "fetching": False})
+        self.state.setdefault(osv_eco, {"records": 0, "last_fetched": None,
+                                        "last_error": None, "fetching": False})
         zp = self._zip_path(key)
         fresh = os.path.exists(zp) and (time.time() - os.path.getmtime(zp)) < self.interval
         if not fresh:
@@ -7487,7 +7501,6 @@ def parse_profiles(text):
     items, cur = [], None
     for raw in text.splitlines():
         line = raw.strip()
-        m = re.match(r"_computerlevel\[\d+\]|.*profileIdentifier:\s*(\S+)", line)
         if "profileIdentifier:" in line:
             ident = line.split("profileIdentifier:", 1)[1].strip()
             cur = {"identifier": ident, "name": ident, "payloads": []}
@@ -9919,8 +9932,6 @@ class AISurfaceCollector:
     # -- C2: local LLM runtimes (process and/or listening port) --------------
     def _gather_runtimes(self, procs, net):
         runtimes = {}
-        # listeners by port/address
-        listeners = {}   # (addr, port) info
         for pid, conns in net.items():
             for c in conns:
                 if (c.get("state") or "").upper() != "LISTEN":
@@ -11056,18 +11067,117 @@ def _ai_audit_commands(obj):
             stack.extend(cur)
 
 
+# --- AI session forensics (Gap 1) + agent credential-read (Gap 2 #1) -------------------------------
+# A transcript file is one agent session. We reconstruct its per-prompt timeline (prompt -> the tool
+# calls it drove) and flag, inline, the dangerous commands and credential-store reads the agent made.
+# All transcript-derived; no ES open event needed (Scouter subscribes exec/exit/create/rename/unlink,
+# never the open firehose). Prompt TEXT is withheld unless capture is explicitly enabled.
+AI_SESSION_MAX = 200           # most-recent sessions retained
+AI_SESSION_MAX_TURNS = 400     # per-session turns surfaced (bounds a pathological transcript)
+
+# Credential-file reads: an agent (or any command we can see) reading a SECRET-bearing credential
+# store. Matched on the path/command text, never the file's contents — and only secret-bearing stores
+# (non-secret siblings like .aws/config, .ssh/config and *.pub are excluded to stay high-signal).
+_CRED_READ_PATTERNS = (
+    (re.compile(r"(?i)\.aws/credentials(\b|$)"),            "AWS access key",          "T1552.001"),
+    (re.compile(r"(?i)\.aws/sso/cache/"),                   "AWS SSO token cache",      "T1552.001"),
+    (re.compile(r"(?i)\.ssh/(id_[a-z0-9_]+(?!\.pub)|[^/\s]+\.(?:pem|key))(\b|$)"),
+     "SSH private key", "T1552.004"),
+    (re.compile(r"(?i)\.config/gh/hosts\.ya?ml"),           "GitHub token",             "T1552.001"),
+    (re.compile(r"(?i)\.config/gcloud/(?:application_default_credentials\.json|credentials\.db|legacy_credentials)"),
+     "Google Cloud credential", "T1552.001"),
+    (re.compile(r"(?i)\.kube/config(\b|$)"),                "kubeconfig",               "T1552.001"),
+    (re.compile(r"(?i)\.docker/config\.json"),             "Docker registry auth",     "T1552.001"),
+    (re.compile(r"(?i)(?:^|/)\.netrc(\b|$)"),              "netrc",                    "T1552.001"),
+    (re.compile(r"(?i)(?:^|/)\.npmrc(\b|$)"),              "npm auth token",           "T1552.001"),
+    (re.compile(r"(?i)(?:^|/)\.pypirc(\b|$)"),             "PyPI password",            "T1552.001"),
+    (re.compile(r"(?i)\.config/doctl/config\.ya?ml"),      "DigitalOcean token",       "T1552.001"),
+    (re.compile(r"(?i)\.azure/(?:accessTokens\.json|msal_token_cache\.json)"),
+     "Azure token cache", "T1552.001"),
+    (re.compile(r"(?i)/Login Data(\b|$)|/logins\.json(\b|$)|/key4\.db(\b|$)|/cookies\.sqlite(\b|$)|Cookies\.binarycookies"),
+     "browser credential store", "T1555.003"),
+    (re.compile(r"(?i)login\.keychain(?:-db)?\b|\bsecurity\s+(?:dump-keychain|find-(?:generic|internet)-password)\b"),
+     "macOS keychain", "T1555.001"),
+)
+
+
+def match_credential_read(text):
+    """(label, mitre) if `text` (a command line or a file path) reads a secret-bearing credential
+    store, else None. Path/command only — never inspects the file's contents."""
+    if not text:
+        return None
+    for rx, label, mitre in _CRED_READ_PATTERNS:
+        if rx.search(text):
+            return (label, mitre)
+    return None
+
+
+def _ai_toolcall_fields(name, inp):
+    """(summary, cred_probe) for one tool_use block: a short human summary and the string to test for
+    a credential read. `inp` is the tool's input dict (shape varies by agent/tool)."""
+    if not isinstance(inp, dict):
+        return ("", "")
+    cmd = inp.get("command")
+    if isinstance(cmd, str) and cmd.strip():
+        return (cmd, cmd)
+    fp = inp.get("file_path") or inp.get("path") or inp.get("notebook_path")
+    if isinstance(fp, str) and fp:
+        return (fp, fp)
+    url = inp.get("url")
+    if isinstance(url, str) and url:
+        return (url, "")
+    patt = inp.get("pattern")
+    if isinstance(patt, str) and patt:
+        return (patt, inp.get("path") if isinstance(inp.get("path"), str) else "")
+    return ("", "")
+
+
+def _ai_transcript_turn(obj):
+    """Best-effort read of one transcript JSON object -> (kind, payload, ts):
+      'prompt' -> payload is the user's prompt text,
+      'tools'  -> payload is a list of (tool_name, input_dict),
+      None     -> neither (e.g. a tool_result echoed back as a user turn).
+    Tolerant of schema drift; a user turn that is only tool_result is NOT a prompt."""
+    if not isinstance(obj, dict):
+        return (None, None, None)
+    ts = obj.get("timestamp") or obj.get("ts")
+    typ = str(obj.get("type") or obj.get("role") or "").lower()
+    msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
+    role = str(msg.get("role") or typ).lower()
+    content = msg.get("content")
+    tools = []
+    if isinstance(content, list):
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                tools.append((b.get("name"), b.get("input")))
+    if tools:
+        return ("tools", tools, ts)
+    if role == "user" or typ == "user":
+        if isinstance(content, str) and content.strip():
+            return ("prompt", content, ts)
+        if isinstance(content, list):
+            texts = [b.get("text") for b in content
+                     if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]
+            has_tool_result = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+            if texts and not has_tool_result:
+                return ("prompt", " ".join(t for t in texts if t), ts)
+    return (None, None, ts)
+
+
 class AIAuditCollector:
     """OPT-IN, LOCAL-ONLY. Parses local AI-agent transcripts for executed dangerous commands and keeps
     a sanitised excerpt of each. summary() returns category COUNTS only (safe for meta -> Mesh);
     detail() returns the sanitised findings for the local console (/api/ai-audit, not relay-whitelisted).
     Off unless explicitly enabled."""
 
-    def __init__(self, enabled=False, interval=900, home_only=True):
+    def __init__(self, enabled=False, interval=900, home_only=True, capture_prompts=False):
         self.enabled = enabled
         self.interval = max(120, interval)
         self.home_only = home_only            # scan only the current user's transcripts unless False
+        self.capture_prompts = capture_prompts  # retain sanitised prompt TEXT (off by default)
         self.lock = threading.Lock()
         self.items = {}                       # sig -> (first_ts, finding)
+        self.sessions = {}                    # sid -> session record (bounded, most-recent kept)
         self.counts = {"by_category": {}, "by_mitre": {}, "transcripts_scanned": 0, "findings": 0}
         self._seen_mtime = {}                 # path -> mtime, to skip unchanged files
         self.generated = None
@@ -11149,9 +11259,76 @@ class AIAuditCollector:
             return []
         return cmds
 
+    def _read_jsonl_objs(self, path):
+        """Parse a .jsonl transcript into a bounded list of JSON objects (one per line)."""
+        objs = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line[0] not in "{[":
+                        continue
+                    try:
+                        objs.append(json.loads(line))
+                    except ValueError:
+                        continue
+                    if len(objs) >= 20000:    # bound a pathological transcript
+                        break
+        except OSError:
+            return []
+        return objs
+
+    def _build_session(self, objs, source, path, home):
+        """Reconstruct one agent session from its transcript objects: a per-prompt timeline and the
+        dangerous-command / credential-read findings made within it. Prompt text is withheld unless
+        capture_prompts is on."""
+        sid = source + ":" + os.path.splitext(os.path.basename(path))[0]
+        project = os.path.basename(os.path.dirname(path)) if os.path.dirname(path) else ""
+        project = _ai_audit_sanitize(project, home) if project else ""
+        turns, cur = [], None
+        by_tool, findings = {}, []
+        n_prompts = n_tools = 0
+        tfirst = tlast = None
+        for obj in objs:
+            kind, payload, ts = _ai_transcript_turn(obj)
+            if isinstance(ts, str) and ts:                 # ISO-8601 sorts correctly as a string
+                tfirst = ts if (tfirst is None or ts < tfirst) else tfirst
+                tlast = ts if (tlast is None or ts > tlast) else tlast
+            if kind == "prompt":
+                n_prompts += 1
+                if len(turns) < AI_SESSION_MAX_TURNS:
+                    cur = {"ts": ts,
+                           "prompt": (_ai_audit_sanitize(payload, home) if self.capture_prompts else None),
+                           "prompt_redacted": (not self.capture_prompts),
+                           "prompt_len": len(payload or ""), "calls": []}
+                    turns.append(cur)
+            elif kind == "tools":
+                for name, inp in payload:
+                    n_tools += 1
+                    by_tool[name or "?"] = by_tool.get(name or "?", 0) + 1
+                    summary, probe = _ai_toolcall_fields(name, inp)
+                    sx = _ai_audit_sanitize(summary, home)
+                    call = {"tool": name or "?", "summary": sx}
+                    cr = match_credential_read(probe) or match_credential_read(summary)
+                    if cr:
+                        call["credential_read"] = cr[0]
+                        findings.append({"kind": "credential-read", "label": cr[0], "mitre": cr[1],
+                                         "severity": "high", "tool": name or "?", "detail": sx})
+                    dh = match_shell_rule(summary)
+                    if dh:
+                        findings.append({"kind": "dangerous-command", "label": dh[0], "mitre": dh[1],
+                                         "severity": severity_for(dh[2]), "tool": name or "?", "detail": sx})
+                    if cur is not None and len(cur["calls"]) < 200:
+                        cur["calls"].append(call)
+        return {"id": sid, "source": source, "project": project,
+                "started": tfirst, "ended": tlast,
+                "prompts": n_prompts, "tool_calls": n_tools, "by_tool": by_tool,
+                "findings": findings, "flagged": len(findings), "turns": turns}
+
     def _collect(self):
         found = {}
         by_cat, by_mitre = {}, {}
+        sessions = {}
         scanned = 0
         now = time.time()
         for source, path, home in self._transcript_paths():
@@ -11162,8 +11339,14 @@ class AIAuditCollector:
             if st.st_size > AI_AUDIT_MAX_FILE:
                 continue
             scanned += 1
-            cmds = (self._scan_jsonl(path) if path.endswith(".jsonl")
-                    else self._scan_lines(path))
+            if path.endswith(".jsonl"):
+                objs = self._read_jsonl_objs(path)
+                cmds = [c for obj in objs for c in _ai_audit_commands(obj)]
+                sess = self._build_session(objs, source, path, home)
+                if sess["prompts"] or sess["tool_calls"] or sess["findings"]:
+                    sessions[sess["id"]] = sess
+            else:
+                cmds = self._scan_lines(path)
             rel_path = (path.replace(home, "~", 1) if home and path.startswith(home) else path)
             for cmd in cmds:
                 hit = match_shell_rule(cmd)
@@ -11184,8 +11367,11 @@ class AIAuditCollector:
         for sig, (ts, node) in self.items.items():
             if sig not in found and now - ts < AI_AUDIT_NODE_TTL:
                 found[sig] = (ts, node)
+        # keep the most-recent sessions (by end time; ISO-8601 strings sort correctly)
+        sl = sorted(sessions.values(), key=lambda s: (s.get("ended") or ""), reverse=True)[:AI_SESSION_MAX]
         with self.lock:
             self.items = found
+            self.sessions = {s["id"]: s for s in sl}
             self.counts = {"by_category": by_cat, "by_mitre": by_mitre,
                            "transcripts_scanned": scanned, "findings": len(found)}
             self.generated = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -11198,6 +11384,7 @@ class AIAuditCollector:
             return {"enabled": True, "generated": self.generated,
                     "transcripts_scanned": self.counts["transcripts_scanned"],
                     "findings": self.counts["findings"],
+                    "sessions": len(self.sessions),
                     "by_category": dict(self.counts["by_category"]),
                     "by_mitre": dict(self.counts["by_mitre"])}
 
@@ -11214,6 +11401,33 @@ class AIAuditCollector:
                     "transcripts_scanned": self.counts["transcripts_scanned"],
                     "findings": items, "counts": {"by_category": dict(self.counts["by_category"]),
                                                   "total": len(items)}}
+
+    def sessions_list(self):
+        """Session roster for the AI-agent session forensics view. No prompt text, no tool-call detail
+        — just per-session metadata. Relay-whitelisted: the Mesh fleet view fans this across hosts."""
+        with self.lock:
+            if not self.enabled:
+                return {"enabled": False,
+                        "note": "AI session forensics is off. Enable with --ai-audit; sessions and "
+                                "findings stay on this host (prompt text only with --ai-prompts)."}
+            rows = [{k: s.get(k) for k in ("id", "source", "project", "started", "ended",
+                                           "prompts", "tool_calls", "by_tool", "flagged")}
+                    for s in self.sessions.values()]
+            rows.sort(key=lambda r: (r.get("ended") or ""), reverse=True)
+            return {"enabled": True, "generated": self.generated,
+                    "capture_prompts": self.capture_prompts, "count": len(rows), "sessions": rows}
+
+    def session_detail(self, sid):
+        """Full per-prompt timeline for one session (prompt text only if capture_prompts is on).
+        Relay-whitelisted so the Mesh drill-in can show the same timeline."""
+        with self.lock:
+            if not self.enabled:
+                return {"enabled": False}
+            s = self.sessions.get(sid)
+            if not s:
+                return {"enabled": True, "found": False}
+            return {"enabled": True, "found": True,
+                    "capture_prompts": self.capture_prompts, "session": s}
 
 
 # ---------------------------------------------------------------------------
@@ -14097,7 +14311,7 @@ class AlertLifecycle:
         # not what we want to bucket a historical alert by). Tracked at peak, same as severity.
         try:
             conf_rank = _plan_confidence(node, with_case=False)
-        except Exception:
+        except Exception:  # noqa: BLE001 — confidence is best-effort; fall back to the severity seed
             conf_rank = _SEV_CONFIDENCE.get(sev or "info", 2)
         tech = self._primary_technique(node)
         source = self._detection_source(node)
@@ -15418,7 +15632,7 @@ class HistoryDB:
                 brief = {k: d[k] for k in
                          ("cmdline", "exe", "path", "raddr", "rport", "lport", "proto",
                           "source_app", "user", "name", "size", "etype", "source",
-                          "method", "message") if d.get(k) is not None}
+                          "method", "message", "proc_lineage", "lineage_owner") if d.get(k) is not None}
                 hh = d.get("hashes") or {}
                 if hh.get("sha256"):
                     brief["sha256"] = hh["sha256"]
@@ -17130,7 +17344,6 @@ def correlate_incidents(alerts, node_by_id, edges, proc_parent):
         sev = max((m.get("severity") for m in members), key=lambda s: SEVERITY_ORDER.index(s)
                   if s in SEVERITY_ORDER else 0)
         techniques, indicators, types = set(), set(), {}
-        first_seen = None
         for m in members:
             for r in (m.get("reasons") or []):
                 if r.get("mitre"):
@@ -17213,6 +17426,92 @@ def enrich_process_lineage(nodes, procs=None, max_depth=8):
         if chain:
             d["ppid_name"] = chain[0]
             d["ancestry"] = " > ".join(reversed(chain))
+
+
+def snapshot_alert_lineage(nodes, edges, procs=None, max_depth=12, cmd_cap=200):
+    """Freeze each alert-bearing node's owning-process chain onto its OWN detail, so the lineage
+    survives into the persisted alert after the live process (and its graph node) are gone.
+
+    The console reconstructs lineage from the live process roster (`lineageSection`), and the Mesh
+    reconstructs it the same way from the relayed graph. Both go blank the moment the owning process
+    exits: a stored connection/listener/download alert — e.g. "Peer in VPN / proxy-exit hosting
+    infrastructure" — then loses the "what ran this" context entirely, which is exactly the forensic
+    trail an analyst needs AFTER the fact. Capturing a compact root→owner chain here, at snapshot
+    time, makes that context durable: it is whitelisted into the alert `brief`, so it is read back by
+    `alert_detail` and travels to the Mesh with no extra wiring.
+
+    Runs AFTER enrich_process_lineage (so process nodes already carry ppid/ancestry) and is a pure
+    annotator — it only ADDS `proc_lineage` / `lineage_owner` keys, touching no scoring or matching."""
+    # pid -> {name, ppid, cmd, sev} from the authoritative live snapshot, gap-filled from nodes.
+    info = {}
+    for pid, p in (procs or {}).items():
+        nm = os.path.basename(p.get("exe") or ((p.get("cmdline") or "").split(" ") or [""])[0] or "")
+        info[pid] = {"name": nm or str(pid), "ppid": p.get("ppid"),
+                     "cmd": (p.get("cmdline") or p.get("exe") or ""), "sev": None}
+    node_by_pid = {}
+    for n in nodes:
+        if n.get("type") != "process":
+            continue
+        d = n.get("detail") or {}
+        pid = d.get("pid")
+        if pid is None:
+            continue
+        node_by_pid.setdefault(pid, n)
+        rec = info.setdefault(pid, {"name": n.get("label") or str(pid), "ppid": d.get("ppid"),
+                                    "cmd": (d.get("cmdline") or d.get("exe") or ""), "sev": None})
+        rec["sev"] = n.get("severity")
+        if rec.get("ppid") is None:
+            rec["ppid"] = d.get("ppid")
+
+    def chain_for(pid):
+        """Ordered root→pid list of compact rows ([] if the pid is unknown in this snapshot)."""
+        rows, seen, cur, depth = [], set(), pid, 0
+        while cur is not None and cur in info and cur not in seen and depth < max_depth:
+            seen.add(cur)
+            r = info[cur]
+            rows.append({"name": r["name"], "pid": cur,
+                         "cmd": (r.get("cmd") or "")[:cmd_cap], "sev": r.get("sev")})
+            cur, depth = r.get("ppid"), depth + 1
+        rows.reverse()                      # oldest ancestor first, owning process last
+        return rows
+
+    id_node = {n["id"]: n for n in nodes}
+    for n in nodes:
+        if n.get("type") not in ("remote", "listen", "download"):
+            continue
+        d = n.setdefault("detail", {})
+        owner = d.get("owner_pid") or d.get("source_pid")
+        if owner is None:                   # hop to a process neighbour across an edge (as the UI does)
+            for e in edges:
+                src, tgt = e.get("source"), e.get("target")
+                other = tgt if src == n["id"] else (src if tgt == n["id"] else None)
+                if not other:
+                    continue
+                on = id_node.get(other)
+                if on and on.get("type") == "process":
+                    owner = (on.get("detail") or {}).get("pid")
+                    if owner is not None:
+                        break
+        if owner is None:
+            continue
+        lin = chain_for(owner)
+        if lin:
+            d["proc_lineage"] = lin
+            onode = node_by_pid.get(owner)
+            d["lineage_owner"] = {"pid": owner,
+                                  "label": onode.get("label") if onode else lin[-1]["name"]}
+    # process nodes: snapshot their own chain too, so a STORED process alert keeps its lineage once
+    # the live tree is gone (the same disappearance bug, one node type over).
+    for n in nodes:
+        if n.get("type") != "process":
+            continue
+        d = n.setdefault("detail", {})
+        pid = d.get("pid")
+        if pid is None:
+            continue
+        lin = chain_for(pid)
+        if lin:
+            d["proc_lineage"] = lin
 
 
 # ---------------------------------------------------------------------------
@@ -18332,6 +18631,9 @@ def build_graph(no_sig=False, sig_checker=None, enrich=None, triage=None, downlo
 
     # Lineage first: rules below can then key on ppid_name / ancestry.
     enrich_process_lineage(nodes, procs)
+    # Freeze each alert's owning-process chain onto its detail so a stored connection/listener/download
+    # alert keeps its lineage after the process (and its live graph node) exit.
+    snapshot_alert_lineage(nodes, edges, procs)
     # Rarity next: novelty fields (exe_novel / raddr_novel / …) for rules that catch the unseen.
     try:
         rarity_index(history).annotate(nodes, history)
@@ -21506,8 +21808,8 @@ class MeshReporter:
                       "/api/alert-history", "/api/ai-analysis", "/api/health", "/api/sensors",
                       "/api/export", "/api/ioc-feeds", "/api/geoip", "/api/respond", "/api/ai",
                       "/api/decoys", "/api/auth-map", "/api/vulns",
-                      "/api/ai-surface", "/api/ai-audit-summary", "/api/dns",
-                      "/api/agent-access-summary"}   # + AI surface, AI-audit COUNTS (never /api/ai-audit excerpts), DNS status/recent & Agent-Access counts
+                      "/api/ai-surface", "/api/ai-audit-summary", "/api/ai-sessions", "/api/dns",
+                      "/api/agent-access-summary"}   # + AI surface, AI-audit COUNTS (never /api/ai-audit excerpts), AI SESSION forensics (full, operator monitoring), DNS status/recent & Agent-Access counts
     VIEW_MAX_BYTES = 6 * 1024 * 1024          # cap a relayed view body (stays under the mesh ingest cap)
     # POST endpoints the mesh may drive on demand for REMOTE MANAGEMENT — only when the operator opted
     # this host into remote commands (--mesh-commands), gated by the mesh admin token.
@@ -22422,6 +22724,13 @@ class MeshReporter:
         det = {}
         for k, v in (a.get("detail") or {}).items():
             if k == "rule_hits":                        # internal + can be hundreds of KB — drop
+                continue
+            if k == "proc_lineage" and isinstance(v, list):
+                # Keep lineage a STRUCTURED, bounded array so the mesh can render the chain — the
+                # generic nested-clamp below would stringify a deeper chain into unparseable text.
+                det[k] = [{"name": (r.get("name") or "")[:80], "pid": r.get("pid"),
+                           "cmd": (r.get("cmd") or "")[:160], "sev": r.get("sev")}
+                          for r in v[:12] if isinstance(r, dict)]
                 continue
             if isinstance(v, str):
                 det[k] = v[:1000]
@@ -24817,6 +25126,19 @@ def make_handler(cache):
                 # one audit endpoint in VIEW_WHITELIST, so the Mesh fleet view can tally it across hosts.
                 aa = getattr(cache, "ai_audit", None)
                 self._send_json(aa.summary() if aa else {"enabled": False})
+            elif path == "/api/ai-sessions":
+                # AI-agent session forensics (Gap 1): per-session timeline reconstructed from local
+                # transcripts, with the dangerous-command / credential-read findings made in each.
+                # Relay-whitelisted so the Mesh has FULL fleet visibility (operator monitoring). Prompt
+                # TEXT is withheld unless --ai-prompts is set; nothing here is read from file contents.
+                aa = getattr(cache, "ai_audit", None)
+                qid = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("id", [None])[0]
+                if not aa:
+                    self._send_json({"enabled": False})
+                elif qid:
+                    self._send_json(aa.session_detail(qid))
+                else:
+                    self._send_json(aa.sessions_list())
             elif path == "/api/vr":
                 self._send_json(cache.vr.status() if cache.vr
                                 else {"enabled": False, "available": False, "running": False})
@@ -27141,6 +27463,10 @@ def main():
                     help="seconds between AI audit-log scans (default 900)")
     ap.add_argument("--ai-audit-all-users", action="store_true",
                     help="with --ai-audit and root, scan every user's transcripts (default: this user only)")
+    ap.add_argument("--ai-prompts", action="store_true",
+                    help="with --ai-audit, retain each session's PROMPT TEXT (sanitised) in the AI-agent "
+                         "session forensics view. Off by default — session timelines show tool calls and "
+                         "findings but withhold the prompt text until you opt in")
     ap.add_argument("--no-dns", action="store_true",
                     help="disable DNS-query collection (default on). Best-effort: reads a local resolver "
                          "query log on Linux (dnsmasq/Pi-hole/unbound) or the mDNSResponder unified log on "
@@ -27398,7 +27724,8 @@ def main():
     # Phase 5: AI-agent audit-log intelligence — OPT-IN (off by default). Parses local agent transcripts
     # for executed dangerous commands; sanitised excerpts stay on this host, only counts reach the Mesh.
     ai_audit = AIAuditCollector(enabled=args.ai_audit, interval=args.ai_audit_interval,
-                                home_only=not args.ai_audit_all_users)
+                                home_only=not args.ai_audit_all_users,
+                                capture_prompts=args.ai_prompts)
     ai_audit.start()
     # P3a: DNS-query collection — default on, best-effort by source. Feeds dns_events for domain-level
     # hunting (DGA/entropy, TXT/NULL tunnelling) and lets the access audit key on domains, not just IPs.

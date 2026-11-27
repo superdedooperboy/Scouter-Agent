@@ -8,7 +8,6 @@ match, and the scanner's finding assembly — all without touching the live syst
 
 Run from the repo root:  python3 -m unittest discover -s tests
 """
-import io
 import json
 import os
 import sys
@@ -175,7 +174,6 @@ class TestScanner(unittest.TestCase):
 class TestLangInventoryParse(unittest.TestCase):
     def test_pip_json(self):
         # the format pip --format=json emits
-        import subprocess
         orig = agent._run_as_user
         agent._run_as_user = staticmethod(
             lambda cmd, timeout=60: (0, json.dumps([{"name": "requests", "version": "2.19.0"},

@@ -16,6 +16,7 @@
 <p align="center">
   <a href="https://github.com/superdedooperboy/Scouter-Agent/actions/workflows/codeql.yml"><img alt="CodeQL" src="https://github.com/superdedooperboy/Scouter-Agent/actions/workflows/codeql.yml/badge.svg"></a>
   <a href="https://securityscorecards.dev/viewer/?uri=github.com/superdedooperboy/Scouter-Agent"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/superdedooperboy/Scouter-Agent/badge"></a>
+  <a href="https://www.bestpractices.dev/projects/17083"><img alt="OpenSSF Best Practices" src="https://www.bestpractices.dev/projects/17083/badge"></a>
 </p>
 
 Assess threats to your machine like a true Saiyan. How else will you know when you're facing a power level that's OVER 9000?!
@@ -142,6 +143,12 @@ SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" launcher/build.sh
 
 It is about 250 lines of C in `launcher/scouter-launcher.c`, so what holds Full Disk Access on your
 Mac is small enough to read.
+
+**Deploying to a fleet (MDM).** For more than a handful of Macs, build an installer package and push
+it — with the Full Disk Access profile — through Jamf Pro, Kandji, Intune, Mosyle, or any MDM.
+`packaging/build-pkg.sh` builds the `.pkg` (unsigned for testing, Developer ID signed + notarized for
+production); [`packaging/README.md`](packaging/README.md) is the step-by-step guide for each MDM, plus
+the one-time signing and notarization setup.
 
 Managing the service:
 

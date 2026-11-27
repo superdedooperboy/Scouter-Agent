@@ -13,10 +13,8 @@ Signatures are host-translations of VulnCheck Initial Access Community detection
 """
 import base64
 import os
-import stat as _stat
 import sys
 import tempfile
-import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

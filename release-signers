@@ -1,0 +1,2 @@
+# Scouter release signing — SSH allowed-signers. Principal = release committer email.
+lonnie.best@bestcyber.co ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINRWoF7gq3blZ6zoTiAUuSq+ZGYTGhh1DOM405AJcZda

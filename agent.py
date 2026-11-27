@@ -92,7 +92,7 @@ HTML = os.path.join(HERE, "index.html")
 # pushed commit), so a newer version is surfaced the moment it lands; a GitHub release tagged
 # `<platform>-v<version>` (e.g. mac-v0.1.0) is optional and only enriches the notice with notes + a
 # link. 1.0 is reserved for the public open-source launch.
-__version__ = "1.17.0"
+__version__ = "1.17.1"
 AGENT_PLATFORM = "macOS"   # for mesh rule-library sync (per-platform authority)
 AGENT_PROTOCOL = 1         # mesh<->agent wire contract version (bump when the protocol changes)
 PRODUCT = "Mac Scouter"
@@ -11289,6 +11289,7 @@ class AIAuditCollector:
         by_tool, findings = {}, []
         n_prompts = n_tools = 0
         tfirst = tlast = None
+        truncated = False
         for obj in objs:
             kind, payload, ts = _ai_transcript_turn(obj)
             if isinstance(ts, str) and ts:                 # ISO-8601 sorts correctly as a string
@@ -11302,6 +11303,13 @@ class AIAuditCollector:
                            "prompt_redacted": (not self.capture_prompts),
                            "prompt_len": len(payload or ""), "calls": []}
                     turns.append(cur)
+                else:
+                    # Past the per-session turn cap we stop surfacing prompts — but we MUST also drop the
+                    # "current prompt" pointer, or every later tool call would be misattributed to the
+                    # last displayed prompt (a call from prompt #600 showing under prompt #400). Findings
+                    # are still recorded below; they are session-global, not per-turn.
+                    cur = None
+                    truncated = True
             elif kind == "tools":
                 for name, inp in payload:
                     n_tools += 1
@@ -11312,18 +11320,24 @@ class AIAuditCollector:
                     cr = match_credential_read(probe) or match_credential_read(summary)
                     if cr:
                         call["credential_read"] = cr[0]
+                        # evidence="reported": this is the action the agent's transcript RECORDS taking (a
+                        # tool call whose command/path names a credential store), not host telemetry
+                        # proving the bytes were read. The UI labels it a reported attempt accordingly.
                         findings.append({"kind": "credential-read", "label": cr[0], "mitre": cr[1],
-                                         "severity": "high", "tool": name or "?", "detail": sx})
+                                         "severity": "high", "tool": name or "?", "detail": sx,
+                                         "evidence": "reported"})
                     dh = match_shell_rule(summary)
                     if dh:
                         findings.append({"kind": "dangerous-command", "label": dh[0], "mitre": dh[1],
-                                         "severity": severity_for(dh[2]), "tool": name or "?", "detail": sx})
+                                         "severity": severity_for(dh[2]), "tool": name or "?", "detail": sx,
+                                         "evidence": "reported"})
                     if cur is not None and len(cur["calls"]) < 200:
                         cur["calls"].append(call)
         return {"id": sid, "source": source, "project": project,
                 "started": tfirst, "ended": tlast,
                 "prompts": n_prompts, "tool_calls": n_tools, "by_tool": by_tool,
-                "findings": findings, "flagged": len(findings), "turns": turns}
+                "findings": findings, "flagged": len(findings), "turns": turns,
+                "turns_truncated": truncated, "turns_shown": len(turns)}
 
     def _collect(self):
         found = {}
@@ -21799,6 +21813,7 @@ class MeshReporter:
     FEED_ALERTS_MAX = 2000
     GZIP_PROBE_SECS = 600
     SECRET_ID = "mesh-token"                  # enrollment token, stored in the Keychain (never a file)
+    DEVICE_SECRET_ID = "mesh-device-key"      # per-device credential the mesh issues us (Keychain; see below)
 
     # Read-only endpoints the mesh may pull on demand for a host "Full view" (mirrors the local UI
     # WITHOUT streaming or remoting in). GET-only: nothing here mutates state, and POST is never relayed.
@@ -21840,6 +21855,11 @@ class MeshReporter:
         self._started = False
         self._load()
         self.token = self.secrets.get(self.SECRET_ID) or ""
+        # Per-device credential. The site token proves "I belong to this tenant" (it is shared by every
+        # agent at the site); this key proves "I am THIS host". The mesh issues it on first contact and
+        # DERIVES our identity from it thereafter, so a compromised peer can't speak for us by naming our
+        # host_id. We present it on every mesh request and adopt a (re)issued one from the response.
+        self.device_key = self.secrets.get(self.DEVICE_SECRET_ID) or ""
 
     @staticmethod
     def _host_id():
@@ -21921,6 +21941,30 @@ class MeshReporter:
         backend = self.secrets.set(self.SECRET_ID, token)
         self.token = (token or "").strip()
         return {"ok": True, "stored": bool(self.token), "backend": backend}
+
+    def set_device_key(self, key):
+        """Persist the per-device credential the mesh issued us (Keychain, like the enrollment token)."""
+        self.device_key = (key or "").strip()
+        self.secrets.set(self.DEVICE_SECRET_ID, self.device_key)
+        return bool(self.device_key)
+
+    def _maybe_device_key(self, resp):
+        """The mesh hands us a per-device credential on first contact (and a fresh one if we re-enroll).
+        Adopt it so every later request presents it and the mesh can bind our identity to it."""
+        nk = (resp or {}).get("device_key")
+        if isinstance(nk, str) and nk.strip() and nk.strip() != self.device_key:
+            self.set_device_key(nk.strip())
+            self.counts["device_key"] = self.counts.get("device_key", 0) + 1
+
+    def _mesh_headers(self, content_type=True):
+        """Common headers for every mesh request: the site enrollment token, plus our per-device
+        credential when we hold one (absent only on the very first contact, before one is issued)."""
+        h = {"X-Scouter-Mesh-Token": self.token}
+        if content_type:
+            h["Content-Type"] = "application/json"
+        if self.device_key:
+            h["X-Scouter-Device"] = self.device_key
+        return h
 
     def set_config(self, enabled=None, url=None, interval=None, name=None, insecure=None):
         with self.lock:
@@ -22007,7 +22051,7 @@ class MeshReporter:
         body = json.dumps({"host_id": self.host_id}).encode("utf-8")
         req = urllib.request.Request(
             self.url + "/api/poll", data=body, method="POST",
-            headers={"Content-Type": "application/json", "X-Scouter-Mesh-Token": self.token})
+            headers=self._mesh_headers())
         try:
             with urllib.request.urlopen(req, timeout=35, context=self._ssl_ctx()) as r:   # > server hold
                 d = json.loads(r.read().decode("utf-8")) or {}
@@ -22017,6 +22061,7 @@ class MeshReporter:
             raise
         self._on_authok()
         self._maybe_settoken(d)
+        self._maybe_device_key(d)
         self._maybe_collector_role(d)
         if self._maybe_unenroll(d):
             return {"commands": [], "hunts": []}
@@ -22070,6 +22115,7 @@ class MeshReporter:
             self._save()
         try:
             self.set_token("")                     # forget the enrollment token
+            self.set_device_key("")                # and the per-device credential (the mesh revoked it)
         except Exception:  # noqa: BLE001
             pass
         self.token = ""
@@ -22138,7 +22184,7 @@ class MeshReporter:
         try:
             req = urllib.request.Request(
                 self.url + "/api/rule-sync?platform=" + urllib.parse.quote(AGENT_PLATFORM),
-                headers={"X-Scouter-Mesh-Token": self.token})
+                headers=self._mesh_headers(content_type=False))
             with urllib.request.urlopen(req, timeout=15, context=self._ssl_ctx()) as r:
                 d = json.loads(r.read().decode("utf-8")) or {}
         except Exception as e:  # noqa: BLE001 — mesh unreachable: keep the last-synced set
@@ -22182,7 +22228,7 @@ class MeshReporter:
         try:
             req = urllib.request.Request(
                 self.url + "/api/playbook-sync?platform=" + urllib.parse.quote(AGENT_PLATFORM),
-                headers={"X-Scouter-Mesh-Token": self.token})
+                headers=self._mesh_headers(content_type=False))
             with urllib.request.urlopen(req, timeout=15, context=self._ssl_ctx()) as r:
                 d = json.loads(r.read().decode("utf-8")) or {}
         except Exception as e:  # noqa: BLE001 — mesh unreachable: keep the last-synced playbook
@@ -22337,7 +22383,47 @@ class MeshReporter:
                       if getattr(self.cache, "vulns", None) and self.cache.vulns.enabled else None),
             "fidelity": self._fidelity_summary(),                # noisy-detection rollup for the fleet fidelity view
             "browser": self._browser_summary(),                  # browser-guard (extension) threat rollup
+            "sensors": self._sensor_health(meta),                # sensor coverage, reported independently of connectivity
         }
+
+    # Fleet-facing sensor roster. The subsystem summaries live under meta; this normalizes them into a
+    # compact per-sensor health block the mesh can show for every host WHETHER OR NOT the host is also
+    # degraded in some other way — coverage reported independently of connectivity (finding #5).
+    _SENSOR_NAMES = [
+        ("persist", "Persistence"), ("tcc", "TCC"), ("raccess", "Remote access"),
+        ("accounts", "Accounts"), ("config", "Config posture"), ("shell", "Shell history"),
+        ("provenance", "Provenance"), ("webshell", "Web shell"), ("dns", "DNS"), ("esf", "ESF"),
+        ("ai_surface", "AI surface"), ("ai_audit", "AI audit"),
+    ]
+
+    def _sensor_health(self, meta):
+        """Normalize the per-subsystem meta into {ok, off, blind, items[...]}:
+          - ok    : enabled and collecting (last = this snapshot's time)
+          - blind : enabled but privilege/access denies full collection (a real, actionable blind spot,
+                    e.g. persistence sources that need root) — this is "can't collect", not "idle"
+          - off   : disabled by configuration
+        Reported every check-in so the fleet sees which sensors are dark on a host that is otherwise
+        online. Best-effort and bounded."""
+        epoch = meta.get("epoch")
+        items, ok, off, blind = [], 0, 0, 0
+        for key, label in self._SENSOR_NAMES:
+            s = meta.get(key)
+            if not isinstance(s, dict):
+                continue
+            if not s.get("enabled"):
+                off += 1
+                items.append({"name": label, "state": "off"})
+                continue
+            nr = s.get("needs_root") or s.get("blind") or s.get("blind_spots")
+            if nr:
+                blind += 1
+                detail = (", ".join(str(x) for x in nr) if isinstance(nr, (list, tuple)) else str(nr))[:200]
+                items.append({"name": label, "state": "blind", "detail": detail, "last": epoch})
+            else:
+                ok += 1
+                items.append({"name": label, "state": "ok", "last": epoch})
+        return {"ok": ok, "off": off, "blind": blind, "degraded": blind > 0,
+                "privilege": meta.get("privilege"), "last_collect": epoch, "items": items}
 
     def _browser_summary(self):
         """A compact 7-day browser-guard rollup for the fleet 'Browser threats' view. Cached ~5 min."""
@@ -22405,7 +22491,7 @@ class MeshReporter:
     def _push_once(self):
         gz = self._mesh_accepts_gzip()
         body = json.dumps(self._payload(full=gz)).encode("utf-8")
-        headers = {"Content-Type": "application/json", "X-Scouter-Mesh-Token": self.token}
+        headers = self._mesh_headers()
         if gz:
             # The full open queue is repetitive JSON — hundreds of alerts compress about 20x — which is
             # what makes sending all of it every cycle affordable and keeps it under the mesh's body cap.
@@ -22427,6 +22513,7 @@ class MeshReporter:
         try:
             d = json.loads(resp.decode("utf-8")) or {}
             self._maybe_settoken(d)
+            self._maybe_device_key(d)
             self._maybe_collector_role(d)
             if self._maybe_unenroll(d):
                 return
@@ -22444,7 +22531,7 @@ class MeshReporter:
         if not (self.enabled and self.configured()) or not events:
             return {"accepted": 0}
         body = json.dumps({"events": events}).encode("utf-8")
-        headers = {"Content-Type": "application/json", "X-Scouter-Mesh-Token": self.token}
+        headers = self._mesh_headers()
         if self._mesh_accepts_gzip():
             body = gzip.compress(body, compresslevel=6)
             headers["Content-Encoding"] = "gzip"
@@ -22509,6 +22596,13 @@ class MeshReporter:
         url = str((target or {}).get("repo") or "").strip()
         if url and not url.lower().startswith("https://"):
             return {"ok": False, "error": "update repo must be an https URL"}
+        # Remember where we are, so a failed signature check or a broken new version can be rolled back
+        # to exactly this commit rather than left half-applied.
+        try:
+            _, prev_sha, _ = run(["git", "-C", d, "rev-parse", "HEAD"], timeout=10)
+            prev_sha = (prev_sha or "").strip()
+        except Exception:  # noqa: BLE001
+            prev_sha = ""
         try:
             _, br, _ = run(["git", "-C", d, "rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
             branch = (br or "").strip() or "main"
@@ -22533,7 +22627,28 @@ class MeshReporter:
                         "can read without logging in, or give this host's service account a read-only "
                         "git credential. (git said: %s)" % blob[:160]}
             return {"ok": False, "error": "git pull failed: " + blob[:300]}
-        return {"ok": True, "result": ("updated: " + (out or "").strip()[:280] + " — restarting")}
+        # Supply-chain gate: the code we just pulled becomes a ROOT daemon on re-exec, so verify it is a
+        # release commit signed by a pinned key BEFORE we trust it. On failure, roll the checkout back to
+        # the commit we were on and refuse — never re-exec into unverified code.
+        verified, detail = release_verify_head(d, allow_unverified=ALLOW_UNVERIFIED_UPDATE)
+        if not verified:
+            if prev_sha:
+                try:
+                    run(["git", "-C", d, "-c", "safe.directory=" + d, "reset", "--hard", prev_sha], timeout=60)
+                except Exception:  # noqa: BLE001
+                    pass
+            return {"ok": False, "error": "update rejected: " + detail + ". The checkout was restored to "
+                    "the running version; set SCOUTER_ALLOW_UNVERIFIED_UPDATE=1 only for a trusted, "
+                    "manually-mirrored source."}
+        try:
+            _, new_sha, _ = run(["git", "-C", d, "rev-parse", "HEAD"], timeout=10)
+            new_sha = (new_sha or "").strip()
+        except Exception:  # noqa: BLE001
+            new_sha = ""
+        # Stage it: if the new version can't come up cleanly, the next boot rolls it back automatically.
+        staged_update_begin(d, prev_sha, new_sha, None)
+        return {"ok": True, "result": ("updated (%s): %s — restarting (auto-rollback if it fails to come up)"
+                                       % (detail, (out or "").strip()[:240]))}
 
     def _run_command(self, cmd):
         """Execute one mesh-issued command through the Responder (opt-in + reversible-only enforced
@@ -22604,7 +22719,7 @@ class MeshReporter:
                                "result": result, "error": error}).encode("utf-8")
             req = urllib.request.Request(
                 self.url + "/api/command-result", data=body, method="POST",
-                headers={"Content-Type": "application/json", "X-Scouter-Mesh-Token": self.token})
+                headers=self._mesh_headers())
             with urllib.request.urlopen(req, timeout=8, context=self._ssl_ctx()) as r:
                 r.read()
         except Exception:  # noqa: BLE001 — result reporting is best-effort
@@ -22884,7 +22999,7 @@ class MeshReporter:
                 body = build(rows, len(rows) < n)
             req = urllib.request.Request(
                 self.url + "/api/hunt-result", data=body, method="POST",
-                headers={"Content-Type": "application/json", "X-Scouter-Mesh-Token": self.token})
+                headers=self._mesh_headers())
             with urllib.request.urlopen(req, timeout=15, context=self._ssl_ctx()) as r:
                 r.read()
         except Exception:  # noqa: BLE001 — best-effort
@@ -26462,7 +26577,113 @@ SERVICE_STATE_FILES = (
     "break-glass-audit.log", "auto-hunts.json", "chat-notify.json",
 )
 SERVICE_STATE_DIRS = ("quarantine", "vr-data", "vendor")
-SERVICE_SECRET_IDS = ("vt", "urlscan", "geoip", "ntfy", "mesh-token", "export-webhook", "ai")
+SERVICE_SECRET_IDS = ("vt", "urlscan", "geoip", "ntfy", "mesh-token", "mesh-device-key", "export-webhook", "ai")
+
+# ---- signed-release update path (code-review finding #3) --------------------------------------------
+# A fleet-pushed "update" used to be a bare `git pull --ff-only` + re-exec: whatever the configured
+# remote served became the next version of a root daemon, with no check that it was an approved,
+# unmodified release. The update path now (1) VERIFIES the pulled commit is signed by a pinned release
+# key before applying it, and (2) applies it as a STAGED change that automatically ROLLS BACK if the new
+# version can't come up cleanly. Canary/fleet-gated rollout is deliberately out of scope for this pass.
+RELEASE_SIGNERS_FILE = "release-signers"   # SSH allowed-signers file shipped in the checkout; the pinned
+#                                            public key(s) permitted to sign a release commit (git verifies)
+UPDATE_STAGE_FILE = "update-stage.json"    # records prev/new commit for a staged update, in the checkout
+UPDATE_MAX_BOOTS = 3                        # if the new version restarts this many times without confirming
+#                                            healthy, it is assumed broken and rolled back to prev_sha
+UPDATE_HEALTHY_SECS = 90                    # uptime after which a staged update is confirmed (marker dropped)
+# Operator escape hatch for an air-gapped / manually-mirrored deployment that can't carry a signer file.
+# Off by default: an update that cannot be verified FAILS rather than silently trusting the remote.
+ALLOW_UNVERIFIED_UPDATE = bool(os.environ.get("SCOUTER_ALLOW_UNVERIFIED_UPDATE"))
+
+
+def _update_stage_path(d):
+    return os.path.join(d, UPDATE_STAGE_FILE)
+
+
+def release_verify_head(d, allow_unverified=False):
+    """Is the checkout's current HEAD a release commit signed by a PINNED key? Returns (ok, detail).
+
+    Uses git's own SSH signature verification against the shipped allowed-signers file — the crypto is
+    git's, nothing third-party is imported. `git verify-commit` exits 0 only for a good signature from a
+    key the allowed-signers file trusts. With no signer file present the update is unverifiable; that is
+    a refusal unless the operator opted into unverified updates."""
+    signers = os.path.join(d, RELEASE_SIGNERS_FILE)
+    if not os.path.exists(signers):
+        return (bool(allow_unverified),
+                "no pinned release signer (%s) present — the update's authenticity cannot be verified"
+                % RELEASE_SIGNERS_FILE)
+    try:
+        rc, out, err = run(["git", "-C", d, "-c", "gpg.format=ssh",
+                            "-c", "gpg.ssh.allowedSignersFile=" + signers,
+                            "verify-commit", "HEAD"], timeout=30)
+    except Exception as e:  # noqa: BLE001
+        return (bool(allow_unverified), "could not run git verify-commit: %s" % str(e)[:160])
+    if rc == 0:
+        return (True, "release commit verified against a pinned signer")
+    return (False, "HEAD is not signed by a pinned release key — refusing to apply "
+                   "(%s)" % ((err or out or "").strip()[:160]))
+
+
+def release_source_sha256(d):
+    """SHA-256 of the on-disk agent source — the artifact digest, for cross-checking against a manifest
+    and for the audit trail of what a staged update actually installed."""
+    try:
+        with open(os.path.join(d, os.path.basename(os.path.abspath(__file__))), "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def staged_update_begin(d, prev_sha, new_sha, new_version):
+    """Record that we are probationally running a freshly-pulled version, so a boot loop can roll back."""
+    try:
+        with open(_update_stage_path(d), "w") as f:
+            json.dump({"prev_sha": prev_sha, "new_sha": new_sha, "version": new_version,
+                       "digest": release_source_sha256(d), "ts": time.time(), "boots": 0}, f)
+    except OSError:
+        pass
+
+
+def staged_update_mark_healthy(d):
+    """The new version has run cleanly through its probation window — commit it (drop the rollback marker)."""
+    try:
+        os.remove(_update_stage_path(d))
+    except OSError:
+        pass
+
+
+def staged_update_confirm_or_rollback(d):
+    """Called once at startup. Counts this boot against a pending staged update; if the new version has
+    restarted too many times without ever confirming healthy, it is assumed broken and the checkout is
+    reset to the previous commit. Returns None (no pending update), {'action':'watching'} (still on
+    probation), or {'action':'rolled_back', ...} (caller should re-exec to load the restored code)."""
+    p = _update_stage_path(d)
+    try:
+        with open(p) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return None
+    st["boots"] = int(st.get("boots", 0)) + 1
+    if st["boots"] > UPDATE_MAX_BOOTS:
+        prev, ok = st.get("prev_sha"), False
+        if prev:
+            try:
+                rc, _, _ = run(["git", "-C", d, "-c", "safe.directory=" + d, "reset", "--hard", prev],
+                               timeout=60)
+                ok = (rc == 0)
+            except Exception:  # noqa: BLE001
+                ok = False
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        return {"action": "rolled_back", "ok": ok, "prev_sha": prev, "boots": st["boots"]}
+    try:
+        with open(p, "w") as f:
+            json.dump(st, f)
+    except OSError:
+        pass
+    return {"action": "watching", "boots": st["boots"]}
 # Flags that steer the installer itself and must never be baked into the service's command line.
 SERVICE_CONTROL_FLAGS = {"--install-service", "--uninstall-service", "--service-status",
                          "--restart-service", "--purge", "--force", "--yes", "--no-migrate",
@@ -27354,6 +27575,9 @@ def main():
     ap.add_argument("--no-open", action="store_true", help="don't auto-open the browser")
     ap.add_argument("--no-update-check", action="store_true",
                     help="don't check GitHub for a newer release on launch (air-gapped / privacy)")
+    ap.add_argument("--allow-unverified-update", action="store_true",
+                    help="apply a fleet-pushed update even when its release signature can't be verified "
+                         "(only for a trusted, manually-mirrored source with no pinned signer file)")
     ap.add_argument("--no-sig", action="store_true", help="skip code-signature checks")
     ap.add_argument("--no-hash", action="store_true", help="skip local MD5/SHA256 hashing")
     ap.add_argument("--vt-rpm", type=int, default=4, help="VirusTotal lookups per minute (free tier ~4)")
@@ -27634,6 +27858,23 @@ def main():
             os.environ.get("SCOUTER_LOG") or os.path.join(HERE, "agent.log"))
         if os.environ.get("SCOUTER_LAUNCHER"):
             _watch_launcher(os.getppid())
+    # Signed-release update path (finding #3): honor the unverified-update opt-in, then settle any staged
+    # update left by a prior re-exec. If a freshly-applied version has been crash-looping, this rolls the
+    # checkout back to the previous commit and we re-exec to load the restored (known-good) code.
+    global ALLOW_UNVERIFIED_UPDATE
+    if getattr(args, "allow_unverified_update", False):
+        ALLOW_UNVERIFIED_UPDATE = True
+    _checkout_dir = os.path.dirname(os.path.abspath(__file__))
+    _staged = staged_update_confirm_or_rollback(_checkout_dir)
+    if _staged and _staged.get("action") == "rolled_back":
+        print("  ⚠ the last update failed to come up after %d attempts — rolled the checkout back to the "
+              "previous version%s. Re-launching it now."
+              % (_staged.get("boots", 0), "" if _staged.get("ok") else " (git reset reported a problem — check the checkout)"))
+        py = sys.executable or "python3"
+        try:
+            os.execv(py, [py, os.path.abspath(__file__)] + sys.argv[1:])
+        except Exception:  # noqa: BLE001 — fall through and keep running the current (new) code if re-exec fails
+            pass
     if not _port_available(args.port):
         # Exit cleanly and explain, rather than failing deep inside startup. Under launchd this is a
         # non-zero exit, so the service retries every ThrottleInterval until the port frees up.
@@ -28052,6 +28293,13 @@ def main():
     def _on_sigterm(_signum, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, _on_sigterm)
+    # Finding #3: the agent is now serving — if a staged update is on probation, confirming it after a
+    # healthy uptime window (and not before) is the health check that commits it. Crash before this and
+    # the marker survives, the boot count climbs, and a persistently-broken update is rolled back instead.
+    if _staged:
+        _ht = threading.Timer(UPDATE_HEALTHY_SECS, staged_update_mark_healthy, args=(_checkout_dir,))
+        _ht.daemon = True
+        _ht.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

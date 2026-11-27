@@ -118,6 +118,63 @@ class AISessionForensics(unittest.TestCase):
         self.assertIsNotNone(agent.match_credential_read("cat ~/.aws/credentials"))
         self.assertIsNotNone(agent.match_credential_read("/Users/x/.kube/config"))
 
+    def test_findings_tagged_reported_evidence(self):
+        # Every session finding is reconstructed from the agent's own transcript, not host telemetry;
+        # it must be tagged evidence="reported" so the console can label it a reported attempt.
+        c = self._collector()
+        s = c.session_detail("Claude Code:sess")["session"]
+        self.assertTrue(s["findings"])
+        self.assertTrue(all(f.get("evidence") == "reported" for f in s["findings"]))
+
+
+class AISessionTruncation(unittest.TestCase):
+    """Past the per-session turn cap, prompts stop being surfaced — but a later tool call must NOT be
+    misattributed to the last displayed prompt, and the session must report that it was truncated."""
+
+    def _collector(self, max_turns):
+        tmp = tempfile.mkdtemp()
+        proj = os.path.join(tmp, ".claude", "projects", "proj")
+        os.makedirs(proj)
+        lines = []
+        t = 0
+        # max_turns + 2 prompts; the LAST prompt (well past the cap) issues a uniquely-named tool call.
+        for i in range(max_turns + 2):
+            lines.append(_u("prompt number %d" % i, "2026-11-24T10:%02d:00Z" % (t % 60)))
+            t += 1
+            cmd = "SENTINEL_LATE_CALL" if i == max_turns + 1 else "ls -la"
+            lines.append(_a("Bash", {"command": cmd}, "2026-11-24T10:%02d:30Z" % (t % 60)))
+            t += 1
+        with open(os.path.join(proj, "sess.jsonl"), "w", encoding="utf-8") as fh:
+            for obj in lines:
+                fh.write(json.dumps(obj) + "\n")
+        c = agent.AIAuditCollector(enabled=True, capture_prompts=True)
+        c._homes = lambda: [tmp]
+        c._collect()
+        return c
+
+    def test_truncation_flagged_and_no_misattribution(self):
+        orig = agent.AI_SESSION_MAX_TURNS
+        agent.AI_SESSION_MAX_TURNS = 5
+        try:
+            c = self._collector(max_turns=5)
+            s = c.session_detail("Claude Code:sess")["session"]
+            self.assertTrue(s["turns_truncated"])
+            self.assertEqual(s["turns_shown"], 5)
+            self.assertEqual(len(s["turns"]), 5)
+            self.assertEqual(s["prompts"], 7)             # all prompts still counted
+            # The sentinel call came from a prompt past the cap — it must appear in NO surfaced turn.
+            self.assertNotIn("SENTINEL_LATE_CALL", json.dumps(s["turns"]))
+            # ...but the session-global tool_calls tally still includes it.
+            self.assertEqual(s["tool_calls"], 7)
+        finally:
+            agent.AI_SESSION_MAX_TURNS = orig
+
+    def test_not_truncated_when_under_cap(self):
+        c = AISessionForensics()._collector()
+        s = c.session_detail("Claude Code:sess")["session"]
+        self.assertFalse(s["turns_truncated"])
+        self.assertEqual(s["turns_shown"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

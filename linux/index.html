@@ -4589,9 +4589,11 @@ function aiSessionDrawDetail(d){
   // findings summary
   if(finds.length){
     h+='<div style="margin:10px 0 4px"><b>Findings in this session</b></div>';
-    h+=finds.map(f=>{ const col=aiSevColor(f.severity);
+    h+='<div class="hint" style="margin:0 0 6px">Reported from the agent’s own transcript — the tool call named a credential store or ran a flagged command. This is what the session <i>recorded doing</i>, not host telemetry proving the bytes were read.</div>';
+    h+=finds.map(f=>{ const col=aiSevColor(f.severity), rep=(f.evidence==='reported');
       return '<div style="border-left:3px solid '+col+';padding:5px 9px;margin:4px 0;background:var(--panel)">'+
         aiChip((f.kind==='credential-read'?'credential read':'dangerous command'),col)+' '+
+        (rep?aiChip('reported','var(--muted)')+' ':'')+
         '<b>'+esc(f.label||'')+'</b>'+(f.mitre?(' '+aiChip(f.mitre,'var(--muted)')):'')+
         ' <span class="hint">via '+esc(f.tool||'?')+'</span>'+
         '<div><code style="word-break:break-all">'+esc(f.detail||'')+'</code></div></div>'; }).join('');
@@ -4600,6 +4602,11 @@ function aiSessionDrawDetail(d){
   }
   // per-prompt timeline
   h+='<div style="margin:12px 0 4px"><b>Timeline</b> <span class="hint">· prompt → tool calls</span></div>';
+  if(s.turns_truncated){
+    h+='<div class="hint" style="margin:0 0 6px;border-left:3px solid var(--muted);padding:3px 9px;background:var(--panel)">'+
+       'Long session — showing the first '+(s.turns_shown||turns.length)+' of '+(s.prompts||0)+
+       ' prompts. Later prompts and their tool calls are omitted from this timeline; findings above still cover the whole session.</div>';
+  }
   if(!turns.length){ h+='<div class="hint">No prompts recorded.</div>'; }
   turns.forEach((t,i)=>{
     h+='<div style="margin:8px 0;border:1px solid var(--line);border-radius:7px;overflow:hidden">';

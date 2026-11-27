@@ -22,6 +22,13 @@ done
 DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 LAUNCHER="$DIR/Launch Mac Scouter.command"
 CMD="scouter"
+# The aggregator (Scouter Mesh) is a separate product and is NOT part of the public agent
+# distribution, so its launcher is usually absent. Define the names unconditionally (so `set -u`
+# never trips on them), but only ever link or advertise the mesh command when its launcher is
+# actually bundled alongside this one.
+MESHCMD="scouter-mesh"
+MESH="$DIR/Launch Scouter Mesh.command"
+AGG=""; [ -f "$MESH" ] && AGG="   ·   aggregator:  $MESHCMD"
 
 echo "Mac Scouter installer"
 echo "  tool folder: $DIR"
@@ -80,7 +87,8 @@ if command -v "$CMD" >/dev/null 2>&1; then
   case "${ans:-N}" in [Yy]*) : ;; *) echo "  left as-is."; exit 0 ;; esac
 fi
 
-printf "Add '%s' and '%s' commands to your PATH so you can launch from any terminal? [Y/n] " "$CMD" "$MESHCMD"
+NAMES="'$CMD'"; [ -f "$MESH" ] && NAMES="'$CMD' and '$MESHCMD'"
+printf "Add %s to your PATH so you can launch from any terminal? [Y/n] " "$NAMES"
 read -r ans
 case "${ans:-Y}" in [Nn]*) echo "Skipped — you can still double-click 'Launch Mac Scouter.command'."; exit 0 ;; esac
 
@@ -91,7 +99,7 @@ link_into() {
 # 1) /usr/local/bin if we can write it (directly or via sudo)
 if { [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; } || mkdir -p /usr/local/bin 2>/dev/null; then
   if [ -w /usr/local/bin ]; then
-    link_into /usr/local/bin; echo "Done. Open a new terminal (or now) and run:  $CMD   ·   aggregator:  $MESHCMD"; exit 0
+    link_into /usr/local/bin; echo "Done. Open a new terminal (or now) and run:  $CMD$AGG"; exit 0
   fi
 fi
 if command -v sudo >/dev/null 2>&1; then
@@ -99,7 +107,7 @@ if command -v sudo >/dev/null 2>&1; then
   if sudo mkdir -p /usr/local/bin && sudo ln -sf "$LAUNCHER" "/usr/local/bin/$CMD"; then
     echo "  ✓ installed: /usr/local/bin/$CMD (via sudo)"
     if [ -f "$MESH" ]; then sudo ln -sf "$MESH" "/usr/local/bin/$MESHCMD" && echo "  ✓ installed: /usr/local/bin/$MESHCMD (via sudo)"; fi
-    echo "Done. Run:  $CMD   ·   aggregator:  $MESHCMD"; exit 0
+    echo "Done. Run:  $CMD$AGG"; exit 0
   fi
   echo "  (sudo declined or failed — falling back to a per-user location)"
 fi
@@ -117,8 +125,8 @@ case ":$PATH:" in
     line='export PATH="$HOME/.local/bin:$PATH"'
     grep -qsF "$line" "$rc" 2>/dev/null || printf '\n# added by Mac Scouter installer\n%s\n' "$line" >> "$rc"
     echo "  ✓ added ~/.local/bin to PATH in $rc"
-    echo "Open a NEW terminal, then run:  $CMD   ·   aggregator:  $MESHCMD"
+    echo "Open a NEW terminal, then run:  $CMD$AGG"
     exit 0
     ;;
 esac
-echo "Done. Run:  $CMD   ·   aggregator:  $MESHCMD"
+echo "Done. Run:  $CMD$AGG"
